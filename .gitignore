@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+*.egg
+.venv
+.DS_Store
+.scratch
+.pytest_cache
+.idea
+.claude
+.data
+.ruff_cache
