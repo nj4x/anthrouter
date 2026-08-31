@@ -19,6 +19,7 @@ from .http_util import (
     RETRY_MAX_DELAY,
     UpstreamTarget,
     handle_error_response,
+    parse_ratelimit_headers,
     read_sse_lines,
     retry_delay,
     should_retry,
@@ -108,7 +109,8 @@ class AnthropicTransport:
         self.target = UpstreamTarget(base_url)
 
     def _send_with_retries(self, payload: dict, credentials: dict, stream: bool,
-                           path: str = MESSAGES_PATH, method: str = 'POST'):
+                           path: str = MESSAGES_PATH, method: str = 'POST',
+                           ratelimit_out: dict | None = None):
         body_bytes = build_body(payload)
         betas = merge_betas(payload)
         headers = _request_headers(credentials, betas, stream)
@@ -138,6 +140,8 @@ class AnthropicTransport:
                 ) from exc
 
             if resp.status == 200:
+                if ratelimit_out is not None:
+                    ratelimit_out.update(parse_ratelimit_headers(resp))
                 return conn, resp
 
             if should_retry(resp.status, resp) and attempt < MAX_RETRIES:
@@ -175,9 +179,11 @@ class AnthropicTransport:
         raise AnthropicRequestError('Upstream request failed', error_type='api_error',
                                     status_code=502)
 
-    def send_message(self, payload: dict, credentials: dict, config=None) -> dict:
+    def send_message(self, payload: dict, credentials: dict, config=None,
+                     ratelimit_out: dict | None = None) -> dict:
         stream = bool(payload.get('stream'))
-        conn, resp = self._send_with_retries(payload, credentials, stream=stream)
+        conn, resp = self._send_with_retries(payload, credentials, stream=stream,
+                                             ratelimit_out=ratelimit_out)
         try:
             body = resp.read()
         finally:
@@ -192,8 +198,10 @@ class AnthropicTransport:
                 status_code=502,
             ) from exc
 
-    def send_message_stream(self, payload: dict, credentials: dict, config=None):
-        conn, resp = self._send_with_retries(payload, credentials, stream=True)
+    def send_message_stream(self, payload: dict, credentials: dict, config=None,
+                            ratelimit_out: dict | None = None):
+        conn, resp = self._send_with_retries(payload, credentials, stream=True,
+                                             ratelimit_out=ratelimit_out)
         try:
             pending = ''
             for line in read_sse_lines(resp):
