@@ -3,6 +3,74 @@
 import json
 
 
+def anthropic_error_payload(type_, message):
+    return {
+        'type': 'error',
+        'error': {
+            'type': type_,
+            'message': message,
+        }
+    }
+
+
+class AnthropicRequestError(Exception):
+    """A client-facing failure, shaped as an Anthropic error envelope.
+
+    ``connection_error`` marks a transport-level failure (refused connection,
+    timeout, TLS error) as distinct from an HTTP response the upstream actually
+    sent.
+    """
+
+    def __init__(self, message, error_type='invalid_request_error', status_code=400,
+                 retry_after=None, connection_error=False):
+        super().__init__(message)
+        self.message = message
+        self.error_type = error_type
+        self.status_code = status_code
+        self.retry_after = retry_after
+        self.connection_error = connection_error
+
+
+_ALL_THINKING_TYPES = frozenset({'thinking', 'redacted_thinking'})
+
+
+def strip_all_thinking_blocks(messages):
+    """Remove ALL ``thinking`` and ``redacted_thinking`` blocks from history.
+
+    Used as a recovery fallback when Anthropic rejects a thinking block with
+    HTTP 400 after a model-tier switch (opus signatures/data are invalid for
+    sonnet/haiku and vice versa).  Both ``thinking`` (rejected as "Invalid
+    `signature`") and ``redacted_thinking`` (rejected as "Invalid `data`") are
+    model-specific and must be stripped together.  Conversation alternation is
+    maintained by inserting an empty text block when all content blocks in a
+    message were thinking blocks.
+
+    Returns the original list unchanged when nothing was stripped.
+    """
+    if not messages:
+        return messages
+    result = []
+    changed = False
+    for msg in messages:
+        if not isinstance(msg, dict) or msg.get('role') != 'assistant':
+            result.append(msg)
+            continue
+        content = msg.get('content')
+        if not isinstance(content, list):
+            result.append(msg)
+            continue
+        filtered = [
+            b for b in content
+            if not (isinstance(b, dict) and b.get('type') in _ALL_THINKING_TYPES)
+        ]
+        if len(filtered) == len(content):
+            result.append(msg)
+            continue
+        changed = True
+        result.append({**msg, 'content': filtered or [{'type': 'text', 'text': ''}]})
+    return result if changed else messages
+
+
 def _count_chars(obj):
     """Recursively sum all string lengths in a nested structure."""
     if isinstance(obj, str):
