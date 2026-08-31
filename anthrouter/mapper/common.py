@@ -1,5 +1,7 @@
 """Shared helpers for Anthropic payload shaping."""
 
+import json
+
 
 def _count_chars(obj):
     """Recursively sum all string lengths in a nested structure."""
@@ -59,3 +61,70 @@ def estimate_input_tokens(payload):
         tokens += _TOOL_USE_BASE_OVERHEAD + _TOOL_FRAMING_OVERHEAD * len(tools)
 
     return max(1, tokens)
+
+
+def system_content_str(system):
+    """Canonical serialization of a ``system`` field, or None if unserializable.
+
+    The single definition every hash of a system prompt goes through, so the
+    original and sanitized digests are always comparable.
+    """
+    if isinstance(system, str):
+        return system
+    if isinstance(system, list):
+        return json.dumps(system, sort_keys=True, ensure_ascii=False)
+    return None
+
+
+# Prefixes of system blocks that are known-safe to drop wholesale.  A block is
+# removed only when its text starts with one of these; anything else passes
+# through untouched however volatile it looks, because dropping unrecognised
+# content is undebuggable from the client side.  Additions here are deliberate
+# code changes, not configuration (ADR-0029).
+#
+# ``x-anthropic-billing-header:`` is CLI telemetry (cc_version, cc_entrypoint,
+# cch, cc_prompt_id).  The model never reads it, and since 2026-08-21 it carries
+# a per-request ``cc_prompt_id`` UUID that invalidates the cached prefix on
+# every turn.
+#
+# Matching is by prefix, not exact block equality: a client system prompt that
+# happens to start its own text with this literal string would also be
+# dropped.  Accepted — the string is CLI-internal telemetry syntax, vanishingly
+# unlikely to occur as the start of genuine user content.
+VOLATILE_SYSTEM_BLOCK_PREFIXES = (
+    'x-anthropic-billing-header:',
+)
+
+
+def strip_volatile_system_blocks(system):
+    """Drop allowlisted cache-hostile telemetry blocks from a ``system`` field.
+
+    Prompt caching matches on a prefix, so a block carrying a per-request unique
+    value at position 0 invalidates the whole cached prefix every turn.  Cache
+    writes bill at 1.25x input and reads at 0.1x, making each displaced token
+    12.5x more expensive.
+
+    Returns ``(system, stripped)``.  The original object is returned unchanged
+    when nothing matched, when ``system`` is a bare string, or when it is empty.
+    Dropping every block is allowed: an all-telemetry system field legitimately
+    sanitizes to nothing, and an empty list is treated the same as an absent
+    field downstream.
+    """
+    if not system or not isinstance(system, list):
+        return system, False
+    kept = [b for b in system if not _is_volatile_system_block(b)]
+    if len(kept) == len(system):
+        return system, False
+    return kept, True
+
+
+def _is_volatile_system_block(block):
+    if not isinstance(block, dict):
+        return False
+    text = block.get('text')
+    if not isinstance(text, str):
+        return False
+    stripped = text.lstrip()
+    return any(
+        stripped.startswith(prefix) for prefix in VOLATILE_SYSTEM_BLOCK_PREFIXES
+    )
