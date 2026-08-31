@@ -116,6 +116,47 @@ def parse_retry_after(resp) -> float | None:
     return None
 
 
+_RATELIMIT_HEADERS = (
+    ('requests_remaining', 'anthropic-ratelimit-requests-remaining'),
+    ('tokens_remaining', 'anthropic-ratelimit-tokens-remaining'),
+    ('input_tokens_remaining', 'anthropic-ratelimit-input-tokens-remaining'),
+    ('output_tokens_remaining', 'anthropic-ratelimit-output-tokens-remaining'),
+)
+
+_RATELIMIT_RESET_HEADERS = (
+    'anthropic-ratelimit-tokens-reset',
+    'anthropic-ratelimit-requests-reset',
+    'anthropic-ratelimit-input-tokens-reset',
+)
+
+
+def parse_ratelimit_headers(resp) -> dict:
+    """Extract the ``anthropic-ratelimit-*`` window from an upstream response.
+
+    These headers are the only passive quota signal available to a proxy that
+    forwards someone else's credential — an opaque OAuth token cannot be
+    introspected and the usage API needs an admin key anthrouter never holds.
+    Missing or unparseable values are omitted rather than zeroed.
+    """
+    if resp is None:
+        return {}
+    out: dict = {}
+    for key, header in _RATELIMIT_HEADERS:
+        raw = resp.getheader(header)
+        if raw is None:
+            continue
+        try:
+            out[key] = int(raw)
+        except (TypeError, ValueError):
+            continue
+    for header in _RATELIMIT_RESET_HEADERS:
+        raw = resp.getheader(header)
+        if raw:
+            out['reset_at'] = raw
+            break
+    return out
+
+
 def retry_delay(resp, attempt: int) -> float:
     """Seconds to sleep before the next retry: upstream guidance, else backoff."""
     delay = parse_retry_after(resp)

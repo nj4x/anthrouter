@@ -13,6 +13,10 @@ def anthropic_error_payload(type_, message):
     }
 
 
+def sse_event(event_type, payload):
+    return 'event: %s\ndata: %s\n\n' % (event_type, json.dumps(payload))
+
+
 class AnthropicRequestError(Exception):
     """A client-facing failure, shaped as an Anthropic error envelope.
 

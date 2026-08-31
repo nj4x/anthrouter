@@ -1,9 +1,9 @@
-import dataclasses
-import json
 import logging
 import sys
+from pathlib import Path
 
 from .config import parse_args
+from .server import create_server
 
 
 def _setup_logging(level: str, log_file: str) -> None:
@@ -20,7 +20,20 @@ def _setup_logging(level: str, log_file: str) -> None:
 def main(argv=None) -> int:
     cfg = parse_args(argv)
     _setup_logging(cfg.log_level, cfg.log_file)
-    print(json.dumps(dataclasses.asdict(cfg), indent=2, sort_keys=True))
+    logger = logging.getLogger(__name__)
+
+    if cfg.db_path:
+        Path(cfg.db_path).parent.mkdir(parents=True, exist_ok=True)
+
+    server = create_server(cfg)
+    logger.info('anthrouter listening on %s:%d, forwarding to %s',
+                cfg.host, cfg.port, cfg.upstream_base_url)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        logger.info('Shutting down')
+    finally:
+        server.server_close()
     return 0
 
 

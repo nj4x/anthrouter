@@ -17,7 +17,11 @@ import dataclasses
 import hashlib
 import logging
 
-from .mapper.common import strip_volatile_system_blocks, system_content_str
+from .mapper.common import (
+    VOLATILE_SYSTEM_BLOCK_PREFIXES,
+    strip_volatile_system_blocks,
+    system_content_str,
+)
 from .prompt_volatility import TRACKER
 
 logger = logging.getLogger(__name__)
@@ -32,6 +36,30 @@ class SanitizeResult:
     sanitized_sha256: str | None = None
     sanitized_content: str | None = None
     flagged: list[dict] = dataclasses.field(default_factory=list)
+    stripped_blocks: list[dict] = dataclasses.field(default_factory=list)
+
+
+_PREVIEW_LIMIT = 200
+
+
+def _describe_stripped(system) -> list[dict]:
+    """Describe the allowlisted blocks a strip pass removed, for the event log."""
+    described = []
+    for block in system:
+        if not isinstance(block, dict):
+            continue
+        text = block.get('text')
+        if not isinstance(text, str):
+            continue
+        head = text.lstrip()
+        for prefix in VOLATILE_SYSTEM_BLOCK_PREFIXES:
+            if head.startswith(prefix):
+                described.append({
+                    'block_type': prefix,
+                    'preview': text[:_PREVIEW_LIMIT],
+                })
+                break
+    return described
 
 
 def sanitize_system_prompt(payload, mode, session_id, tracker=None, log_tag='') -> SanitizeResult:
@@ -61,6 +89,7 @@ def sanitize_system_prompt(payload, mode, session_id, tracker=None, log_tag='') 
             if stripped:
                 payload['system'] = sanitized
                 result.dropped = len(system) - len(sanitized)
+                result.stripped_blocks = _describe_stripped(system)
                 logger.info(
                     '%s Sanitized system prompt: dropped %d volatile telemetry '
                     'block(s) to restore prompt-cache prefix reuse',
