@@ -1,8 +1,9 @@
 __pycache__/
 *.pyc
 *.egg-info/
-dist/
-build/
+/dist/
+/build/
+node_modules/
 *.egg
 .venv
 .DS_Store

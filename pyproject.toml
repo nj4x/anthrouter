@@ -21,6 +21,10 @@ include = [
     "anthrouter.mapper*",
 ]
 
+# The installer only ever pip-installs, so the built SPA ships in the wheel.
+[tool.setuptools.package-data]
+anthrouter = ["ui/dist/**/*"]
+
 [tool.ruff]
 target-version = "py310"
 

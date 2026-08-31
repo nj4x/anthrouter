@@ -65,11 +65,31 @@ Settings live in `~/.anthrouter/config.env` (every one has a matching flag; see
 Uninstall is idempotent: every restore reads the live file or the manifest, so
 re-running it corrects a run that failed part-way.
 
+## Admin UI
+
+`--enable-ui` turns on the read-only `/admin/*` JSON API and serves the built
+SPA at `/ui/`. Four views: the request log (searchable over prompt and response
+text), routing decisions, sanitizer strip events, and the rate-limit window.
+There are no runtime controls — with one backend there is nothing to switch.
+
+Both surfaces are unauthenticated and expose conversation text, so keep the
+server bound to loopback unless something else in front of it authenticates.
+`--enable-ui` implies a DB: without `--db-path` it defaults to
+`~/.anthrouter/anthrouter.db`.
+
 ## Development
 
 ```bash
 make test           # pytest
+make ui-test        # vitest + oxlint
+make ui-build       # rebuild anthrouter/ui/dist (commit the result)
 ```
+
+`anthrouter/ui/dist` is checked in, because the server ships it and the
+installer only ever runs `pip install`. After changing anything under
+`anthrouter/ui/src`, rebuild and commit the generated bundle. For UI work
+against a live proxy, `npm run dev` in `anthrouter/ui` proxies `/admin` to
+`127.0.0.1:8083`.
 
 Design decisions are recorded in `docs/adr/`; installer behavior is
 ADR-0001.

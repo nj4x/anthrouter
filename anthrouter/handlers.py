@@ -16,13 +16,17 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import mimetypes
 import re
 import threading
 import time
+import urllib.parse
 import uuid
 from dataclasses import replace
 from http.server import BaseHTTPRequestHandler
+from pathlib import Path
 
+from . import admin
 from .mapper import AnthropicRequestError, anthropic_error_payload, sse_event
 from .model_router import (
     RoutingTarget,
@@ -437,6 +441,14 @@ def _extract_user_prompt_text(payload: dict) -> str | None:
 # Handler
 # ---------------------------------------------------------------------------
 
+def _parse_query(query_string: str) -> dict:
+    """Flatten a query string to one value per key; last occurrence wins."""
+    return {
+        key: values[-1]
+        for key, values in urllib.parse.parse_qs(query_string, keep_blank_values=True).items()
+    }
+
+
 class ProxyRequestHandler(BaseHTTPRequestHandler):
     # Injected by the server factory.
     config = None
@@ -456,11 +468,54 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         self._reset_request_state()
-        path = self.path.split('?')[0].rstrip('/')
+        raw_path, _, query_string = self.path.partition('?')
+        path = raw_path.rstrip('/')
         if path == '/health':
             self._send_json(200, {'status': 'ok'})
-        else:
+            return
+        if not (path.startswith('/admin') or path.startswith('/ui')):
             self._send_json(404, anthropic_error_payload('not_found_error', 'Not found'))
+            return
+        if not self.config.enable_ui:
+            self._send_json(404, anthropic_error_payload('not_found_error',
+                                                         'Admin UI not enabled'))
+            return
+        if path.startswith('/ui'):
+            self._serve_ui_file(raw_path)
+            return
+        try:
+            status, body = admin.handle_get(
+                path or '/admin', _parse_query(query_string), self.request_db, self.config,
+            )
+            self._send_json(status, body)
+        except Exception:
+            logger.exception('%s Admin GET failed', self._log_tag())
+            self._send_json(500, anthropic_error_payload('api_error', 'Admin handler failed'))
+
+    def _serve_ui_file(self, raw_path: str):
+        """Serve the built SPA from ``anthrouter/ui/dist``, index.html as fallback."""
+        ui_dist = (Path(__file__).parent / 'ui' / 'dist').resolve()
+        index_path = ui_dist / 'index.html'
+        relative = raw_path[len('/ui'):].lstrip('/') or 'index.html'
+        file_path = (ui_dist / relative).resolve()
+
+        # A resolved path outside dist means the request walked out with '..'.
+        if not file_path.is_relative_to(ui_dist) or not file_path.is_file():
+            file_path = index_path
+        if not file_path.is_file():
+            self._send_json(404, anthropic_error_payload(
+                'not_found_error', 'UI bundle not built'))
+            return
+
+        mime_type = mimetypes.guess_type(str(file_path))[0] or 'application/octet-stream'
+        content = file_path.read_bytes()
+        self.send_response(200)
+        self.send_header('Content-Type', mime_type)
+        self.send_header('Content-Length', str(len(content)))
+        self.send_header('Cache-Control', 'no-cache' if file_path == index_path
+                         else 'public, max-age=31536000')
+        self.end_headers()
+        self.wfile.write(content)
 
     def _reset_request_state(self) -> None:
         # Reset per request: HTTP keep-alive reuses one handler instance across

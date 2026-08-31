@@ -412,6 +412,102 @@ class RequestDB:
         ).fetchone()
         return dict(row) if row else None
 
+    def get_routing_decisions(self, limit: int = 50, offset: int = 0) -> list[dict]:
+        """Requests the router reached a decision on, most recent first."""
+        rows = self._read_conn().execute(
+            """SELECT id, request_ts, session_id, requested_model, routed_model,
+                      classification, reason_code, applied, model_tier,
+                      estimated_input_tokens, input_tokens, output_tokens,
+                      cost_estimate, net_savings_usd, classifier_overhead_usd,
+                      classifier_model, classifier_format, classifier_summary_json,
+                      classifier_raw_response, status, duration_ms
+                 FROM requests
+                WHERE classification IS NOT NULL OR reason_code IS NOT NULL
+                ORDER BY request_ts DESC, id DESC LIMIT ? OFFSET ?""",
+            (limit, offset),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_routing_summary(self) -> dict:
+        """Counts and savings totals across every routed request."""
+        row = self._read_conn().execute(
+            """SELECT COUNT(*)                                    AS total,
+                      SUM(CASE WHEN applied = 1 THEN 1 ELSE 0 END) AS applied,
+                      SUM(CASE WHEN classification = 'trivial'  THEN 1 ELSE 0 END) AS trivial,
+                      SUM(CASE WHEN classification = 'standard' THEN 1 ELSE 0 END) AS standard,
+                      SUM(CASE WHEN classification = 'deep'     THEN 1 ELSE 0 END) AS deep,
+                      SUM(net_savings_usd)         AS net_savings_usd,
+                      SUM(classifier_overhead_usd) AS classifier_overhead_usd
+                 FROM requests"""
+        ).fetchone()
+        return dict(row)
+
+    def get_recent_sanitizer_events(self, limit: int = 50, offset: int = 0) -> list[dict]:
+        """Sanitizer events across all requests, most recent first."""
+        rows = self._read_conn().execute(
+            """SELECT e.id, e.request_id, e.event_ts, e.block_type,
+                      e.is_allowlisted, e.payload_preview,
+                      r.session_id, r.requested_model,
+                      r.system_prompt_sha256, r.system_prompt_sanitized_sha256
+                 FROM sanitizer_events e
+                 JOIN requests r ON r.id = e.request_id
+                ORDER BY e.id DESC LIMIT ? OFFSET ?""",
+            (limit, offset),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_sanitizer_summary(self) -> dict:
+        """Event totals plus how many requests the sanitizer actually changed."""
+        conn = self._read_conn()
+        row = conn.execute(
+            """SELECT COUNT(*)                                            AS total_events,
+                      COUNT(DISTINCT request_id)                          AS requests_with_events,
+                      SUM(CASE WHEN is_allowlisted = 1 THEN 1 ELSE 0 END) AS allowlisted,
+                      COUNT(DISTINCT block_type)                          AS distinct_block_types
+                 FROM sanitizer_events"""
+        ).fetchone()
+        changed = conn.execute(
+            """SELECT COUNT(*) AS n FROM requests
+                WHERE system_prompt_sanitized_sha256 IS NOT NULL
+                  AND system_prompt_sanitized_sha256 != system_prompt_sha256"""
+        ).fetchone()
+        summary = dict(row)
+        summary['requests_changed'] = changed['n']
+        return summary
+
+    def get_latest_ratelimit(self) -> dict | None:
+        """Most recent response that carried an ``anthropic-ratelimit-*`` header."""
+        row = self._read_conn().execute(
+            """SELECT request_ts, ratelimit_requests_remaining,
+                      ratelimit_tokens_remaining, ratelimit_input_tokens_remaining,
+                      ratelimit_output_tokens_remaining, ratelimit_reset_at
+                 FROM requests
+                WHERE ratelimit_requests_remaining IS NOT NULL
+                   OR ratelimit_tokens_remaining IS NOT NULL
+                   OR ratelimit_reset_at IS NOT NULL
+                ORDER BY request_ts DESC, id DESC LIMIT 1"""
+        ).fetchone()
+        return dict(row) if row else None
+
+    def get_stats(self) -> dict:
+        """Whole-database totals for the UI header."""
+        row = self._read_conn().execute(
+            """SELECT COUNT(*)                                              AS requests,
+                      SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END)      AS errors,
+                      SUM(CASE WHEN status = 'rate_limited' THEN 1 ELSE 0 END) AS rate_limited,
+                      COUNT(DISTINCT session_id)                            AS sessions,
+                      SUM(input_tokens)           AS input_tokens,
+                      SUM(output_tokens)          AS output_tokens,
+                      SUM(cache_read_tokens)      AS cache_read_tokens,
+                      SUM(cache_creation_tokens)  AS cache_creation_tokens,
+                      SUM(cost_estimate)          AS cost_estimate,
+                      SUM(cache_savings_usd)      AS cache_savings_usd,
+                      MIN(request_ts)             AS first_request_ts,
+                      MAX(request_ts)             AS last_request_ts
+                 FROM requests"""
+        ).fetchone()
+        return dict(row)
+
     # -- retention ----------------------------------------------------------
 
     def _maybe_run_retention(self) -> None:
