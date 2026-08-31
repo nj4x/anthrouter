@@ -103,7 +103,8 @@ class Config:
     sanitize_system_prompt: str = 'strip'  # off | warn | strip
     sse_keepalive_interval: float = 10.0
     db_path: str | None = None   # Path to SQLite DB file; None disables DB recording
-    enable_ui: bool = False      # Whether /admin/* and /ui/* endpoints are active
+    db_retention_days: int = 30  # Prune request rows older than this; 0 keeps forever
+    enable_ui: bool = False     # Whether /admin/* and /ui/* endpoints are active
 
 
 def parse_args(argv=None) -> Config:
@@ -326,6 +327,12 @@ def parse_args(argv=None) -> Config:
                    help='Path to SQLite DB for request and routing records'
                         ' (default: ~/.anthrouter/anthrouter.db when --enable-ui is set,'
                         ' env: ANTHROUTER_DB_PATH)')
+    p.add_argument('--db-retention-days', dest='db_retention_days', type=int,
+                   default=int(os.environ.get('ANTHROUTER_DB_RETENTION_DAYS', '30')),
+                   help='Delete request rows older than this many days, pruned'
+                        ' opportunistically at insert (at most once per 24h);'
+                        ' 0 keeps rows forever (default: 30,'
+                        ' env: ANTHROUTER_DB_RETENTION_DAYS)')
     p.add_argument('--enable-ui', dest='enable_ui',
                    action='store_true', default=False,
                    help='Enable the read-only observability API and web UI at /admin/* and /ui/*')
@@ -367,6 +374,8 @@ def parse_args(argv=None) -> Config:
         p.error('--auto-model-routing-classifier-model must be a non-empty string')
     if cfg.sse_keepalive_interval < 0:
         p.error('--sse-keepalive-interval must be >= 0')
+    if cfg.db_retention_days < 0:
+        p.error('--db-retention-days must be >= 0')
     if cfg.auto_model_routing_long_context_threshold < 0:
         p.error('--auto-model-routing-long-context-threshold must be >= 0')
     prior_limit = cfg.auto_model_routing_prior_response_summary_limit

@@ -15,6 +15,7 @@ def test_defaults():
     assert cfg.sanitize_system_prompt == 'strip'
     assert cfg.lock_requested_model == 'off'
     assert cfg.db_path is None
+    assert cfg.db_retention_days == 30
     assert cfg.anthrouter_home == str(Path.home() / '.anthrouter')
     assert cfg.auto_model_routing_classification == {
         'trivial': 'haiku', 'standard': 'sonnet', 'deep': 'opus',
@@ -29,6 +30,15 @@ def test_env_overrides(monkeypatch):
     assert cfg.port == 9001
     assert cfg.auto_model_routing is True
     assert cfg.sanitize_system_prompt == 'warn'
+
+
+def test_db_retention_days_zero_is_allowed():
+    assert parse_args(['--db-retention-days', '0']).db_retention_days == 0
+
+
+def test_negative_db_retention_days_rejected():
+    with pytest.raises(SystemExit):
+        parse_args(['--db-retention-days', '-1'])
 
 
 def test_upstream_base_url_trailing_slash_stripped():
