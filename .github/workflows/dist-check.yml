@@ -1,0 +1,28 @@
+name: dist freshness
+
+on:
+  pull_request:
+    paths:
+      - anthrouter/ui/src/**
+      - anthrouter/ui/package.json
+      - .github/workflows/dist-check.yml
+  push:
+    branches:
+      - main
+    paths:
+      - anthrouter/ui/src/**
+      - anthrouter/ui/package.json
+      - .github/workflows/dist-check.yml
+
+jobs:
+  dist-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: cd anthrouter/ui && npm ci
+      - run: cd anthrouter/ui && npm run build
+      - run: git diff --exit-code anthrouter/ui/dist
+        name: verify dist up-to-date
