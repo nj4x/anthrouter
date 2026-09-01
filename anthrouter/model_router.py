@@ -361,6 +361,13 @@ ReasonCode = Literal[
     'classifier_deep',
     'classifier_trivial_bumped',
     'classifier_standard_bumped',
+    # Post-blend divergence (ADR 0003): raw user-prompt tier != post-blend tier
+    'classifier_trivial_blended_standard',
+    'classifier_trivial_blended_deep',
+    'classifier_standard_blended_trivial',
+    'classifier_standard_blended_deep',
+    'classifier_deep_blended_standard',
+    'classifier_deep_blended_trivial',
     'classifier_failed',
     'classifier_invalid',
     # Rules-mode reason codes
@@ -1456,7 +1463,6 @@ def _dispatch_classifier_mode(
 
     # Exponential backoff: 1s, 2s, 4s, 8s (max 4 retries)
     backoff_delays = [1.0, 2.0, 4.0, 8.0]
-    last_exc = None
     response = None
 
     for attempt in range(len(backoff_delays) + 1):
@@ -1487,7 +1493,6 @@ def _dispatch_classifier_mode(
             # Success — break out of retry loop
             break
         except Exception as exc:
-            last_exc = exc
             # Log full exception with status code if available (e.g., 429 rate limit)
             status_code = getattr(exc, 'status_code', None)
             error_type = getattr(exc, 'error_type', None)
@@ -2000,6 +2005,10 @@ def route_model(
         blend_user_score = blend_user_score_val
         blend_weighted_score = blend_weighted_score_val
         score_or_label_or_tier = label_or_tier
+        # The blend, not the raw score, selects the routed model — report it.
+        # `classification` stays the raw pre-blend tier for auditability.
+        if user_prompt_tier is not None and label_or_tier != user_prompt_tier:
+            dispatch_reason_str = f'classifier_{user_prompt_tier}_blended_{label_or_tier}'
         dispatch_reason = dispatch_reason_str  # type: ignore[assignment]
 
     # Map result to the final model string

@@ -4480,6 +4480,116 @@ class TestWeightedBlendRouting:
         assert backend.send_classifier_message.call_count == 1
 
 
+class TestBlendedReasonCodes:
+    """ADR 0003: reason_code reports the post-blend tier when it diverges."""
+
+    def setup_method(self):
+        with _sys_prompt_cache_lock:
+            _sys_prompt_cache.clear()
+
+    @staticmethod
+    def _raw_score_response(score: int) -> dict:
+        return {'content': [{'type': 'text', 'text': str(score)}], 'stop_reason': 'end_turn'}
+
+    def _decide(self, user_score: int, sys_score: int,
+                sys_weight: float = 0.30, user_weight: float = 0.70):
+        backend = MagicMock()
+        backend.send_classifier_message = MagicMock(side_effect=[
+            self._raw_score_response(user_score),
+            self._raw_score_response(sys_score),
+        ])
+        target = _target(backend=backend, routing=True)
+        target.config.auto_model_routing_system_prompt_weight = sys_weight
+        target.config.auto_model_routing_user_prompt_weight = user_weight
+        payload = _payload(model='sonnet', content='do the thing',
+                           system='You are a helpful assistant.')
+        return route_model(payload, target, {})
+
+    def test_trivial_blended_standard(self):
+        """user=20/trivial, sys=90/deep, 0.30/0.70 → weighted=41/standard."""
+        decision = self._decide(20, 90)
+        assert decision.routing_weighted_score == 41
+        assert decision.reason_code == 'classifier_trivial_blended_standard'
+
+    def test_trivial_blended_deep(self):
+        decision = self._decide(20, 100, sys_weight=0.90, user_weight=0.10)
+        assert decision.routing_weighted_score == 92
+        assert decision.reason_code == 'classifier_trivial_blended_deep'
+
+    def test_standard_blended_trivial(self):
+        decision = self._decide(50, 0, sys_weight=0.90, user_weight=0.10)
+        assert decision.routing_weighted_score == 5
+        assert decision.reason_code == 'classifier_standard_blended_trivial'
+
+    def test_standard_blended_deep(self):
+        decision = self._decide(50, 100, sys_weight=0.90, user_weight=0.10)
+        assert decision.routing_weighted_score == 95
+        assert decision.reason_code == 'classifier_standard_blended_deep'
+
+    def test_deep_blended_standard(self):
+        decision = self._decide(100, 0)
+        assert decision.routing_weighted_score == 70
+        assert decision.reason_code == 'classifier_deep_blended_standard'
+
+    def test_deep_blended_trivial(self):
+        decision = self._decide(100, 0, sys_weight=0.90, user_weight=0.10)
+        assert decision.routing_weighted_score == 10
+        assert decision.reason_code == 'classifier_deep_blended_trivial'
+
+    def test_blend_agrees_keeps_unblended_code(self):
+        """user=100/deep, sys=100/deep → weighted=100/deep, no blended suffix."""
+        decision = self._decide(100, 100)
+        assert decision.routing_weighted_score == 100
+        assert decision.reason_code == 'classifier_deep'
+
+    def test_classification_column_holds_raw_pre_blend_tier(self):
+        decision = self._decide(100, 0)
+        assert decision.reason_code == 'classifier_deep_blended_standard'
+        assert decision.classification == 'deep'
+
+    def test_zero_system_weight_emits_unblended_code(self):
+        """sys_weight=0 → weighted == user score, so the tier can never diverge."""
+        decision = self._decide(20, 100, sys_weight=0.0, user_weight=1.0)
+        assert decision.routing_weighted_score == 20
+        assert decision.reason_code == 'classifier_trivial'
+
+    def test_rules_mode_unaffected(self):
+        backend = MagicMock()
+        backend.send_classifier_message = MagicMock(
+            side_effect=AssertionError('classifier must not be called in rules mode'))
+        target = _target(backend=backend, routing=True)
+        target.config.auto_model_routing_mode = 'rules'
+        payload = _payload(model='sonnet',
+                           content='redesign the auth layer for SSO and multi-tenant isolation',
+                           system='You are a helpful assistant.')
+        decision = route_model(payload, target, {})
+        assert '_blended_' not in decision.reason_code
+
+    def test_tag_mode_unaffected(self):
+        backend = MagicMock()
+        backend.send_classifier_message = MagicMock(
+            side_effect=AssertionError('classifier must not be called in tag mode'))
+        target = _target(backend=backend, routing=True)
+        target.config.auto_model_routing_mode = 'tag'
+        target.config.auto_model_routing_task_map = {'docs': 'haiku'}
+        payload = _payload(model='sonnet', content='write the docs',
+                           system='You are a helpful assistant.',
+                           metadata={'task': 'docs'})
+        decision = route_model(payload, target, {})
+        assert '_blended_' not in decision.reason_code
+
+    def test_all_six_blended_codes_in_reason_code_literal(self):
+        import typing
+        from anthrouter.model_router import ReasonCode
+        args = typing.get_args(ReasonCode)
+        for raw, blended in (
+            ('trivial', 'standard'), ('trivial', 'deep'),
+            ('standard', 'trivial'), ('standard', 'deep'),
+            ('deep', 'standard'), ('deep', 'trivial'),
+        ):
+            assert f'classifier_{raw}_blended_{blended}' in args
+
+
 class TestSystemPromptShaInRoutingSummary:
     """build_routing_summary() computes system_prompt_sha256."""
 
