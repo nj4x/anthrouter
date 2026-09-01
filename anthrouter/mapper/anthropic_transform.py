@@ -88,14 +88,14 @@ def _thinking_active(payload: dict, resolved_model: str) -> bool:
     return False
 
 
-def merge_betas(payload: dict) -> str:
+def merge_betas(payload: dict, aliases: dict[str, str] | None = None) -> str:
     """Build the outbound ``anthropic-beta`` value from the client's own betas.
 
     Returns an empty string when the client asked for none, in which case the
     header is omitted entirely rather than sent blank.
     """
     raw_model = payload.get('model') or ''
-    resolved_model = resolve_model(raw_model) if raw_model else ''
+    resolved_model = resolve_model(raw_model, aliases=aliases) if raw_model else ''
     active = _thinking_active(payload, resolved_model)
     long_context_ok = _supports_long_context(resolved_model)
     betas: list[str] = []
@@ -149,7 +149,7 @@ def _strip_thinking_edits(body: dict) -> None:
 _INTERNAL_KEYS = frozenset({'_anthropic_beta', '_anthproxy_internal_classifier'})
 
 
-def build_body(payload: dict) -> bytes:
+def build_body(payload: dict, aliases: dict[str, str] | None = None) -> bytes:
     """Serialize the outbound request body.
 
     Internal keys are removed, the model is resolved, and fields the resolved
@@ -157,7 +157,7 @@ def build_body(payload: dict) -> bytes:
     it.
     """
     body = {k: v for k, v in payload.items() if k not in _INTERNAL_KEYS}
-    body['model'] = resolve_model(payload.get('model', ''))
+    body['model'] = resolve_model(payload.get('model', ''), aliases=aliases)
 
     if not _supports_effort(body['model']):
         oc = body.get('output_config')

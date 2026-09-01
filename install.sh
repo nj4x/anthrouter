@@ -255,6 +255,7 @@ ANTHROUTER_AUTO_MODEL_ROUTING=1
 ANTHROUTER_DB_PATH=$HOME_DIR/anthrouter.db
 ANTHROUTER_DB_RETENTION_DAYS=30
 ANTHROUTER_LOG_FILE=$HOME_DIR/anthrouter.log
+# ANTHROUTER_MODEL_ALIASES=opus:claude-opus-5,sonnet:claude-sonnet-4-6
 # Flags with no environment equivalent, word-split into the command line.
 ANTHROUTER_ARGS="--enable-ui"
 CONF

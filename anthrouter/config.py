@@ -71,6 +71,42 @@ def _parse_classification_str(
     return result
 
 
+def _parse_model_aliases_str(
+    raw: str | None, p: argparse.ArgumentParser
+) -> dict[str, str]:
+    """Parse a comma-separated ``alias:model`` string into an alias table.
+
+    Returns a pure override table (no merging with defaults).  Calls ``p.error()``
+    on any malformed input.
+    """
+    if not raw or not raw.strip():
+        return {}
+    result: dict[str, str] = {}
+    for pair in raw.split(','):
+        pair = pair.strip()
+        if not pair:
+            continue
+        parts = pair.split(':', 1)
+        if len(parts) != 2:
+            p.error(
+                f'--model-aliases: malformed pair {pair!r}; '
+                'expected alias:model format'
+            )
+        alias, model = parts[0].strip(), parts[1].strip()
+        if not alias:
+            p.error(
+                f'--model-aliases: alias in pair {pair!r} '
+                'must be a non-empty string'
+            )
+        if not model:
+            p.error(
+                f'--model-aliases: model for alias {alias!r} '
+                'must be a non-empty string'
+            )
+        result[alias] = model
+    return result
+
+
 @dataclasses.dataclass
 class Config:
     host: str = '127.0.0.1'
@@ -105,6 +141,7 @@ class Config:
     db_path: str | None = None   # Path to SQLite DB file; None disables DB recording
     db_retention_days: int = 30  # Prune request rows older than this; 0 keeps forever
     enable_ui: bool = False     # Whether /admin/* and /ui/* endpoints are active
+    model_aliases: dict[str, str] = dataclasses.field(default_factory=dict)  # User-supplied alias overrides
 
 
 def parse_args(argv=None) -> Config:
@@ -336,12 +373,21 @@ def parse_args(argv=None) -> Config:
     p.add_argument('--enable-ui', dest='enable_ui',
                    action='store_true', default=False,
                    help='Enable the read-only observability API and web UI at /admin/* and /ui/*')
+    p.add_argument(
+        '--model-aliases',
+        dest='model_aliases',
+        default=os.environ.get('ANTHROUTER_MODEL_ALIASES', ''),
+        help='Comma-separated alias:model pairs overriding or extending the built-in model alias '
+             'table. Example: opus:claude-opus-5,mymodel:claude-sonnet-4-6 '
+             '(env: ANTHROUTER_MODEL_ALIASES)',
+    )
 
     args = p.parse_args(argv)
 
     args.auto_model_routing_classification = _parse_classification_str(
         args.auto_model_routing_classification, p
     )
+    args.model_aliases = _parse_model_aliases_str(args.model_aliases, p)
     if not (args.auto_model_routing_long or '').strip():
         p.error('--auto-model-routing-long must be a non-empty string or "off"')
     args.auto_model_routing_min_confidence = max(

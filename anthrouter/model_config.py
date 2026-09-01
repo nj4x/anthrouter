@@ -28,15 +28,27 @@ MODEL_PRICING: dict[str, tuple[float, float, float, float]] = {
 CONTEXT_SUFFIXES: tuple[str, ...] = (':1m', '[1m]')
 
 
-def resolve_model(model: str) -> str:
-    """Resolve an alias or full model ID to the upstream Anthropic model ID."""
+def resolve_model(model: str, aliases: dict[str, str] | None = None) -> str:
+    """Resolve an alias or full model ID to the upstream Anthropic model ID.
+    
+    Args:
+        model: The model alias or full model ID to resolve.
+        aliases: Optional dict of alias -> model mappings that overlay on top of
+            the built-in MODEL_ALIASES. Caller-supplied entries win.
+    """
     if not model:
         raise AnthropicRequestError('model is required', status_code=400)
-    if model in MODEL_ALIASES:
-        return MODEL_ALIASES[model]
+    
+    # Merge aliases: start with defaults, overlay caller-supplied entries
+    effective_aliases = MODEL_ALIASES
+    if aliases:
+        effective_aliases = {**MODEL_ALIASES, **aliases}
+    
+    if model in effective_aliases:
+        return effective_aliases[model]
     for suffix in CONTEXT_SUFFIXES:
         if model.endswith(suffix):
             base = model[:-len(suffix)]
-            if base in MODEL_ALIASES:
-                return MODEL_ALIASES[base]
+            if base in effective_aliases:
+                return effective_aliases[base]
     return model

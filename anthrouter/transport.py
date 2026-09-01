@@ -110,9 +110,10 @@ class AnthropicTransport:
 
     def _send_with_retries(self, payload: dict, credentials: dict, stream: bool,
                            path: str = MESSAGES_PATH, method: str = 'POST',
-                           ratelimit_out: dict | None = None):
-        body_bytes = build_body(payload)
-        betas = merge_betas(payload)
+                           ratelimit_out: dict | None = None, config=None):
+        aliases = config.model_aliases if config else None
+        body_bytes = build_body(payload, aliases=aliases)
+        betas = merge_betas(payload, aliases=aliases)
         headers = _request_headers(credentials, betas, stream)
         url_path = self.target.path(path)
         thinking_stripped = False
@@ -183,7 +184,7 @@ class AnthropicTransport:
                      ratelimit_out: dict | None = None) -> dict:
         stream = bool(payload.get('stream'))
         conn, resp = self._send_with_retries(payload, credentials, stream=stream,
-                                             ratelimit_out=ratelimit_out)
+                                             ratelimit_out=ratelimit_out, config=config)
         try:
             body = resp.read()
         finally:
@@ -201,7 +202,7 @@ class AnthropicTransport:
     def send_message_stream(self, payload: dict, credentials: dict, config=None,
                             ratelimit_out: dict | None = None):
         conn, resp = self._send_with_retries(payload, credentials, stream=True,
-                                             ratelimit_out=ratelimit_out)
+                                             ratelimit_out=ratelimit_out, config=config)
         try:
             pending = ''
             for line in read_sse_lines(resp):
@@ -216,9 +217,10 @@ class AnthropicTransport:
             conn.close()
 
     def count_tokens(self, payload: dict, credentials: dict, config=None) -> dict:
+        aliases = config.model_aliases if config else None
         try:
-            body_bytes = build_body(payload)
-            betas = merge_betas(payload)
+            body_bytes = build_body(payload, aliases=aliases)
+            betas = merge_betas(payload, aliases=aliases)
             headers = _request_headers(credentials, betas, stream=False)
             conn = self.target.connect()
             try:
@@ -240,5 +242,5 @@ class AnthropicTransport:
 
         return {
             'input_tokens': estimate_input_tokens(payload),
-            'model': resolve_model(payload.get('model', '')),
+            'model': resolve_model(payload.get('model', ''), aliases=config.model_aliases if config else None),
         }
