@@ -10,16 +10,16 @@ function formatAge(ageSecs: number | null | undefined): string | null {
 }
 
 export function OAuthCard() {
-  const { data } = useSWR<{ oauth_token: OAuthToken | null }>(
+  const { data } = useSWR<{ oauth_token: OAuthToken | null; message?: string; retry_after_seconds?: number }>(
     '/admin/oauth-usage',
     fetchJson,
-    { refreshInterval: 60000 },
+    { refreshInterval: 5000 },
   )
 
   if (!data?.oauth_token) {
     return (
       <p className="text-xs text-slate-600 dark:text-slate-400">
-        No OAuth token usage yet. Make a request with OAuth bearer auth to populate.
+        {data?.message ?? 'No OAuth token usage yet. Make a request with OAuth bearer auth to populate.'}
       </p>
     )
   }
