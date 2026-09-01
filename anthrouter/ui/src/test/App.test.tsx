@@ -130,6 +130,7 @@ describe('formatters', () => {
 describe('App', () => {
   it('shows the request log with the routed model called out', async () => {
     render(<App />)
+    await switchTo('Requests')
     await waitFor(() => expect(screen.getByText('fix a typo')).toBeInTheDocument())
     expect(screen.getByText('as haiku-4-5')).toBeInTheDocument()
     expect(screen.getByText('success')).toBeInTheDocument()
