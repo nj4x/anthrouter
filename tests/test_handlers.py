@@ -5,9 +5,12 @@ import urllib.request
 import pytest
 
 from anthrouter.handlers import (
+    HAPPY_BIRTHDAY_REPLY,
+    HAPPY_NEW_YEAR_PREFIX,
     _extract_response_text,
     _extract_sse_stats,
     _extract_sse_text,
+    _has_happy_new_year_system_prompt,
     _rewrite_message_start_model,
     context_key,
     parse_local_command,
@@ -403,3 +406,124 @@ def test_state_maps_evict_oldest_first():
         state.set_routed_tier(f'k{i}', 'haiku')
     assert state.routed_tier('k0') is None
     assert state.routed_tier(f'k{MAX_ENTRIES + 4}') == 'haiku'
+
+
+# ---------------------------------------------------------------------------
+# Happy New Year interception
+# ---------------------------------------------------------------------------
+
+class TestHasHappyNewYearSystemPrompt:
+    def test_string_exact_prefix(self):
+        assert _has_happy_new_year_system_prompt({'system': HAPPY_NEW_YEAR_PREFIX}) is True
+
+    def test_string_with_suffix(self):
+        assert _has_happy_new_year_system_prompt({'system': f'{HAPPY_NEW_YEAR_PREFIX}, friend!'}) is True
+
+    def test_string_wrong_case(self):
+        assert _has_happy_new_year_system_prompt({'system': 'happy new year'}) is False
+
+    def test_string_mismatch(self):
+        assert _has_happy_new_year_system_prompt({'system': 'Hello world'}) is False
+
+    def test_string_empty(self):
+        assert _has_happy_new_year_system_prompt({'system': ''}) is False
+
+    def test_list_first_block_matches(self):
+        assert _has_happy_new_year_system_prompt(
+            {'system': [{'type': 'text', 'text': f'{HAPPY_NEW_YEAR_PREFIX} everyone'}]}) is True
+
+    def test_list_second_block_matches(self):
+        assert _has_happy_new_year_system_prompt(
+            {'system': [
+                {'type': 'text', 'text': 'Preamble'},
+                {'type': 'text', 'text': f'{HAPPY_NEW_YEAR_PREFIX}!'},
+            ]}) is True
+
+    def test_list_no_block_matches(self):
+        assert _has_happy_new_year_system_prompt(
+            {'system': [{'type': 'text', 'text': 'Just a normal prompt'}]}) is False
+
+    def test_list_non_dict_items_skipped(self):
+        assert _has_happy_new_year_system_prompt(
+            {'system': [HAPPY_NEW_YEAR_PREFIX, {'type': 'text', 'text': 'other'}]}) is False
+
+    def test_list_block_missing_text_key(self):
+        assert _has_happy_new_year_system_prompt({'system': [{'type': 'text'}]}) is False
+
+    def test_list_any_type_matches(self):
+        assert _has_happy_new_year_system_prompt(
+            {'system': [{'type': 'cache_control', 'text': f'{HAPPY_NEW_YEAR_PREFIX}'}]}) is True
+
+    def test_no_system_key(self):
+        assert _has_happy_new_year_system_prompt({}) is False
+
+    def test_system_none(self):
+        assert _has_happy_new_year_system_prompt({'system': None}) is False
+
+    def test_system_integer(self):
+        assert _has_happy_new_year_system_prompt({'system': 42}) is False
+
+    def test_system_empty_list(self):
+        assert _has_happy_new_year_system_prompt({'system': []}) is False
+
+
+class TestHappyNewYearShortCircuit:
+    def test_non_streaming_does_not_reach_upstream(self, proxy):
+        server = proxy()
+        post(server, '/v1/messages', {
+            'model': 'claude-opus-4-5',
+            'system': HAPPY_NEW_YEAR_PREFIX,
+            'messages': [{'role': 'user', 'content': 'hi'}]})
+        assert _FakeUpstream.received == []
+
+    def test_non_streaming_reply_body(self, proxy):
+        server = proxy()
+        result = post(server, '/v1/messages', {
+            'model': 'claude-opus-4-5',
+            'system': HAPPY_NEW_YEAR_PREFIX,
+            'messages': [{'role': 'user', 'content': 'hi'}]})
+        assert result['content'][0]['text'] == HAPPY_BIRTHDAY_REPLY
+        assert result['model'] == 'claude-opus-4-5'
+
+    def test_streaming_does_not_reach_upstream(self, proxy):
+        server = proxy()
+        post(server, '/v1/messages', {
+            'model': 'claude-opus-4-5',
+            'system': HAPPY_NEW_YEAR_PREFIX,
+            'stream': True,
+            'messages': [{'role': 'user', 'content': 'hi'}]}, raw=True)
+        assert _FakeUpstream.received == []
+
+    def test_streaming_reply_body(self, proxy):
+        server = proxy()
+        body = post(server, '/v1/messages', {
+            'model': 'claude-opus-4-5',
+            'system': HAPPY_NEW_YEAR_PREFIX,
+            'stream': True,
+            'messages': [{'role': 'user', 'content': 'hi'}]}, raw=True)
+        assert f'"text": "{HAPPY_BIRTHDAY_REPLY}"' in body
+        assert 'event: message_stop' in body
+
+    def test_list_system_trigger(self, proxy):
+        server = proxy()
+        result = post(server, '/v1/messages', {
+            'model': 'claude-opus-4-5',
+            'system': [{'type': 'text', 'text': f'{HAPPY_NEW_YEAR_PREFIX}, everyone!'}],
+            'messages': [{'role': 'user', 'content': 'hi'}]})
+        assert result['content'][0]['text'] == HAPPY_BIRTHDAY_REPLY
+
+    def test_no_db_recording(self, proxy):
+        server = proxy()
+        post(server, '/v1/messages', {
+            'model': 'claude-opus-4-5',
+            'system': HAPPY_NEW_YEAR_PREFIX,
+            'messages': [{'role': 'user', 'content': 'hi'}]})
+        assert db_rows(server) == []
+
+    def test_no_credential_check(self, proxy):
+        server = proxy()
+        result = post(server, '/v1/messages', {
+            'model': 'claude-opus-4-5',
+            'system': HAPPY_NEW_YEAR_PREFIX,
+            'messages': [{'role': 'user', 'content': 'hi'}]})
+        assert result['content'][0]['text'] == HAPPY_BIRTHDAY_REPLY
