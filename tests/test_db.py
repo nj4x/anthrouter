@@ -52,8 +52,8 @@ def _record(store, **kwargs):
 # Schema
 # ---------------------------------------------------------------------------
 
-def test_schema_version_is_one(db):
-    assert db._conn.execute('PRAGMA user_version').fetchone()[0] == 1
+def test_schema_version_is_two(db):
+    assert db._conn.execute('PRAGMA user_version').fetchone()[0] == 2
 
 
 def test_only_the_three_tables_exist(db):

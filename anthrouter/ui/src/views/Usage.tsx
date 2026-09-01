@@ -14,9 +14,9 @@ export function Usage() {
   return (
     <div className="space-y-4">
       <Panel title="Rate-limit window">
-        {error && <p className="text-sm text-red-400">{error.message}</p>}
+        {error && <p className="text-sm text-red-600 dark:text-red-400">{error.message}</p>}
         {data && !rl && (
-          <p className="text-sm text-slate-400">
+          <p className="text-sm text-slate-600 dark:text-slate-400">
             No <code className="font-mono">anthropic-ratelimit-*</code> headers seen yet. They
             arrive on the first upstream response.
           </p>
@@ -29,7 +29,7 @@ export function Usage() {
               <Metric label="Input tokens left" value={count(rl.ratelimit_input_tokens_remaining)} />
               <Metric label="Output tokens left" value={count(rl.ratelimit_output_tokens_remaining)} />
             </div>
-            <p className="mt-3 text-sm text-slate-400">
+            <p className="mt-3 text-sm text-slate-600 dark:text-slate-400">
               Window resets {timestamp(rl.ratelimit_reset_at)} · observed{' '}
               {timestamp(rl.request_ts)}
             </p>
@@ -37,7 +37,7 @@ export function Usage() {
         )}
         {/* Token expiry and quota are not derivable from a forwarded credential:
             OAuth tokens are opaque and the usage API needs a separate admin key. */}
-        <p className="mt-3 text-xs text-slate-500">
+        <p className="mt-3 text-xs text-slate-600 dark:text-slate-500">
           Rate-limit headers are the only usage signal a passthrough proxy can read. Token expiry
           and account quota need a credential anthrouter never holds.
         </p>
@@ -73,8 +73,8 @@ export function Usage() {
 function Setting({ label, value }: { label: string; value?: string }) {
   return (
     <div>
-      <dt className="text-xs uppercase tracking-wide text-slate-400">{label}</dt>
-      <dd className="mt-1 break-all font-mono text-xs text-slate-200">{value ?? '—'}</dd>
+      <dt className="text-xs uppercase tracking-wide text-slate-600 dark:text-slate-400">{label}</dt>
+      <dd className="mt-1 break-all font-mono text-xs text-slate-800 dark:text-slate-200">{value ?? '—'}</dd>
     </div>
   )
 }

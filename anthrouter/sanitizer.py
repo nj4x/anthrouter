@@ -57,6 +57,7 @@ def _describe_stripped(system) -> list[dict]:
                 described.append({
                     'block_type': prefix,
                     'preview': text[:_PREVIEW_LIMIT],
+                    'full': text,
                 })
                 break
     return described

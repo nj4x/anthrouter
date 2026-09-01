@@ -2,20 +2,20 @@ import type { ReactNode } from 'react'
 
 export function Panel({ title, children }: { title: string; children: ReactNode }) {
   return (
-    <section className="rounded border border-slate-700 bg-slate-900">
-      <h2 className="border-b border-slate-700 px-4 py-2 text-sm font-semibold text-slate-200">
+    <section className="rounded border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900">
+      <h2 className="border-b border-slate-200 dark:border-slate-700 px-4 py-2 text-sm font-semibold text-slate-900 dark:text-slate-200">
         {title}
       </h2>
-      <div className="p-4">{children}</div>
+      <div className="p-4 text-slate-900 dark:text-slate-100">{children}</div>
     </section>
   )
 }
 
 export function Metric({ label, value }: { label: string; value: ReactNode }) {
   return (
-    <div className="rounded border border-slate-700 bg-slate-800 px-3 py-2">
-      <div className="text-xs uppercase tracking-wide text-slate-400">{label}</div>
-      <div className="mt-1 text-lg font-semibold text-slate-100">{value}</div>
+    <div className="rounded border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-3 py-2">
+      <div className="text-xs uppercase tracking-wide text-slate-600 dark:text-slate-400">{label}</div>
+      <div className="mt-1 text-lg font-semibold text-slate-900 dark:text-slate-100">{value}</div>
     </div>
   )
 }
@@ -27,9 +27,9 @@ export function Badge({ text, tone }: { text: string; tone: string }) {
 }
 
 const CLASSIFICATION_TONE: Record<string, string> = {
-  trivial: 'bg-emerald-900 text-emerald-200',
-  standard: 'bg-sky-900 text-sky-200',
-  deep: 'bg-violet-900 text-violet-200',
+  trivial: 'bg-emerald-100 dark:bg-emerald-900 text-emerald-800 dark:text-emerald-200',
+  standard: 'bg-sky-100 dark:bg-sky-900 text-sky-800 dark:text-sky-200',
+  deep: 'bg-violet-100 dark:bg-violet-900 text-violet-800 dark:text-violet-200',
 }
 
 export function ClassificationBadge({ value }: { value: string | null }) {
@@ -38,9 +38,9 @@ export function ClassificationBadge({ value }: { value: string | null }) {
 }
 
 const STATUS_TONE: Record<string, string> = {
-  success: 'bg-emerald-900 text-emerald-200',
-  error: 'bg-red-900 text-red-200',
-  rate_limited: 'bg-amber-900 text-amber-200',
+  success: 'bg-emerald-100 dark:bg-emerald-900 text-emerald-800 dark:text-emerald-200',
+  error: 'bg-red-100 dark:bg-red-900 text-red-800 dark:text-red-200',
+  rate_limited: 'bg-amber-100 dark:bg-amber-900 text-amber-800 dark:text-amber-200',
 }
 
 export function StatusBadge({ value }: { value: string }) {
@@ -51,29 +51,29 @@ export function Table({ headers, children }: { headers: string[]; children: Reac
   return (
     <div className="overflow-x-auto">
       <table className="w-full text-left text-sm">
-        <thead className="text-xs uppercase tracking-wide text-slate-400">
+        <thead className="text-xs uppercase tracking-wide text-slate-600 dark:text-slate-400 bg-slate-100 dark:bg-slate-800">
           <tr>
             {headers.map((header) => (
               <th key={header} className="px-3 py-2 font-medium">{header}</th>
             ))}
           </tr>
         </thead>
-        <tbody className="divide-y divide-slate-800">{children}</tbody>
+        <tbody className="divide-y divide-slate-200 dark:divide-slate-800">{children}</tbody>
       </table>
     </div>
   )
 }
 
 export function Empty({ message }: { message: string }) {
-  return <p className="px-3 py-6 text-center text-sm text-slate-500">{message}</p>
+  return <p className="px-3 py-6 text-center text-sm text-slate-600 dark:text-slate-500">{message}</p>
 }
 
 export function LoadState({ error, loading }: { error?: Error; loading: boolean }) {
   if (error) {
-    return <p className="px-3 py-6 text-center text-sm text-red-400">{error.message}</p>
+    return <p className="px-3 py-6 text-center text-sm text-red-600 dark:text-red-400">{error.message}</p>
   }
   if (loading) {
-    return <p className="px-3 py-6 text-center text-sm text-slate-500">Loading…</p>
+    return <p className="px-3 py-6 text-center text-sm text-slate-600 dark:text-slate-500">Loading…</p>
   }
   return null
 }
@@ -90,10 +90,10 @@ export function Pager({
   onChange: (offset: number) => void
 }) {
   return (
-    <div className="mt-3 flex items-center justify-between text-sm text-slate-400">
+    <div className="mt-3 flex items-center justify-between text-sm text-slate-600 dark:text-slate-400">
       <button
         type="button"
-        className="rounded border border-slate-700 px-3 py-1 disabled:opacity-40"
+        className="rounded border border-slate-300 dark:border-slate-700 px-3 py-1 disabled:opacity-40 hover:bg-slate-100 dark:hover:bg-slate-800"
         disabled={offset === 0}
         onClick={() => onChange(Math.max(0, offset - limit))}
       >
@@ -104,7 +104,7 @@ export function Pager({
       </span>
       <button
         type="button"
-        className="rounded border border-slate-700 px-3 py-1 disabled:opacity-40"
+        className="rounded border border-slate-300 dark:border-slate-700 px-3 py-1 disabled:opacity-40 hover:bg-slate-100 dark:hover:bg-slate-800"
         disabled={rows < limit}
         onClick={() => onChange(offset + limit)}
       >

@@ -96,6 +96,7 @@ export interface SanitizerEvent {
   block_type: string
   is_allowlisted: number
   payload_preview: string | null
+  payload_full: string | null
   session_id: string
   requested_model: string
   system_prompt_sha256: string | null

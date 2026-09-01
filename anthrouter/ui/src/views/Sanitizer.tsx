@@ -37,9 +37,9 @@ export function Sanitizer() {
             <Table headers={['Time', 'Request', 'Session', 'Model', 'Block', 'Outcome', 'Preview']}>
               {data.events.map((event) => (
                 <tr key={event.id}>
-                  <td className="px-3 py-2 text-slate-400">{timestamp(event.event_ts)}</td>
-                  <td className="px-3 py-2 font-mono text-xs text-slate-400">#{event.request_id}</td>
-                  <td className="px-3 py-2 font-mono text-xs text-slate-400">
+                  <td className="px-3 py-2 text-slate-600 dark:text-slate-400">{timestamp(event.event_ts)}</td>
+                  <td className="px-3 py-2 font-mono text-xs text-slate-600 dark:text-slate-400">#{event.request_id}</td>
+                  <td className="px-3 py-2 font-mono text-xs text-slate-600 dark:text-slate-400">
                     {sessionLabel(event.session_id)}
                   </td>
                   <td className="px-3 py-2">{modelLabel(event.requested_model)}</td>
@@ -48,10 +48,10 @@ export function Sanitizer() {
                     {event.is_allowlisted ? (
                       <Badge text="stripped" tone="bg-amber-900 text-amber-200" />
                     ) : (
-                      <Badge text="flagged" tone="bg-slate-700 text-slate-200" />
+                      <Badge text="flagged" tone="bg-slate-200 dark:bg-slate-700 text-slate-800 dark:text-slate-200" />
                     )}
                   </td>
-                  <td className="max-w-md truncate px-3 py-2 font-mono text-xs text-slate-400">
+                  <td className="max-w-md truncate px-3 py-2 font-mono text-xs text-slate-600 dark:text-slate-400">
                     {event.payload_preview ?? '—'}
                   </td>
                 </tr>

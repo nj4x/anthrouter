@@ -31,7 +31,7 @@ from .model_tier import classify_model_tier
 
 logger = logging.getLogger(__name__)
 
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 
 _RETENTION_INTERVAL_SECS = 24 * 3600
 _RETENTION_CHUNK = 1000
@@ -149,7 +149,13 @@ def _apply_migration_0(conn: sqlite3.Connection) -> None:
         conn.execute(stmt)
 
 
-_MIGRATIONS = {0: _apply_migration_0}
+def _apply_migration_1(conn: sqlite3.Connection) -> None:
+    # Rows written before this migration keep payload_full NULL; readers fall
+    # back to the 200-character payload_preview for them.
+    conn.execute('ALTER TABLE sanitizer_events ADD COLUMN payload_full TEXT')
+
+
+_MIGRATIONS = {0: _apply_migration_0, 1: _apply_migration_1}
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
@@ -343,13 +349,14 @@ class RequestDB:
             for event in sanitizer_events or []:
                 self._conn.execute(
                     """INSERT OR IGNORE INTO sanitizer_events
-                           (request_id, block_type, is_allowlisted, payload_preview)
-                       VALUES (?, ?, ?, ?)""",
+                           (request_id, block_type, is_allowlisted, payload_preview, payload_full)
+                       VALUES (?, ?, ?, ?, ?)""",
                     (
                         request_id,
                         event['block_type'],
                         1 if event.get('is_allowlisted') else 0,
                         event.get('payload_preview'),
+                        event.get('full'),
                     ),
                 )
 
@@ -446,7 +453,7 @@ class RequestDB:
         """Sanitizer events across all requests, most recent first."""
         rows = self._read_conn().execute(
             """SELECT e.id, e.request_id, e.event_ts, e.block_type,
-                      e.is_allowlisted, e.payload_preview,
+                      e.is_allowlisted, e.payload_preview, e.payload_full,
                       r.session_id, r.requested_model,
                       r.system_prompt_sha256, r.system_prompt_sanitized_sha256
                  FROM sanitizer_events e

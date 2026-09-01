@@ -51,9 +51,9 @@ export function Routing() {
               headers={['Time', 'Session', 'Requested', 'Routed', 'Class', 'Reason', 'Est. in', 'Classifier']}
             >
               {data.decisions.map((row) => (
-                <tr key={row.id} className={row.applied ? '' : 'text-slate-500'}>
-                  <td className="px-3 py-2 text-slate-400">{timestamp(row.request_ts)}</td>
-                  <td className="px-3 py-2 font-mono text-xs text-slate-400">
+                <tr key={row.id} className={row.applied ? '' : 'text-slate-500 dark:text-slate-500'}>
+                  <td className="px-3 py-2 text-slate-600 dark:text-slate-400">{timestamp(row.request_ts)}</td>
+                  <td className="px-3 py-2 font-mono text-xs text-slate-600 dark:text-slate-400">
                     {sessionLabel(row.session_id)}
                   </td>
                   <td className="px-3 py-2">{modelLabel(row.requested_model)}</td>
@@ -70,7 +70,7 @@ export function Routing() {
                   <td className="px-3 py-2 text-xs">
                     {row.classifier_model ? modelLabel(row.classifier_model) : '—'}
                     {row.classifier_raw_response && (
-                      <span className="ml-1 font-mono text-slate-500">
+                      <span className="ml-1 font-mono text-slate-600 dark:text-slate-500">
                         {row.classifier_raw_response.slice(0, 24)}
                       </span>
                     )}
