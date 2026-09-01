@@ -74,3 +74,17 @@ SQLite, one write connection guarded by a lock, per-thread read connections over
 - New config flags: add the field to `Config`, the `argparse` entry (with matching `ANTHROUTER_*` env var), and any cross-field validation at the bottom of `parse_args()` — flags in this codebase are extensively cross-validated (e.g. weight pairs summing to 1.0, threshold ordering).
 - Anything touching request/response content must respect the classifier-input privacy contract above — check `RoutingSummary.to_classifier_json()` before adding a field that might leak system prompt or tool schema text into a classifier call.
 - Design decisions with non-obvious tradeoffs go in `docs/adr/` (see `docs/adr/0001-installer-config-mutation-policy.md` for the installer's file-mutation policy — required reading before touching `install.sh`/`uninstall.sh`).
+
+## Agent skills
+
+### Issue tracker
+
+GitHub Issues in `nj4x/anthrouter`, via `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Default vocabulary (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context — root `CONTEXT.md` (not yet created) + `docs/adr/`. See `docs/agents/domain.md`.
