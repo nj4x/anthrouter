@@ -227,6 +227,42 @@ export function RequestDetailDrawer({ requestId, onClose }: Props) {
                 </dl>
               </section>
 
+              {/* Prompt & tools content */}
+              {req.system_prompt_content && (
+                <section>
+                  <h3 className="text-xs font-semibold text-slate-600 dark:text-slate-400 uppercase tracking-wide mb-2">
+                    System prompt (original)
+                  </h3>
+                  <pre className="bg-slate-100 dark:bg-slate-800 p-3 rounded text-xs overflow-auto max-h-48 text-slate-800 dark:text-slate-200 whitespace-pre-wrap break-words">
+                    {req.system_prompt_content}
+                  </pre>
+                </section>
+              )}
+
+              {req.system_prompt_content &&
+                req.system_prompt_sanitized_content &&
+                req.system_prompt_sha256 !== req.system_prompt_sanitized_sha256 && (
+                  <section>
+                    <h3 className="text-xs font-semibold text-slate-600 dark:text-slate-400 uppercase tracking-wide mb-2">
+                      System prompt (sanitized, sent upstream)
+                    </h3>
+                    <pre className="bg-slate-100 dark:bg-slate-800 p-3 rounded text-xs overflow-auto max-h-48 text-slate-800 dark:text-slate-200 whitespace-pre-wrap break-words">
+                      {req.system_prompt_sanitized_content}
+                    </pre>
+                  </section>
+                )}
+
+              {req.tools_content && (
+                <section>
+                  <h3 className="text-xs font-semibold text-slate-600 dark:text-slate-400 uppercase tracking-wide mb-2">
+                    Tools
+                  </h3>
+                  <pre className="bg-slate-100 dark:bg-slate-800 p-3 rounded text-xs overflow-auto max-h-48 text-slate-800 dark:text-slate-200 whitespace-pre-wrap break-words">
+                    {req.tools_content}
+                  </pre>
+                </section>
+              )}
+
               {/* Response */}
               {req.response_text && (
                 <section>

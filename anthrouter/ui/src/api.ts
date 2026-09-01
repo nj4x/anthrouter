@@ -29,6 +29,9 @@ export interface RequestRow {
   tools_sha256: string | null
   user_prompt_text: string | null
   response_text: string | null
+  system_prompt_content: string | null
+  system_prompt_sanitized_content: string | null
+  tools_content: string | null
 }
 
 export interface RateLimit {

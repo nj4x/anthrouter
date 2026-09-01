@@ -365,8 +365,28 @@ class RequestDB:
     # -- reads --------------------------------------------------------------
 
     def get_request(self, request_id: int) -> dict | None:
+        """Request row plus its full prompt/tools content, joined by hash.
+
+        LEFT JOINs (not INNER) because the hash columns are nullable — an
+        INNER JOIN would suppress rows with no system prompt or no tools.
+        A non-NULL hash with no matching ``prompt_store`` row (e.g. a failed
+        ``_extract_prompt_capture()``) yields NULL content here, which the
+        admin UI renders as absent rather than surfacing as an error.
+        """
         row = self._read_conn().execute(
-            'SELECT * FROM requests WHERE id = ?', (request_id,)
+            """SELECT r.*,
+                      ps_sys.content   AS system_prompt_content,
+                      ps_tools.content AS tools_content,
+                      ps_san.content   AS system_prompt_sanitized_content
+                 FROM requests r
+                 LEFT JOIN prompt_store ps_sys
+                        ON ps_sys.content_hash = r.system_prompt_sha256
+                 LEFT JOIN prompt_store ps_tools
+                        ON ps_tools.content_hash = r.tools_sha256
+                 LEFT JOIN prompt_store ps_san
+                        ON ps_san.content_hash = r.system_prompt_sanitized_sha256
+                WHERE r.id = ?""",
+            (request_id,),
         ).fetchone()
         return dict(row) if row else None
 

@@ -161,6 +161,67 @@ def test_both_prompt_hashes_are_kept_separately(db):
 
 
 # ---------------------------------------------------------------------------
+# get_request: prompt_store content JOIN
+# ---------------------------------------------------------------------------
+
+def test_get_request_joins_system_tools_and_sanitized_content(db):
+    entries = {
+        'aaa': ('system', 'original system prompt'),
+        'bbb': ('system_sanitized', 'sanitized system prompt'),
+        'ccc': ('tools', '[{"name": "bash"}]'),
+    }
+    row = db.get_request(_record(
+        db,
+        system_prompt_sha256='aaa',
+        system_prompt_sanitized_sha256='bbb',
+        tools_sha256='ccc',
+        prompt_store_entries=entries,
+    ))
+    assert row['system_prompt_content'] == 'original system prompt'
+    assert row['system_prompt_sanitized_content'] == 'sanitized system prompt'
+    assert row['tools_content'] == '[{"name": "bash"}]'
+
+
+def test_get_request_with_no_tools_still_returns_row_with_null_tools_content(db):
+    row = db.get_request(_record(
+        db,
+        system_prompt_sha256='aaa',
+        prompt_store_entries={'aaa': ('system', 'a system prompt')},
+    ))
+    assert row is not None
+    assert row['tools_content'] is None
+    assert row['system_prompt_content'] == 'a system prompt'
+
+
+def test_get_request_with_no_sanitized_hash_has_null_sanitized_content(db):
+    row = db.get_request(_record(
+        db,
+        system_prompt_sha256='aaa',
+        prompt_store_entries={'aaa': ('system', 'a system prompt')},
+    ))
+    assert row['system_prompt_sanitized_sha256'] is None
+    assert row['system_prompt_sanitized_content'] is None
+
+
+def test_get_request_non_null_hash_with_no_prompt_store_row_returns_null_content(db):
+    row = db.get_request(_record(
+        db,
+        system_prompt_sha256='missing-hash',
+        tools_sha256='also-missing',
+    ))
+    assert row is not None
+    assert row['system_prompt_content'] is None
+    assert row['tools_content'] is None
+
+
+def test_get_request_column_names_unchanged_for_existing_callers(db):
+    row = db.get_request(_record(db))
+    assert row['requested_model'] == 'sonnet'
+    assert row['routed_model'] == 'haiku'
+    assert row['id'] is not None
+
+
+# ---------------------------------------------------------------------------
 # prompt_store and ref-counting
 # ---------------------------------------------------------------------------
 
