@@ -33,13 +33,14 @@ export function Routing() {
   return (
     <div className="space-y-4">
       <Panel title="Routing summary">
-        <div className="grid gap-3 sm:grid-cols-3 lg:grid-cols-6">
+        <div className="grid gap-3 sm:grid-cols-4 lg:grid-cols-7">
           <Metric label="Decisions" value={count(summary?.total)} />
           <Metric label="Applied" value={appliedShare} />
           <Metric label="Trivial" value={count(summary?.trivial)} />
           <Metric label="Standard" value={count(summary?.standard)} />
           <Metric label="Deep" value={count(summary?.deep)} />
           <Metric label="Net savings" value={usd(summary?.net_savings_usd)} />
+          <Metric label="User-prompt classifier overhead" value={usd(summary?.classifier_overhead_usd)} />
         </div>
       </Panel>
       <Panel title="Routing decisions">

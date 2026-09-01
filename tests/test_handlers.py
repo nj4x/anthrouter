@@ -4,9 +4,11 @@ import urllib.request
 
 import pytest
 
+from anthrouter.db import RequestDB
 from anthrouter.handlers import (
     HAPPY_BIRTHDAY_REPLY,
     HAPPY_NEW_YEAR_PREFIX,
+    ProxyRequestHandler,
     _extract_response_text,
     _extract_sse_stats,
     _extract_sse_text,
@@ -17,6 +19,7 @@ from anthrouter.handlers import (
     session_key,
 )
 from anthrouter.model_config import resolve_model
+from anthrouter.model_router import ModelRoutingDecision
 from anthrouter.session_state import MAX_ENTRIES, SessionState
 from tests.conftest import DEEP_PROMPT, SESSION, SSE_BODY, _FakeUpstream, db_rows, post
 
@@ -527,3 +530,87 @@ class TestHappyNewYearShortCircuit:
             'system': HAPPY_NEW_YEAR_PREFIX,
             'messages': [{'role': 'user', 'content': 'hi'}]})
         assert result['content'][0]['text'] == HAPPY_BIRTHDAY_REPLY
+
+
+# ---------------------------------------------------------------------------
+# Net savings and classifier overhead (ADR-0002)
+# ---------------------------------------------------------------------------
+
+SAVINGS_STATS = {'input_tokens': 1000, 'output_tokens': 200,
+                  'cache_creation_tokens': 0, 'cache_read_tokens': 0}
+
+
+def _decision(**kwargs):
+    base = dict(
+        requested_model='sonnet',
+        routed_model='haiku',
+        classification='trivial',
+        applied=True,
+        reason_code='classifier_trivial',
+    )
+    base.update(kwargs)
+    return ModelRoutingDecision(**base)
+
+
+def test_savings_computed_when_classifier_ran_and_routing_applied():
+    decision = _decision(classifier_model='haiku', classifier_input_tokens=500,
+                          classifier_output_tokens=50)
+    net, overhead = ProxyRequestHandler._compute_savings(decision, SAVINGS_STATS)
+    assert overhead == pytest.approx(0.00075)
+    assert net == pytest.approx(0.00325)
+
+
+def test_classifier_overhead_recorded_when_routing_confirms_the_requested_model(tmp_path):
+    decision = _decision(routed_model='sonnet', applied=False,
+                          classifier_model='haiku', classifier_input_tokens=500,
+                          classifier_output_tokens=50)
+    net, overhead = ProxyRequestHandler._compute_savings(decision, SAVINGS_STATS)
+    assert overhead == pytest.approx(0.00075)
+
+    store = RequestDB(str(tmp_path / 'a.db'))
+    row = store.get_request(store.record_request(
+        session_id='s', routing_decision=decision, stats_dict=SAVINGS_STATS,
+        duration_ms=1, status='success',
+        net_savings_usd=net, classifier_overhead_usd=overhead))
+    assert row['net_savings_usd'] is None
+    assert row['classifier_overhead_usd'] == pytest.approx(0.00075)
+    store.close()
+
+
+def test_no_classifier_call_records_zero_overhead():
+    decision = _decision(reason_code='rules_standard')
+    net, overhead = ProxyRequestHandler._compute_savings(decision, SAVINGS_STATS)
+    assert overhead == 0.0
+
+
+def test_unrecognized_routed_model_nulls_net_savings():
+    decision = _decision(routed_model='gpt-4-turbo', classifier_model='haiku',
+                          classifier_input_tokens=500, classifier_output_tokens=50)
+    net, overhead = ProxyRequestHandler._compute_savings(decision, SAVINGS_STATS)
+    assert net is None
+    assert overhead == pytest.approx(0.00075)
+
+
+def test_empty_stats_nulls_net_savings_but_keeps_overhead():
+    decision = _decision(classifier_model='haiku', classifier_input_tokens=500,
+                          classifier_output_tokens=50)
+    net, overhead = ProxyRequestHandler._compute_savings(decision, {})
+    assert net is None
+    assert overhead == pytest.approx(0.00075)
+
+
+def test_unrecognized_classifier_model_nulls_both_fields():
+    decision = _decision(classifier_model='gpt-4-turbo', classifier_input_tokens=500,
+                          classifier_output_tokens=50)
+    net, overhead = ProxyRequestHandler._compute_savings(decision, SAVINGS_STATS)
+    assert overhead is None
+    assert net is None
+
+
+def test_routing_to_a_pricier_tier_yields_a_negative_net_savings():
+    decision = _decision(requested_model='haiku', routed_model='opus',
+                          classifier_model='haiku', classifier_input_tokens=500,
+                          classifier_output_tokens=50)
+    net, overhead = ProxyRequestHandler._compute_savings(decision, SAVINGS_STATS)
+    assert net is not None
+    assert net < 0

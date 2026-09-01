@@ -27,8 +27,10 @@ from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 
 from . import admin
+from .db import compute_cost
 from .mapper import AnthropicRequestError, anthropic_error_payload, sse_event
 from .model_router import (
+    ModelRoutingDecision,
     RoutingTarget,
     _cap_cached_tier,
     _extract_user_text,
@@ -874,11 +876,43 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
                            exc_info=True)
             return {}
 
+    @staticmethod
+    def _compute_savings(
+        routing: ModelRoutingDecision, stats: dict
+    ) -> tuple[float | None, float | None]:
+        """Net savings and classifier overhead in USD, per ADR-0002.
+
+        The two values are independent: ``classifier_overhead_usd`` reflects the
+        classifier call alone and is computed whenever one ran, regardless of
+        whether routing applied or main-request stats are present.  If
+        ``compute_cost()`` gains a new token-type field read with a non-zero
+        default (rather than ``.get(...) or 0``), this synthetic dict must be
+        updated to include it, or overhead silently miscalculates.
+        """
+        if routing.classifier_model is None:
+            classifier_overhead_usd: float | None = 0.0
+        else:
+            classifier_overhead_usd = compute_cost(routing.classifier_model, {
+                'input_tokens': routing.classifier_input_tokens,
+                'output_tokens': routing.classifier_output_tokens,
+            })
+
+        if not stats or classifier_overhead_usd is None:
+            return None, classifier_overhead_usd
+
+        requested_cost = compute_cost(routing.requested_model, stats)
+        routed_cost = compute_cost(routing.routed_model, stats)
+        if requested_cost is None or routed_cost is None:
+            return None, classifier_overhead_usd
+
+        return requested_cost - routed_cost - classifier_overhead_usd, classifier_overhead_usd
+
     def _record_db(self, sid: str, stats: dict, duration_ms: int, status: str,
                    error: str | None = None, response_text: str | None = None) -> None:
         if self.request_db is None or self._routing is None:
             return
         try:
+            net_savings_usd, classifier_overhead_usd = self._compute_savings(self._routing, stats)
             self.request_db.record_request(
                 session_id=sid,
                 routing_decision=self._routing,
@@ -889,6 +923,8 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
                 response_text=response_text,
                 sanitizer_events=self._sanitizer_events,
                 ratelimit=self._ratelimit,
+                net_savings_usd=net_savings_usd,
+                classifier_overhead_usd=classifier_overhead_usd,
                 **self._prompt_capture,
             )
         except Exception:

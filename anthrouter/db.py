@@ -278,7 +278,6 @@ class RequestDB:
         applied = bool(routing_decision.applied)
         if not applied:
             net_savings_usd = None
-            classifier_overhead_usd = None
         rl = ratelimit or {}
 
         with self._lock, self._conn:

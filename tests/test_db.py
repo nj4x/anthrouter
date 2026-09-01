@@ -107,7 +107,7 @@ def test_empty_stats_record_absent_usage_not_zero(db):
     assert row['cost_estimate'] is None
 
 
-def test_economics_are_null_when_routing_was_not_applied(db):
+def test_net_savings_is_null_when_routing_was_not_applied(db):
     decision = FakeDecision(applied=False, routed_model='sonnet')
     row = db.get_request(
         _record(db, routing_decision=decision, net_savings_usd=0.5,
@@ -115,7 +115,17 @@ def test_economics_are_null_when_routing_was_not_applied(db):
     )
     assert row['applied'] == 0
     assert row['net_savings_usd'] is None
-    assert row['classifier_overhead_usd'] is None
+
+
+def test_classifier_overhead_is_kept_when_routing_was_not_applied(db):
+    """A classifier that ran and confirmed the requested model still cost money."""
+    decision = FakeDecision(applied=False, routed_model='sonnet')
+    row = db.get_request(
+        _record(db, routing_decision=decision, net_savings_usd=0.5,
+                classifier_overhead_usd=0.01)
+    )
+    assert row['applied'] == 0
+    assert row['classifier_overhead_usd'] == 0.01
 
 
 def test_economics_are_kept_when_routing_was_applied(db):
