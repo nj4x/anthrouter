@@ -555,7 +555,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
             self._session_hash = _system_hash(payload)
 
             credentials = extract_client_credentials(self.headers)
-            self._prepare(payload, sess_key)
+            self._prepare(payload, sess_key, credentials)
             dispatched = True
             self._dispatch(payload, credentials, sess_key)
 
@@ -574,7 +574,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
                 self._record_failed_request(payload, '502 — upstream_failure')
             self._send_json(502, anthropic_error_payload('api_error', 'Upstream request failed'))
 
-    def _prepare(self, payload: dict, sess_key: str | None) -> None:
+    def _prepare(self, payload: dict, sess_key: str | None, credentials: dict) -> None:
         """Route, sanitize, and capture prompt hashes — once, before dispatch."""
         config = self.config
         routing_on = sess_key is not None and self.sessions.model_routing_enabled(sess_key)
@@ -601,7 +601,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
 
         target = RoutingTarget(config=config, backend=self.transport)
         routing = route_model(
-            payload, target, {}, cached_tier, session_floor, session_ratio,
+            payload, target, credentials, cached_tier, session_floor, session_ratio,
             log_tag=self._log_tag(), ctx_key=ctx_key, baseline_model=baseline_model,
         )
 
