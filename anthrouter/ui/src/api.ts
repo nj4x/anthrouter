@@ -55,6 +55,22 @@ export interface Stats {
   last_request_ts: string | null
 }
 
+export interface OAuthToken {
+  burn_pct: number | null
+  used_usd: number | null
+  total_usd: number | null
+  month_elapsed_pct: number | null
+  monthly_blocked: boolean
+  eligible: boolean
+  cooldown_remaining_seconds: number
+  usage_age_seconds: number | null
+  usage_stale: boolean
+}
+
+export interface OAuthUsageResponse {
+  oauth_token: OAuthToken | null
+}
+
 export interface StatusResponse {
   upstream_base_url: string
   auto_model_routing: boolean

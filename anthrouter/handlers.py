@@ -486,6 +486,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         try:
             status, body = admin.handle_get(
                 path or '/admin', _parse_query(query_string), self.request_db, self.config,
+                self.oauth_cache,
             )
             self._send_json(status, body)
         except Exception:
@@ -555,6 +556,12 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
             self._session_hash = _system_hash(payload)
 
             credentials = extract_client_credentials(self.headers)
+            # Cache OAuth token if present (bearer auth)
+            auth_header = self.headers.get('authorization', '')
+            if auth_header.lower().startswith('bearer '):
+                token = auth_header[7:].strip()
+                if token and self.oauth_cache:
+                    self.oauth_cache.get(token)
             self._prepare(payload, sess_key, credentials)
             dispatched = True
             self._dispatch(payload, credentials, sess_key)

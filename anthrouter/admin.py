@@ -40,7 +40,7 @@ def _page(params: dict) -> tuple[int, int]:
     )
 
 
-def handle_get(path: str, query_params: dict, db, config) -> tuple[int, dict]:
+def handle_get(path: str, query_params: dict, db, config, oauth_cache=None) -> tuple[int, dict]:
     """Route one admin GET; never raises for a bad path or parameter."""
     if db is None:
         return _err(503, 'api_error', 'Request recording is disabled')
@@ -61,6 +61,8 @@ def handle_get(path: str, query_params: dict, db, config) -> tuple[int, dict]:
         return _get_sanitizer_events(query_params, db)
     if route == '/admin/ratelimit':
         return _get_ratelimit(db)
+    if route == '/admin/oauth-usage':
+        return _get_oauth_usage(query_params, oauth_cache)
     if route.startswith('/admin/prompts/'):
         return _get_prompt(route[len('/admin/prompts/'):], db)
     return _err(404, 'not_found_error', f'Unknown admin endpoint: {path}')
@@ -121,6 +123,37 @@ def _get_sanitizer_events(query_params: dict, db) -> tuple[int, dict]:
 
 def _get_ratelimit(db) -> tuple[int, dict]:
     return 200, {'ratelimit': db.get_latest_ratelimit()}
+
+
+def _get_oauth_usage(query_params: dict, oauth_cache) -> tuple[int, dict]:
+    """Get cached OAuth usage from the last seen bearer token."""
+    if oauth_cache is None:
+        return _err(503, 'api_error', 'OAuth cache unavailable')
+
+    # Try explicit token param first (for testing); fall back to last cached
+    token = query_params.get('token', [''])[0] if isinstance(query_params.get('token'), list) else query_params.get('token', '')
+    if token:
+        usage = oauth_cache.get(token)
+    else:
+        # Return the last cached usage (from any recent bearer auth request)
+        usage = oauth_cache._usage if hasattr(oauth_cache, '_usage') else None
+
+    if usage is None:
+        return 200, {'oauth_token': None}
+
+    return 200, {
+        'oauth_token': {
+            'burn_pct': usage.burn_pct,
+            'used_usd': usage.used_usd,
+            'total_usd': usage.total_usd,
+            'month_elapsed_pct': usage.month_elapsed_pct,
+            'monthly_blocked': usage.monthly_blocked,
+            'eligible': usage.eligible,
+            'cooldown_remaining_seconds': usage.cooldown_remaining_seconds,
+            'usage_age_seconds': usage.usage_age_seconds,
+            'usage_stale': usage.usage_stale,
+        }
+    }
 
 
 def _get_prompt(content_hash: str, db) -> tuple[int, dict]:

@@ -3,6 +3,7 @@ import useSWR from 'swr'
 import type { StatusResponse } from '../api'
 import { fetchJson } from '../api'
 import { Metric, Panel } from '../components'
+import { OAuthCard } from '../components/OAuthCard'
 import { count, timestamp, usd } from '../format'
 
 export function Usage() {
@@ -13,6 +14,13 @@ export function Usage() {
 
   return (
     <div className="space-y-4">
+      <Panel title="OAuth Usage">
+        <OAuthCard />
+        <p className="mt-3 text-xs text-slate-600 dark:text-slate-400">
+          OAuth token usage is cached from the last seen bearer auth request. The card refreshes every 60 seconds
+          or when a new token is seen.
+        </p>
+      </Panel>
       <Panel title="Rate-limit window">
         {error && <p className="text-sm text-red-600 dark:text-red-400">{error.message}</p>}
         {data && !rl && (
