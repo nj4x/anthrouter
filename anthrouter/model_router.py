@@ -51,6 +51,7 @@ import json
 import logging
 import re
 import threading
+import time
 from collections import OrderedDict
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
@@ -1447,38 +1448,73 @@ def _dispatch_classifier_mode(
     use_json = getattr(config, 'auto_model_routing_confidence_bump', False)
     clf_format: str | None = 'json' if use_json else 'standard'
     clf_raw_response: str | None = None
-    try:
-        send_fn = getattr(
-            target.backend, 'send_classifier_message', target.backend.send_message
-        )
-        response = send_fn(classifier_payload, credentials, config)
-        # Extract full concatenated text from all text-type content blocks.
-        # Mirrors the extraction in parse_classifier_label (skips thinking blocks,
-        # collects text blocks verbatim, never lowercases or truncates).
-        _content = response.get('content') if isinstance(response, dict) else None
-        if isinstance(_content, list):
-            _parts: list[str] = []
-            _SKIP = frozenset({'thinking', 'redacted_thinking'})
-            for _block in _content:
-                if isinstance(_block, dict):
-                    _btype = _block.get('type')
-                    if _btype in _SKIP:
-                        continue
-                    if _btype == 'text':
-                        _t = _block.get('text')
-                        if isinstance(_t, str):
-                            _parts.append(_t)
-            if _parts:
-                clf_raw_response = ' '.join(_parts)
-        user_score: int | None = (
-            parse_classifier_score_json(response) if use_json
-            else parse_classifier_score(response)
-        )
-    except Exception as exc:
-        logger.warning(
-            '%s Model router: classifier call failed — keeping %s: %s',
-            log_tag, requested, exc,
-        )
+
+    # Issue 2 Fix: Exponential backoff for classifier calls with proper error logging
+    send_fn = getattr(
+        target.backend, 'send_classifier_message', target.backend.send_message
+    )
+
+    # Exponential backoff: 1s, 2s, 4s, 8s (max 4 retries)
+    backoff_delays = [1.0, 2.0, 4.0, 8.0]
+    last_exc = None
+    response = None
+
+    for attempt in range(len(backoff_delays) + 1):
+        try:
+            response = send_fn(classifier_payload, credentials, config)
+            # Extract full concatenated text from all text-type content blocks.
+            # Mirrors the extraction in parse_classifier_label (skips thinking blocks,
+            # collects text blocks verbatim, never lowercases or truncates).
+            _content = response.get('content') if isinstance(response, dict) else None
+            if isinstance(_content, list):
+                _parts: list[str] = []
+                _SKIP = frozenset({'thinking', 'redacted_thinking'})
+                for _block in _content:
+                    if isinstance(_block, dict):
+                        _btype = _block.get('type')
+                        if _btype in _SKIP:
+                            continue
+                        if _btype == 'text':
+                            _t = _block.get('text')
+                            if isinstance(_t, str):
+                                _parts.append(_t)
+                if _parts:
+                    clf_raw_response = ' '.join(_parts)
+            user_score: int | None = (
+                parse_classifier_score_json(response) if use_json
+                else parse_classifier_score(response)
+            )
+            # Success — break out of retry loop
+            break
+        except Exception as exc:
+            last_exc = exc
+            # Log full exception with status code if available (e.g., 429 rate limit)
+            status_code = getattr(exc, 'status_code', None)
+            error_type = getattr(exc, 'error_type', None)
+            if status_code:
+                logger.warning(
+                    '%s Model router: classifier call failed (HTTP %d, %s) — keeping %s: %s',
+                    log_tag, status_code, error_type or 'unknown', requested, exc,
+                )
+            else:
+                logger.warning(
+                    '%s Model router: classifier call failed — keeping %s: %s',
+                    log_tag, requested, exc,
+                )
+
+            if attempt < len(backoff_delays):
+                delay = backoff_delays[attempt]
+                logger.info(
+                    '%s Model router: retrying classifier in %.1fs (attempt %d/%d)',
+                    log_tag, delay, attempt + 1, len(backoff_delays),
+                )
+                time.sleep(delay)
+            else:
+                # Exhausted retries
+                return None, 'classifier_failed', 0, 0, None, None, None, None
+
+    if response is None:
+        # Should not reach here, but guard against it
         return None, 'classifier_failed', 0, 0, None, None, None, None
 
     if user_score is None:
