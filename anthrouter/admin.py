@@ -126,20 +126,33 @@ def _get_ratelimit(db) -> tuple[int, dict]:
 
 
 def _get_oauth_usage(query_params: dict, oauth_cache) -> tuple[int, dict]:
-    """Get cached OAuth usage from the last seen bearer token."""
+    """Issue 3 Fix: Get cached OAuth usage with proper race condition handling.
+
+    Uses public getter oauth_cache.get_usage() instead of accessing private _usage.
+    Returns HTTP 202 Accepted with retry hint when cache is empty (first load or
+    no-token queries), allowing the UI to poll until background fetch completes.
+    """
     if oauth_cache is None:
         return _err(503, 'api_error', 'OAuth cache unavailable')
 
     # Try explicit token param first (for testing); fall back to last cached
     token = query_params.get('token', [''])[0] if isinstance(query_params.get('token'), list) else query_params.get('token', '')
     if token:
-        usage = oauth_cache.get(token)
+        # Explicit token requested — trigger a fetch and return what we have
+        oauth_cache.get(token)
+        usage = oauth_cache.get_usage()
     else:
         # Return the last cached usage (from any recent bearer auth request)
-        usage = oauth_cache._usage if hasattr(oauth_cache, '_usage') else None
+        usage = oauth_cache.get_usage()
 
     if usage is None:
-        return 200, {'oauth_token': None}
+        # Issue 3 Fix: Return 202 Accepted instead of 200 with None
+        # This signals to the UI that data is being fetched and it should poll again
+        return 202, {
+            'oauth_token': None,
+            'message': 'OAuth usage data is being fetched. Please retry in a few seconds.',
+            'retry_after_seconds': 5,
+        }
 
     return 200, {
         'oauth_token': {
