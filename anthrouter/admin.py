@@ -12,6 +12,10 @@ by design.  Responses are JSON-serialisable dicts; the caller serialises them.
 from __future__ import annotations
 
 import logging
+import os
+from pathlib import Path
+
+from anthrouter.config import EDITABLE_FIELDS
 
 logger = logging.getLogger(__name__)
 
@@ -42,10 +46,13 @@ def _page(params: dict) -> tuple[int, int]:
 
 def handle_get(path: str, query_params: dict, db, config, oauth_cache=None) -> tuple[int, dict]:
     """Route one admin GET; never raises for a bad path or parameter."""
+    route = path.rstrip('/')
+    if route == '/admin/config':
+        return _get_config(config)
+
     if db is None:
         return _err(503, 'api_error', 'Request recording is disabled')
 
-    route = path.rstrip('/')
     if route in ('/admin', '/admin/status'):
         return _get_status(db, config)
     if route == '/admin/requests':
@@ -77,6 +84,64 @@ def _get_status(db, config) -> tuple[int, dict]:
         'db_retention_days': config.db_retention_days,
         'stats': db.get_stats(),
         'ratelimit': db.get_latest_ratelimit(),
+    }
+
+
+def _read_config_env(anthrouter_home: str) -> dict[str, str]:
+    """Read config.env file and parse KEY="value" pairs.
+
+    Returns a dict mapping field names to their values from the file.
+    Non-matching lines are skipped (fall back to in-memory Config).
+    Returns empty dict if file does not exist.
+    """
+    config_env_path = Path(anthrouter_home) / 'config.env'
+    result = {}
+    if not config_env_path.exists():
+        return result
+
+    try:
+        with open(config_env_path, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                if '=' not in line:
+                    continue
+                key, value = line.split('=', 1)
+                key = key.strip()
+                value = value.strip()
+                if value.startswith('"') and value.endswith('"'):
+                    value = value[1:-1]
+                    result[key] = value
+    except (IOError, OSError):
+        pass
+
+    return result
+
+
+def _get_config(config) -> tuple[int, dict]:
+    """Return current config with restart-required metadata."""
+    file_values = _read_config_env(config.anthrouter_home)
+
+    fields = {}
+    for field_name, restart_required in EDITABLE_FIELDS.items():
+        if restart_required:
+            env_key = field_name.upper()
+            if env_key in file_values:
+                value = file_values[env_key]
+            else:
+                value = str(getattr(config, field_name, ''))
+        else:
+            value = str(getattr(config, field_name, ''))
+
+        fields[field_name] = {
+            'restart_required': restart_required,
+            'value': value,
+        }
+
+    return 200, {
+        'admin_token_configured': bool(getattr(config, 'admin_token', None)),
+        'fields': fields,
     }
 
 

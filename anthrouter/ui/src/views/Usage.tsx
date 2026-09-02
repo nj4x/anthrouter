@@ -1,8 +1,10 @@
+import { useState } from 'react'
 import useSWR from 'swr'
 
 import type { StatusResponse } from '../api'
 import { fetchJson } from '../api'
 import { Metric, Panel } from '../components'
+import { ConfigModal } from '../components/ConfigModal'
 import { OAuthCard } from '../components/OAuthCard'
 import { count, usd } from '../format'
 
@@ -10,9 +12,11 @@ export function Usage() {
   const { data } = useSWR<StatusResponse>('/admin/status', fetchJson, {
     refreshInterval: 10000,
   })
+  const [configModalOpen, setConfigModalOpen] = useState(false)
 
   return (
     <div className="space-y-4">
+      <ConfigModal isOpen={configModalOpen} onClose={() => setConfigModalOpen(false)} />
       <Panel title="OAuth Usage">
         <OAuthCard />
         <p className="mt-3 text-xs text-slate-600 dark:text-slate-400">
@@ -33,16 +37,24 @@ export function Usage() {
         </div>
       </Panel>
       <Panel title="Configuration">
-        <dl className="grid gap-3 text-sm sm:grid-cols-2">
-          <Setting label="Upstream" value={data?.upstream_base_url} />
-          <Setting label="Auto model routing" value={data ? String(data.auto_model_routing) : undefined} />
-          <Setting label="Sanitize system prompt" value={data?.sanitize_system_prompt} />
-          <Setting label="Model baseline lock" value={data?.lock_requested_model} />
-          <Setting
-            label="DB retention"
-            value={data ? (data.db_retention_days ? `${data.db_retention_days} days` : 'forever') : undefined}
-          />
-        </dl>
+        <div className="space-y-3">
+          <dl className="grid gap-3 text-sm sm:grid-cols-2">
+            <Setting label="Upstream" value={data?.upstream_base_url} />
+            <Setting label="Auto model routing" value={data ? String(data.auto_model_routing) : undefined} />
+            <Setting label="Sanitize system prompt" value={data?.sanitize_system_prompt} />
+            <Setting label="Model baseline lock" value={data?.lock_requested_model} />
+            <Setting
+              label="DB retention"
+              value={data ? (data.db_retention_days ? `${data.db_retention_days} days` : 'forever') : undefined}
+            />
+          </dl>
+          <button
+            onClick={() => setConfigModalOpen(true)}
+            className="rounded border border-slate-300 bg-slate-100 px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-200 dark:border-slate-600 dark:bg-slate-700 dark:text-slate-300 dark:hover:bg-slate-600"
+          >
+            Edit configuration
+          </button>
+        </div>
       </Panel>
     </div>
   )

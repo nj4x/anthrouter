@@ -9,6 +9,41 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_UPSTREAM_BASE_URL = 'https://api.anthropic.com'
 
+# EDITABLE_FIELDS: registry of config fields that can be edited via admin API
+# True = file-editable (restart required for changes to apply)
+# False = live-editable (applies immediately)
+# Excluded fields (not in this registry): admin_token, auto_model_routing_classification,
+#   auto_model_routing_task_tiers, model_aliases, anthrouter_home, enable_ui, request_history_size
+EDITABLE_FIELDS: dict[str, bool] = {
+    # File-editable (restart required)
+    'host': True,
+    'port': True,
+    'log_file': True,
+    'db_path': True,
+    'upstream_base_url': True,
+    'auto_model_routing_classifier_model': True,
+    # Live-editable (applies immediately)
+    'log_level': False,
+    'auto_model_routing': False,
+    'auto_model_routing_long_context_threshold': False,
+    'auto_model_routing_affirmation_inherit': False,
+    'auto_model_routing_long': False,
+    'auto_model_routing_confidence_bump': False,
+    'auto_model_routing_min_confidence': False,
+    'auto_model_routing_mode': False,
+    'auto_model_routing_prior_response_summary_limit': False,
+    'auto_model_routing_system_prompt_weight': False,
+    'auto_model_routing_user_prompt_weight': False,
+    'auto_model_routing_trivial_threshold': False,
+    'auto_model_routing_standard_threshold': False,
+    'auto_model_routing_system_prompt_cache_size': False,
+    'auto_model_routing_system_prompt_preview_limit': False,
+    'lock_requested_model': False,
+    'sanitize_system_prompt': False,
+    'sse_keepalive_interval': False,
+    'db_retention_days': False,
+}
+
 _DEFAULT_CLASSIFICATION: dict[str, str] = {
     'trivial': 'haiku',
     'standard': 'sonnet',
@@ -142,6 +177,68 @@ class Config:
     db_retention_days: int = 30  # Prune request rows older than this; 0 keeps forever
     enable_ui: bool = False     # Whether /admin/* and /ui/* endpoints are active
     model_aliases: dict[str, str] = dataclasses.field(default_factory=dict)  # User-supplied alias overrides
+
+
+def validate_config(cfg: Config) -> list[str]:
+    """Validate a Config instance and return a list of error messages.
+    
+    Returns an empty list if the config is valid.
+    
+    Validates:
+    - Cross-field invariants: weight pairs summing to 1.0, threshold ordering
+    - Single-field bounds: sse_keepalive_interval >= 0, db_retention_days >= 0,
+      long_context_threshold >= 0, prior_limit in [50, 32000], 
+      system_prompt_cache_size >= 1, system_prompt_preview_limit >= 1,
+      upstream_base_url non-empty, auto_model_routing_classifier_model non-empty
+    
+    Does NOT enforce config.env quoting rules (serialization concern).
+    """
+    errors: list[str] = []
+    
+    # Single-field bounds checks
+    if not cfg.auto_model_routing_classifier_model.strip():
+        errors.append('--auto-model-routing-classifier-model must be a non-empty string')
+    
+    if cfg.sse_keepalive_interval < 0:
+        errors.append('--sse-keepalive-interval must be >= 0')
+    
+    if cfg.db_retention_days < 0:
+        errors.append('--db-retention-days must be >= 0')
+    
+    if cfg.auto_model_routing_long_context_threshold < 0:
+        errors.append('--auto-model-routing-long-context-threshold must be >= 0')
+    
+    prior_limit = cfg.auto_model_routing_prior_response_summary_limit
+    if prior_limit < 50 or prior_limit > 32_000:
+        errors.append(f'--auto-model-routing-prior-response-summary-limit must be in [50, 32000], got {prior_limit}')
+    
+    if cfg.auto_model_routing_system_prompt_cache_size < 1:
+        errors.append(f'--auto-model-routing-system-prompt-cache-size must be >= 1, got {cfg.auto_model_routing_system_prompt_cache_size}')
+    
+    if cfg.auto_model_routing_system_prompt_preview_limit < 1:
+        errors.append(f'--auto-model-routing-system-prompt-preview-limit must be >= 1, got {cfg.auto_model_routing_system_prompt_preview_limit}')
+    
+    if not cfg.upstream_base_url:
+        errors.append('--upstream-base-url must be a non-empty URL')
+    
+    # Cross-field invariants
+    sys_w = cfg.auto_model_routing_system_prompt_weight
+    usr_w = cfg.auto_model_routing_user_prompt_weight
+    if abs(sys_w + usr_w - 1.0) >= 1e-9:
+        errors.append(f'--auto-model-routing-system-prompt-weight + --auto-model-routing-user-prompt-weight must equal 1.0, got {sys_w} + {usr_w} = {sys_w + usr_w}')
+    
+    if sys_w <= 0:
+        errors.append(f'--auto-model-routing-system-prompt-weight must be > 0, got {sys_w}')
+    
+    if usr_w <= 0:
+        errors.append(f'--auto-model-routing-user-prompt-weight must be > 0, got {usr_w}')
+    
+    trivial_t = cfg.auto_model_routing_trivial_threshold
+    standard_t = cfg.auto_model_routing_standard_threshold
+    if trivial_t >= standard_t:
+        errors.append(f'--auto-model-routing-trivial-threshold must be < --auto-model-routing-standard-threshold, got {trivial_t} >= {standard_t}')
+    
+    return errors
 
 
 def parse_args(argv=None) -> Config:
@@ -416,39 +513,11 @@ def parse_args(argv=None) -> Config:
 
     cfg = Config(**{f.name: getattr(args, f.name) for f in dataclasses.fields(Config)})
 
-    if not cfg.auto_model_routing_classifier_model.strip():
-        p.error('--auto-model-routing-classifier-model must be a non-empty string')
-    if cfg.sse_keepalive_interval < 0:
-        p.error('--sse-keepalive-interval must be >= 0')
-    if cfg.db_retention_days < 0:
-        p.error('--db-retention-days must be >= 0')
-    if cfg.auto_model_routing_long_context_threshold < 0:
-        p.error('--auto-model-routing-long-context-threshold must be >= 0')
-    prior_limit = cfg.auto_model_routing_prior_response_summary_limit
-    if prior_limit < 50 or prior_limit > 32_000:
-        p.error('--auto-model-routing-prior-response-summary-limit must be in '
-                f'[50, 32000], got {prior_limit}')
-    sys_w = cfg.auto_model_routing_system_prompt_weight
-    usr_w = cfg.auto_model_routing_user_prompt_weight
-    if abs(sys_w + usr_w - 1.0) >= 1e-9:
-        p.error('--auto-model-routing-system-prompt-weight + '
-                '--auto-model-routing-user-prompt-weight must equal 1.0, '
-                f'got {sys_w} + {usr_w} = {sys_w + usr_w}')
-    if sys_w <= 0:
-        p.error(f'--auto-model-routing-system-prompt-weight must be > 0, got {sys_w}')
-    if usr_w <= 0:
-        p.error(f'--auto-model-routing-user-prompt-weight must be > 0, got {usr_w}')
-    trivial_t = cfg.auto_model_routing_trivial_threshold
-    standard_t = cfg.auto_model_routing_standard_threshold
-    if trivial_t >= standard_t:
-        p.error('--auto-model-routing-trivial-threshold must be < '
-                f'--auto-model-routing-standard-threshold, got {trivial_t} >= {standard_t}')
-    if cfg.auto_model_routing_system_prompt_cache_size < 1:
-        p.error('--auto-model-routing-system-prompt-cache-size must be >= 1, '
-                f'got {cfg.auto_model_routing_system_prompt_cache_size}')
-    if cfg.auto_model_routing_system_prompt_preview_limit < 1:
-        p.error('--auto-model-routing-system-prompt-preview-limit must be >= 1, '
-                f'got {cfg.auto_model_routing_system_prompt_preview_limit}')
+    # Run extracted validation and report errors
+    validation_errors = validate_config(cfg)
+    if validation_errors:
+        # Join all errors and report as a single error message
+        p.error('\n'.join(validation_errors))
 
     cfg.anthrouter_home = _resolve_home(cfg.anthrouter_home)
     if cfg.enable_ui and cfg.db_path is None:
