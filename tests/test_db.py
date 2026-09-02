@@ -19,6 +19,9 @@ class FakeDecision:
     classifier_summary_json: str | None = '{"user":"fix a typo"}'
     classifier_raw_response: str | None = 'trivial'
     classifier_format: str | None = 'standard'
+    system_prompt_score: float | None = None
+    user_prompt_score: float | None = None
+    routing_weighted_score: float | None = None
 
 
 STATS = {
@@ -52,8 +55,8 @@ def _record(store, **kwargs):
 # Schema
 # ---------------------------------------------------------------------------
 
-def test_schema_version_is_two(db):
-    assert db._conn.execute('PRAGMA user_version').fetchone()[0] == 2
+def test_schema_version_is_three(db):
+    assert db._conn.execute('PRAGMA user_version').fetchone()[0] == 3
 
 
 def test_only_the_three_tables_exist(db):

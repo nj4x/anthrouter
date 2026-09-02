@@ -4,12 +4,14 @@ import useSWR from 'swr'
 import type { SanitizerResponse } from '../api'
 import { fetchJson } from '../api'
 import { Badge, Empty, LoadState, Metric, Pager, Panel, Table } from '../components'
+import { RequestDetailDrawer } from '../components/RequestDetailDrawer'
 import { count, modelLabel, sessionLabel, timestamp } from '../format'
 
 const LIMIT = 50
 
 export function Sanitizer() {
   const [offset, setOffset] = useState(0)
+  const [selected, setSelected] = useState<number | null>(null)
   const { data, error, isLoading } = useSWR<SanitizerResponse>(
     `/admin/sanitizer-events?limit=${LIMIT}&offset=${offset}`,
     fetchJson,
@@ -34,11 +36,15 @@ export function Sanitizer() {
         )}
         {data && data.events.length > 0 && (
           <>
-            <Table headers={['Time', 'Request', 'Session', 'Model', 'Block', 'Outcome', 'Preview']}>
+            <Table headers={['#', 'Time', 'Session', 'Model', 'Block', 'Outcome', 'Preview']}>
               {data.events.map((event) => (
-                <tr key={event.id}>
-                  <td className="px-3 py-2 text-slate-600 dark:text-slate-400">{timestamp(event.event_ts)}</td>
+                <tr
+                  key={event.id}
+                  className="cursor-pointer hover:bg-slate-100 dark:hover:bg-slate-800"
+                  onClick={() => setSelected(selected === event.request_id ? null : event.request_id)}
+                >
                   <td className="px-3 py-2 font-mono text-xs text-slate-600 dark:text-slate-400">#{event.request_id}</td>
+                  <td className="px-3 py-2 text-slate-600 dark:text-slate-400">{timestamp(event.event_ts)}</td>
                   <td className="px-3 py-2 font-mono text-xs text-slate-600 dark:text-slate-400">
                     {sessionLabel(event.session_id)}
                   </td>
@@ -61,6 +67,7 @@ export function Sanitizer() {
           </>
         )}
       </Panel>
+      <RequestDetailDrawer requestId={selected} onClose={() => setSelected(null)} />
     </div>
   )
 }

@@ -31,7 +31,7 @@ from .model_tier import classify_model_tier
 
 logger = logging.getLogger(__name__)
 
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 
 _RETENTION_INTERVAL_SECS = 24 * 3600
 _RETENTION_CHUNK = 1000
@@ -155,7 +155,14 @@ def _apply_migration_1(conn: sqlite3.Connection) -> None:
     conn.execute('ALTER TABLE sanitizer_events ADD COLUMN payload_full TEXT')
 
 
-_MIGRATIONS = {0: _apply_migration_0, 1: _apply_migration_1}
+def _apply_migration_2(conn: sqlite3.Connection) -> None:
+    """Add classifier score columns for transparency (ADR 0010/0012)."""
+    conn.execute('ALTER TABLE requests ADD COLUMN system_prompt_score REAL')
+    conn.execute('ALTER TABLE requests ADD COLUMN user_prompt_score REAL')
+    conn.execute('ALTER TABLE requests ADD COLUMN routing_weighted_score REAL')
+
+
+_MIGRATIONS = {0: _apply_migration_0, 1: _apply_migration_1, 2: _apply_migration_2}
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
@@ -301,10 +308,11 @@ class RequestDB:
                     system_prompt_sanitized_sha256, tools_sha256, user_prompt_text,
                     response_text, ratelimit_requests_remaining,
                     ratelimit_tokens_remaining, ratelimit_input_tokens_remaining,
-                    ratelimit_output_tokens_remaining, ratelimit_reset_at
+                    ratelimit_output_tokens_remaining, ratelimit_reset_at,
+                    system_prompt_score, user_prompt_score, routing_weighted_score
                 ) VALUES (
                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                 )
                 """,
                 (
@@ -342,6 +350,9 @@ class RequestDB:
                     rl.get('input_tokens_remaining'),
                     rl.get('output_tokens_remaining'),
                     rl.get('reset_at'),
+                    getattr(routing_decision, 'system_prompt_score', None),
+                    getattr(routing_decision, 'user_prompt_score', None),
+                    getattr(routing_decision, 'routing_weighted_score', None),
                 ),
             )
             request_id: int = cur.lastrowid
@@ -446,7 +457,8 @@ class RequestDB:
                       estimated_input_tokens, input_tokens, output_tokens,
                       cost_estimate, net_savings_usd, classifier_overhead_usd,
                       classifier_model, classifier_format, classifier_summary_json,
-                      classifier_raw_response, status, duration_ms
+                      classifier_raw_response, status, duration_ms,
+                      system_prompt_score, user_prompt_score, routing_weighted_score
                  FROM requests
                 WHERE classification IS NOT NULL OR reason_code IS NOT NULL
                 ORDER BY request_ts DESC, id DESC LIMIT ? OFFSET ?""",

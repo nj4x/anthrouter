@@ -39,7 +39,7 @@ export function Requests() {
         {data && data.requests.length === 0 && <Empty message="No requests recorded yet." />}
         {data && data.requests.length > 0 && (
           <>
-            <Table headers={['Time', 'Session', 'Model', 'Status', 'Tokens', 'Cost', 'Took', 'Prompt']}>
+            <Table headers={['#', 'Time', 'Session', 'Model', 'Status', 'Tokens', 'Cost', 'Took', 'Prompt']}>
               {data.requests.map((row) => (
                 <Row
                   key={row.id}
@@ -61,6 +61,7 @@ function Row({ row, onSelect }: { row: RequestRow; onSelect: () => void }) {
   const routed = row.routed_model && row.routed_model !== row.requested_model
   return (
     <tr className="cursor-pointer hover:bg-slate-100 dark:hover:bg-slate-800" onClick={onSelect}>
+      <td className="px-3 py-2 font-mono text-xs text-slate-600 dark:text-slate-400">#{row.id}</td>
       <td className="px-3 py-2 text-slate-600 dark:text-slate-400">{timestamp(row.request_ts)}</td>
       <td className="px-3 py-2 font-mono text-xs text-slate-600 dark:text-slate-400">{sessionLabel(row.session_id)}</td>
       <td className="px-3 py-2">

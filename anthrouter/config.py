@@ -129,10 +129,10 @@ class Config:
     auto_model_routing_mode: str = 'classifier'
     auto_model_routing_task_tiers: dict[str, str] | None = None
     auto_model_routing_prior_response_summary_limit: int = 1000
-    auto_model_routing_system_prompt_weight: float = 0.30
-    auto_model_routing_user_prompt_weight: float = 0.70
-    auto_model_routing_trivial_threshold: float = 38.0
-    auto_model_routing_standard_threshold: float = 75.0
+    auto_model_routing_system_prompt_weight: float = 0.20
+    auto_model_routing_user_prompt_weight: float = 0.80
+    auto_model_routing_trivial_threshold: float = 30.0
+    auto_model_routing_standard_threshold: float = 60.0
     auto_model_routing_system_prompt_cache_size: int = 256
     auto_model_routing_system_prompt_preview_limit: int = 500
     lock_requested_model: str = 'off'   # Model baseline lock for routing; 'off' disables
@@ -285,38 +285,38 @@ def parse_args(argv=None) -> Config:
         '--auto-model-routing-system-prompt-weight',
         dest='auto_model_routing_system_prompt_weight', type=float,
         default=float(os.environ.get(
-            'ANTHROUTER_AUTO_MODEL_ROUTING_SYSTEM_PROMPT_WEIGHT', '0.30')),
+            'ANTHROUTER_AUTO_MODEL_ROUTING_SYSTEM_PROMPT_WEIGHT', '0.20')),
         help='Weight applied to the system-prompt tier score in the weighted blend '
              '(must sum to 1.0 with --auto-model-routing-user-prompt-weight; both > 0). '
-             '(default: 0.30, env: ANTHROUTER_AUTO_MODEL_ROUTING_SYSTEM_PROMPT_WEIGHT)',
+             '(default: 0.20, env: ANTHROUTER_AUTO_MODEL_ROUTING_SYSTEM_PROMPT_WEIGHT)',
     )
     p.add_argument(
         '--auto-model-routing-user-prompt-weight',
         dest='auto_model_routing_user_prompt_weight', type=float,
         default=float(os.environ.get(
-            'ANTHROUTER_AUTO_MODEL_ROUTING_USER_PROMPT_WEIGHT', '0.70')),
+            'ANTHROUTER_AUTO_MODEL_ROUTING_USER_PROMPT_WEIGHT', '0.80')),
         help='Weight applied to the user-prompt tier score in the weighted blend '
              '(must sum to 1.0 with --auto-model-routing-system-prompt-weight; both > 0). '
-             '(default: 0.70, env: ANTHROUTER_AUTO_MODEL_ROUTING_USER_PROMPT_WEIGHT)',
+             '(default: 0.80, env: ANTHROUTER_AUTO_MODEL_ROUTING_USER_PROMPT_WEIGHT)',
     )
     p.add_argument(
         '--auto-model-routing-trivial-threshold',
         dest='auto_model_routing_trivial_threshold', type=float,
         default=float(os.environ.get(
-            'ANTHROUTER_AUTO_MODEL_ROUTING_TRIVIAL_THRESHOLD', '38')),
+            'ANTHROUTER_AUTO_MODEL_ROUTING_TRIVIAL_THRESHOLD', '30')),
         help='Weighted-score threshold below which the blended tier is "trivial". '
              'Must be strictly less than --auto-model-routing-standard-threshold. '
-             '(default: 38, env: ANTHROUTER_AUTO_MODEL_ROUTING_TRIVIAL_THRESHOLD)',
+             '(default: 30, env: ANTHROUTER_AUTO_MODEL_ROUTING_TRIVIAL_THRESHOLD)',
     )
     p.add_argument(
         '--auto-model-routing-standard-threshold',
         dest='auto_model_routing_standard_threshold', type=float,
         default=float(os.environ.get(
-            'ANTHROUTER_AUTO_MODEL_ROUTING_STANDARD_THRESHOLD', '75')),
+            'ANTHROUTER_AUTO_MODEL_ROUTING_STANDARD_THRESHOLD', '60')),
         help='Weighted-score threshold at/above which the blended tier is "deep"; '
              'between trivial_threshold and this value is "standard". '
              'Must be strictly greater than --auto-model-routing-trivial-threshold. '
-             '(default: 75, env: ANTHROUTER_AUTO_MODEL_ROUTING_STANDARD_THRESHOLD)',
+             '(default: 60, env: ANTHROUTER_AUTO_MODEL_ROUTING_STANDARD_THRESHOLD)',
     )
     p.add_argument(
         '--auto-model-routing-system-prompt-cache-size',

@@ -32,6 +32,9 @@ export interface RequestRow {
   system_prompt_content: string | null
   system_prompt_sanitized_content: string | null
   tools_content: string | null
+  system_prompt_score: number | null
+  user_prompt_score: number | null
+  routing_weighted_score: number | null
 }
 
 export interface RateLimit {
