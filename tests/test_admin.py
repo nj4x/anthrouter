@@ -1,6 +1,5 @@
 import http.client
 import json
-import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -9,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from anthrouter import admin
-from anthrouter.config import Config, EDITABLE_FIELDS
+from anthrouter.config import EDITABLE_FIELDS, Config
 from anthrouter.db import RequestDB
 from tests.conftest import SESSION, post
 
@@ -323,8 +322,8 @@ def test_get_config_returns_all_editable_fields(cfg):
 
 def test_get_config_field_structure(cfg):
     """Each field has restart_required and value."""
-    status, body = admin.handle_get('/admin/config', {}, None, cfg)
-    for field_name, field_data in body['fields'].items():
+    _status, body = admin.handle_get('/admin/config', {}, None, cfg)
+    for field_data in body['fields'].values():
         assert 'restart_required' in field_data
         assert 'value' in field_data
         assert isinstance(field_data['restart_required'], bool)
@@ -333,14 +332,14 @@ def test_get_config_field_structure(cfg):
 
 def test_get_config_restart_required_polarity(cfg):
     """restart_required polarity matches EDITABLE_FIELDS."""
-    status, body = admin.handle_get('/admin/config', {}, None, cfg)
+    _status, body = admin.handle_get('/admin/config', {}, None, cfg)
     for field_name, field_data in body['fields'].items():
         assert field_data['restart_required'] == EDITABLE_FIELDS[field_name]
 
 
 def test_get_config_admin_token_always_false_without_token(cfg):
     """admin_token_configured is false when Config.admin_token not set."""
-    status, body = admin.handle_get('/admin/config', {}, None, cfg)
+    _status, body = admin.handle_get('/admin/config', {}, None, cfg)
     assert body['admin_token_configured'] is False
 
 
@@ -348,7 +347,7 @@ def test_get_config_admin_token_true_when_configured():
     """admin_token_configured is true when Config has admin_token."""
     cfg = Config(upstream_base_url='https://api.anthropic.com', enable_ui=True)
     cfg.admin_token = 'test-secret-token'
-    status, body = admin.handle_get('/admin/config', {}, None, cfg)
+    _status, body = admin.handle_get('/admin/config', {}, None, cfg)
     assert body['admin_token_configured'] is True
 
 
@@ -356,8 +355,7 @@ def test_get_config_never_leaks_admin_token():
     """Admin token value is never included in response."""
     cfg = Config(upstream_base_url='https://api.anthropic.com', enable_ui=True)
     cfg.admin_token = 'super-secret-token'
-    status, body = admin.handle_get('/admin/config', {}, None, cfg)
-    import json
+    _status, body = admin.handle_get('/admin/config', {}, None, cfg)
     response_str = json.dumps(body)
     assert 'super-secret-token' not in response_str
     assert 'admin_token' not in body['fields']
@@ -365,14 +363,14 @@ def test_get_config_never_leaks_admin_token():
 
 def test_get_config_file_editable_fields_from_memory_by_default(cfg):
     """File-editable fields read from in-memory Config when file absent."""
-    status, body = admin.handle_get('/admin/config', {}, None, cfg)
+    _status, body = admin.handle_get('/admin/config', {}, None, cfg)
     # host is file-editable
     assert body['fields']['host']['value'] == '127.0.0.1'
     assert body['fields']['host']['restart_required'] is True
 
 
 def test_get_config_file_editable_fields_from_config_env(cfg, tmp_path):
-    """File-editable fields read from config.env file when present."""
+    """File-editable fields read from config.env file when present (quoted form)."""
     anthrouter_home = str(tmp_path)
     cfg = Config(
         upstream_base_url='https://api.anthropic.com',
@@ -382,11 +380,29 @@ def test_get_config_file_editable_fields_from_config_env(cfg, tmp_path):
         port=8083,
     )
     config_env = Path(anthrouter_home) / 'config.env'
-    config_env.write_text('HOST="192.168.1.1"\n')
+    config_env.write_text('ANTHROUTER_HOST="192.168.1.1"\n')
 
-    status, body = admin.handle_get('/admin/config', {}, None, cfg)
+    _status, body = admin.handle_get('/admin/config', {}, None, cfg)
     assert body['fields']['host']['value'] == '192.168.1.1'
     assert body['fields']['host']['restart_required'] is True
+
+
+def test_get_config_reads_unquoted_install_sh_format(cfg, tmp_path):
+    """install.sh currently writes unquoted KEY=value lines; GET must parse those too."""
+    anthrouter_home = str(tmp_path)
+    cfg = Config(
+        upstream_base_url='https://api.anthropic.com',
+        enable_ui=True,
+        anthrouter_home=anthrouter_home,
+        host='127.0.0.1',
+        port=8083,
+    )
+    config_env = Path(anthrouter_home) / 'config.env'
+    config_env.write_text('ANTHROUTER_HOST=192.168.1.1\nANTHROUTER_PORT=9090\n')
+
+    _status, body = admin.handle_get('/admin/config', {}, None, cfg)
+    assert body['fields']['host']['value'] == '192.168.1.1'
+    assert body['fields']['port']['value'] == '9090'
 
 
 def test_get_config_fallback_to_memory_when_file_key_absent(cfg, tmp_path):
@@ -400,9 +416,9 @@ def test_get_config_fallback_to_memory_when_file_key_absent(cfg, tmp_path):
         port=9999,
     )
     config_env = Path(anthrouter_home) / 'config.env'
-    config_env.write_text('PORT="8888"\n')  # HOST key absent
+    config_env.write_text('ANTHROUTER_PORT="8888"\n')  # HOST key absent
 
-    status, body = admin.handle_get('/admin/config', {}, None, cfg)
+    _status, body = admin.handle_get('/admin/config', {}, None, cfg)
     assert body['fields']['host']['value'] == '192.168.1.1'  # fallback
     assert body['fields']['port']['value'] == '8888'  # from file
 
@@ -417,9 +433,9 @@ def test_get_config_file_parse_handles_comments_and_empty_lines(cfg, tmp_path):
         host='127.0.0.1',
     )
     config_env = Path(anthrouter_home) / 'config.env'
-    config_env.write_text('# Comment\n\nHOST="example.com"\n')
+    config_env.write_text('# Comment\n\nANTHROUTER_HOST="example.com"\n')
 
-    status, body = admin.handle_get('/admin/config', {}, None, cfg)
+    _status, body = admin.handle_get('/admin/config', {}, None, cfg)
     assert body['fields']['host']['value'] == 'example.com'
 
 
@@ -430,6 +446,6 @@ def test_get_config_live_editable_fields_from_memory(cfg):
         enable_ui=True,
         log_level='DEBUG',
     )
-    status, body = admin.handle_get('/admin/config', {}, None, cfg)
+    _status, body = admin.handle_get('/admin/config', {}, None, cfg)
     assert body['fields']['log_level']['value'] == 'DEBUG'
     assert body['fields']['log_level']['restart_required'] is False

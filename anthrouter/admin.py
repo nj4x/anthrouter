@@ -12,7 +12,6 @@ by design.  Responses are JSON-serialisable dicts; the caller serialises them.
 from __future__ import annotations
 
 import logging
-import os
 from pathlib import Path
 
 from anthrouter.config import EDITABLE_FIELDS
@@ -88,11 +87,12 @@ def _get_status(db, config) -> tuple[int, dict]:
 
 
 def _read_config_env(anthrouter_home: str) -> dict[str, str]:
-    """Read config.env file and parse KEY="value" pairs.
+    """Read config.env and parse ``KEY=value`` / ``KEY="value"`` pairs.
 
-    Returns a dict mapping field names to their values from the file.
-    Non-matching lines are skipped (fall back to in-memory Config).
-    Returns empty dict if file does not exist.
+    install.sh currently writes unquoted values (``ANTHROUTER_HOST=127.0.0.1``);
+    ticket 03's POST handler writes the double-quoted form. Both are accepted so
+    a GET works against a file either writer produced. Non-matching lines are
+    skipped (fall back to in-memory Config). Returns empty dict if file absent.
     """
     config_env_path = Path(anthrouter_home) / 'config.env'
     result = {}
@@ -110,11 +110,12 @@ def _read_config_env(anthrouter_home: str) -> dict[str, str]:
                 key, value = line.split('=', 1)
                 key = key.strip()
                 value = value.strip()
-                if value.startswith('"') and value.endswith('"'):
+                if value.startswith('"') and value.endswith('"') and len(value) >= 2:
                     value = value[1:-1]
-                    result[key] = value
-    except (IOError, OSError):
-        pass
+                result[key] = value
+    except OSError as exc:
+        # Falls back to in-memory Config values below; not a request-fatal error.
+        logger.warning('failed to read %s: %s', config_env_path, exc)
 
     return result
 
@@ -126,7 +127,7 @@ def _get_config(config) -> tuple[int, dict]:
     fields = {}
     for field_name, restart_required in EDITABLE_FIELDS.items():
         if restart_required:
-            env_key = field_name.upper()
+            env_key = 'ANTHROUTER_' + field_name.upper()
             if env_key in file_values:
                 value = file_values[env_key]
             else:

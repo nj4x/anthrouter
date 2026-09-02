@@ -17,8 +17,6 @@ export function ConfigModal({ isOpen, onClose }: { isOpen: boolean; onClose: () 
   useEffect(() => {
     if (!isOpen) return
 
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    setConfig(null)
     fetch('/admin/config')
       .then(r => r.json() as Promise<ConfigResponse>)
       .then(data => {
@@ -29,15 +27,36 @@ export function ConfigModal({ isOpen, onClose }: { isOpen: boolean; onClose: () 
       })
   }, [isOpen])
 
+  useEffect(() => {
+    if (!isOpen) return
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [isOpen, onClose])
+
   if (!isOpen) return null
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={onClose}>
-      <div className="w-full max-w-2xl rounded-lg bg-white p-6 dark:bg-slate-800" onClick={e => e.stopPropagation()}>
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
+      onClick={onClose}
+      role="presentation"
+    >
+      <div
+        className="w-full max-w-2xl rounded-lg bg-white p-6 dark:bg-slate-800"
+        onClick={e => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Edit Configuration"
+      >
         <div className="mb-4 flex items-center justify-between">
           <h2 className="text-lg font-semibold text-slate-900 dark:text-white">Edit Configuration</h2>
           <button
             onClick={onClose}
+            aria-label="Close"
             className="text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200"
           >
             ✕
