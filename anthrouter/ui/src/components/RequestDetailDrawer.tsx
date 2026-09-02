@@ -4,6 +4,7 @@ import useSWR from 'swr'
 
 import type { RequestDetail } from '../api'
 import { fetchJson } from '../api'
+import { count, estimateTokens, prettyPrintMaybeJson } from '../format'
 
 function CopyButton({ text }: { text: string }) {
   const [copied, setCopied] = useState(false)
@@ -66,11 +67,13 @@ export function RequestDetailDrawer({ requestId, onClose }: Props) {
       />
 
       <div
-        className={`fixed top-0 right-0 h-full w-96 max-w-full bg-white dark:bg-slate-900 shadow-2xl z-50 overflow-y-auto transform transition-transform duration-200 ${isOpen ? 'translate-x-0' : 'translate-x-full'}`}
+        className={`fixed top-0 right-0 h-full w-[90vw] sm:w-[60vw] max-w-full bg-white dark:bg-slate-900 shadow-2xl z-50 overflow-y-auto transform transition-transform duration-200 ${isOpen ? 'translate-x-0' : 'translate-x-full'}`}
       >
         <div className="sticky top-0 bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800 px-5 py-3 flex items-center justify-between z-10">
           <span className="text-sm font-semibold text-slate-900 dark:text-slate-100">
-            {data ? `Request #${data.request.id}` : 'Request Detail'}
+            {data
+              ? `Request #${data.request.id} · ${count(data.request.input_tokens)} in / ${count(data.request.output_tokens)} out tok (DB)`
+              : 'Request Detail'}
           </span>
           <button
             onClick={onClose}
@@ -240,7 +243,12 @@ export function RequestDetailDrawer({ requestId, onClose }: Props) {
               {req.user_prompt_text && (
                 <section>
                   <h3 className="text-xs font-semibold text-slate-600 dark:text-slate-400 uppercase tracking-wide mb-2 flex items-center justify-between">
-                    <span>User prompt</span>
+                    <span>
+                      User prompt{' '}
+                      <span className="normal-case font-normal text-slate-400 dark:text-slate-500">
+                        (~{estimateTokens(req.user_prompt_text).toLocaleString()} tok)
+                      </span>
+                    </span>
                     <CopyButton text={req.user_prompt_text} />
                   </h3>
                   <pre className="bg-slate-100 dark:bg-slate-800 p-3 rounded text-xs overflow-auto max-h-48 text-slate-800 dark:text-slate-200 whitespace-pre-wrap break-words">
@@ -266,38 +274,34 @@ export function RequestDetailDrawer({ requestId, onClose }: Props) {
               {req.system_prompt_content && (
                 <section>
                   <h3 className="text-xs font-semibold text-slate-600 dark:text-slate-400 uppercase tracking-wide mb-2 flex items-center justify-between">
-                    <span>System prompt (original)</span>
+                    <span>
+                      System prompt (original){' '}
+                      <span className="normal-case font-normal text-slate-400 dark:text-slate-500">
+                        (~{estimateTokens(req.system_prompt_content).toLocaleString()} tok)
+                      </span>
+                    </span>
                     <CopyButton text={req.system_prompt_content} />
                   </h3>
                   <pre className="bg-slate-100 dark:bg-slate-800 p-3 rounded text-xs overflow-auto max-h-48 text-slate-800 dark:text-slate-200 whitespace-pre-wrap break-words">
-                    {req.system_prompt_content}
+                    {prettyPrintMaybeJson(req.system_prompt_content)}
                   </pre>
                 </section>
               )}
-
-              {req.system_prompt_content &&
-                req.system_prompt_sanitized_content &&
-                req.system_prompt_sha256 !== req.system_prompt_sanitized_sha256 && (
-                  <section>
-                    <h3 className="text-xs font-semibold text-slate-600 dark:text-slate-400 uppercase tracking-wide mb-2 flex items-center justify-between">
-                      <span>System prompt (sanitized, sent upstream)</span>
-                      <CopyButton text={req.system_prompt_sanitized_content} />
-                    </h3>
-                    <pre className="bg-slate-100 dark:bg-slate-800 p-3 rounded text-xs overflow-auto max-h-48 text-slate-800 dark:text-slate-200 whitespace-pre-wrap break-words">
-                      {req.system_prompt_sanitized_content}
-                    </pre>
-                  </section>
-                )}
 
               {/* Tools */}
               {req.tools_content && (
                 <section>
                   <h3 className="text-xs font-semibold text-slate-600 dark:text-slate-400 uppercase tracking-wide mb-2 flex items-center justify-between">
-                    <span>Tools</span>
+                    <span>
+                      Tools{' '}
+                      <span className="normal-case font-normal text-slate-400 dark:text-slate-500">
+                        (~{estimateTokens(req.tools_content).toLocaleString()} tok)
+                      </span>
+                    </span>
                     <CopyButton text={req.tools_content} />
                   </h3>
                   <pre className="bg-slate-100 dark:bg-slate-800 p-3 rounded text-xs overflow-auto max-h-48 text-slate-800 dark:text-slate-200 whitespace-pre-wrap break-words">
-                    {req.tools_content}
+                    {prettyPrintMaybeJson(req.tools_content)}
                   </pre>
                 </section>
               )}
@@ -329,7 +333,7 @@ export function RequestDetailDrawer({ requestId, onClose }: Props) {
                           </span>
                         </div>
                         <pre className="text-xs bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-600 p-2 rounded max-h-24 overflow-auto text-slate-700 dark:text-slate-300 whitespace-pre-wrap break-words group cursor-text">
-                          {event.payload_full || event.payload_preview || '—'}
+                          {prettyPrintMaybeJson(event.payload_full || event.payload_preview || '—')}
                           {(event.payload_full || event.payload_preview) && (
                             <CopyButton text={event.payload_full || event.payload_preview || ''} />
                           )}

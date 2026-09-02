@@ -35,10 +35,24 @@ const REQUEST = {
   tools_sha256: null,
   user_prompt_text: 'fix a typo',
   response_text: 'done',
+  system_prompt_content: '{"role":"system","text":"be helpful"}',
+  system_prompt_sanitized_content: '{"role":"system","text":"be helpful"}',
+  tools_content: '[{"name":"get_weather"}]',
+}
+
+const SANITIZER_EVENT = {
+  id: 7, request_id: 1, event_ts: '2026-08-31T10:00:00.000Z',
+  block_type: 'cc_prompt_id', is_allowlisted: 1,
+  payload_preview: '{"cc_prompt_id":"0d1f"}',
+  payload_full: '{"cc_prompt_id":"0d1f2e3a","ts":1234567890}',
+  session_id: REQUEST.session_id,
+  requested_model: REQUEST.requested_model,
+  system_prompt_sha256: 'aaa', system_prompt_sanitized_sha256: 'bbb',
 }
 
 const ROUTES: Record<string, unknown> = {
   '/admin/requests': { requests: [REQUEST], limit: 50, offset: 0, q: null },
+  '/admin/requests/1': { request: REQUEST, sanitizer_events: [SANITIZER_EVENT] },
   '/admin/routing': {
     decisions: [REQUEST],
     summary: {
@@ -152,11 +166,34 @@ describe('App', () => {
     expect(screen.getByText('stripped')).toBeInTheDocument()
   })
 
-  it('shows the rate-limit window and the configuration', async () => {
+  it('shows the usage totals and the configuration', async () => {
     render(<App />)
     await switchTo('Usage')
-    expect(await screen.findByText('Rate-limit window')).toBeInTheDocument()
-    expect(screen.getByText('13,000')).toBeInTheDocument()
+    expect(await screen.findByText('Totals')).toBeInTheDocument()
     expect(screen.getByText('https://api.anthropic.com')).toBeInTheDocument()
+  })
+
+  it('opens the request-detail drawer with DB totals, token estimates and pretty-printed JSON', async () => {
+    const { fireEvent } = await import('@testing-library/react')
+    render(<App />)
+    await switchTo('Requests')
+    await waitFor(() => expect(screen.getByText('fix a typo')).toBeInTheDocument())
+    fireEvent.click(screen.getByText('fix a typo'))
+
+    // DB totals in the sticky header.
+    expect(await screen.findByText('Request #1 · 100 in / 20 out tok (DB)')).toBeInTheDocument()
+
+    // Per-heading token estimates (chars/4): system prompt is 37 chars, tools is 24 chars.
+    expect(screen.getByText('(~10 tok)', { exact: false })).toBeInTheDocument()
+    expect(screen.getByText('(~6 tok)', { exact: false })).toBeInTheDocument()
+
+    // No "sanitized" system-prompt section — only the original.
+    expect(screen.getByText(/System prompt \(original\)/)).toBeInTheDocument()
+    expect(screen.queryByText(/System prompt \(sanitized/)).not.toBeInTheDocument()
+
+    // Pretty-printed JSON: indented, multi-line, not the single-line source.
+    expect(screen.queryByText(REQUEST.system_prompt_content)).not.toBeInTheDocument()
+    expect(screen.getByText(/"role": "system"/)).toBeInTheDocument()
+    expect(screen.getByText(/"cc_prompt_id": "0d1f2e3a"/)).toBeInTheDocument()
   })
 })

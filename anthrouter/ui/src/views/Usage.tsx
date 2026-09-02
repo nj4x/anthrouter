@@ -4,13 +4,12 @@ import type { StatusResponse } from '../api'
 import { fetchJson } from '../api'
 import { Metric, Panel } from '../components'
 import { OAuthCard } from '../components/OAuthCard'
-import { count, timestamp, usd } from '../format'
+import { count, usd } from '../format'
 
 export function Usage() {
-  const { data, error } = useSWR<StatusResponse>('/admin/status', fetchJson, {
+  const { data } = useSWR<StatusResponse>('/admin/status', fetchJson, {
     refreshInterval: 10000,
   })
-  const rl = data?.ratelimit
 
   return (
     <div className="space-y-4">
@@ -19,35 +18,6 @@ export function Usage() {
         <p className="mt-3 text-xs text-slate-600 dark:text-slate-400">
           OAuth token usage is cached from the last seen bearer auth request. The card refreshes every 60 seconds
           or when a new token is seen.
-        </p>
-      </Panel>
-      <Panel title="Rate-limit window">
-        {error && <p className="text-sm text-red-600 dark:text-red-400">{error.message}</p>}
-        {data && !rl && (
-          <p className="text-sm text-slate-600 dark:text-slate-400">
-            No <code className="font-mono">anthropic-ratelimit-*</code> headers seen yet. They
-            arrive on the first upstream response.
-          </p>
-        )}
-        {rl && (
-          <>
-            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-              <Metric label="Requests left" value={count(rl.ratelimit_requests_remaining)} />
-              <Metric label="Tokens left" value={count(rl.ratelimit_tokens_remaining)} />
-              <Metric label="Input tokens left" value={count(rl.ratelimit_input_tokens_remaining)} />
-              <Metric label="Output tokens left" value={count(rl.ratelimit_output_tokens_remaining)} />
-            </div>
-            <p className="mt-3 text-sm text-slate-600 dark:text-slate-400">
-              Window resets {timestamp(rl.ratelimit_reset_at)} · observed{' '}
-              {timestamp(rl.request_ts)}
-            </p>
-          </>
-        )}
-        {/* Token expiry and quota are not derivable from a forwarded credential:
-            OAuth tokens are opaque and the usage API needs a separate admin key. */}
-        <p className="mt-3 text-xs text-slate-600 dark:text-slate-500">
-          Rate-limit headers are the only usage signal a passthrough proxy can read. Token expiry
-          and account quota need a credential anthrouter never holds.
         </p>
       </Panel>
       <Panel title="Totals">

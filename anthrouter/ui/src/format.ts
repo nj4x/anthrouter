@@ -33,3 +33,17 @@ export function modelLabel(model: string | null | undefined): string {
   if (!model) return '—'
   return model.replace(/^claude-/, '').replace(/-\d{8}$/, '')
 }
+
+/** Rough token estimate matching the backend's chars/4 heuristic (model_router.py). */
+export function estimateTokens(text: string): number {
+  return Math.ceil(text.length / 4)
+}
+
+/** Pretty-prints JSON payloads for readability; returns the original text unchanged if it isn't JSON. */
+export function prettyPrintMaybeJson(text: string): string {
+  try {
+    return JSON.stringify(JSON.parse(text), null, 2)
+  } catch {
+    return text
+  }
+}
