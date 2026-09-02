@@ -28,6 +28,19 @@ def test_defaults():
     }
 
 
+def test_admin_token_defaults_to_none():
+    assert parse_args([]).admin_token is None
+
+
+def test_admin_token_flag():
+    assert parse_args(['--admin-token', 'sekret']).admin_token == 'sekret'
+
+
+def test_admin_token_env(monkeypatch):
+    monkeypatch.setenv('ANTHROUTER_ADMIN_TOKEN', 'from-env')
+    assert parse_args([]).admin_token == 'from-env'
+
+
 def test_env_overrides(monkeypatch):
     monkeypatch.setenv('ANTHROUTER_PORT', '9001')
     monkeypatch.setenv('ANTHROUTER_AUTO_MODEL_ROUTING', '1')

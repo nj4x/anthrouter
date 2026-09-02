@@ -1,29 +1,225 @@
-"""Read-only admin REST API for the anthrouter observability UI.
+"""Admin REST API for the anthrouter observability UI.
 
-One pure entry point called by the HTTP layer:
+Two entry points called by the HTTP layer:
 
     status, body = admin.handle_get(path, query_params, db, config)
+    status, body = admin.handle_post_config(admin_token, body, config, config_setter)
 
-There is no ``handle_post``: with a single backend there is nothing to switch
-or select, so every runtime control the anthproxy admin API carries is absent
-by design.  Responses are JSON-serialisable dicts; the caller serialises them.
+Every GET is read-only by design.  ``POST /admin/config`` is the sole,
+deliberate exception (see ADR-0005): with a single backend there is nothing
+else to switch or select, so no other runtime control is exposed.  Responses
+are JSON-serialisable dicts; the caller serialises them.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import logging
+import os
+import tempfile
+import threading
+import types
+import typing
 from pathlib import Path
 
-from anthrouter.config import EDITABLE_FIELDS
+from anthrouter.config import EDITABLE_FIELDS, Config, validate_config
 
 logger = logging.getLogger(__name__)
 
 MAX_LIMIT = 500
 _DEFAULT_LIMIT = 50
 
+# Guards the read-merge-write of config.env and the in-memory config swap as a
+# single critical section, so two concurrent POSTs can't interleave their file
+# writes (ADR-0005 concurrency section).
+_config_write_lock = threading.Lock()
+
+# The config.env writer quotes every value KEY="value"; these characters would
+# break that quoting or trigger shell expansion/substitution at source time.
+_UNSAFE_QUOTE_CHARS = ('"', '\\', '$', '`', '\n')
+
 
 def _err(code: int, error_code: str, message: str) -> tuple[int, dict]:
     return code, {'type': 'error', 'error': {'type': error_code, 'message': message}}
+
+
+def _err_list(code: int, error_code: str, messages: list[str]) -> tuple[int, dict]:
+    return code, {
+        'type': 'error',
+        'error': {'type': error_code, 'message': '; '.join(messages), 'errors': messages},
+    }
+
+
+def _analyze_field_type(field_type) -> tuple[str, bool]:
+    """Return (kind, optional) for a ``dataclasses.fields(Config)`` type.
+
+    kind is one of 'bool', 'int', 'float', 'str'.  optional is True for an
+    ``X | None`` annotation (only ``db_path`` today).
+    """
+    optional = False
+    origin = typing.get_origin(field_type)
+    if origin is typing.Union or origin is types.UnionType:
+        args = [a for a in typing.get_args(field_type) if a is not type(None)]
+        if len(args) == 1:
+            field_type = args[0]
+            optional = True
+    if field_type is bool:
+        return 'bool', optional
+    if field_type is int:
+        return 'int', optional
+    if field_type is float:
+        return 'float', optional
+    return 'str', optional
+
+
+_FIELD_KIND: dict[str, tuple[str, bool]] = {
+    f.name: _analyze_field_type(f.type) for f in dataclasses.fields(Config)
+}
+
+
+def _quoting_error(name: str, raw_value: str) -> str | None:
+    for ch in _UNSAFE_QUOTE_CHARS:
+        if ch in raw_value:
+            return f'field {name!r} contains disallowed character {ch!r}'
+    return None
+
+
+def _coerce_field(name: str, raw_value: str, kind: str) -> tuple[object, str | None]:
+    if kind == 'bool':
+        low = raw_value.strip().lower()
+        if low in ('true', '1', 'yes'):
+            return True, None
+        if low in ('false', '0', 'no'):
+            return False, None
+        return None, f'field {name!r} must be a boolean (true/false/1/0/yes/no), got {raw_value!r}'
+    if kind == 'int':
+        try:
+            return int(raw_value), None
+        except ValueError:
+            return None, f'field {name!r} must be an integer, got {raw_value!r}'
+    if kind == 'float':
+        try:
+            return float(raw_value), None
+        except ValueError:
+            return None, f'field {name!r} must be a number, got {raw_value!r}'
+    return raw_value, None
+
+
+def _write_config_env(config_env_path: Path, submitted: dict[str, str]) -> None:
+    """Merge-write ``submitted`` into config.env, atomically.
+
+    Replaces each submitted key's line in place (or appends it if absent);
+    every other line — including install.sh's header comments — is left
+    untouched.  Written via a sibling temp file + ``os.replace()``, which is
+    atomic on POSIX: a concurrent GET sees either the whole old file or the
+    whole new one, never a partial write.
+    """
+    env_map = {f'ANTHROUTER_{name.upper()}': value for name, value in submitted.items()}
+    remaining = dict(env_map)
+
+    lines: list[str] = []
+    if config_env_path.exists():
+        with open(config_env_path, 'r') as f:
+            for raw_line in f:
+                line = raw_line.rstrip('\n')
+                stripped = line.strip()
+                key = None
+                if '=' in stripped and not stripped.startswith('#'):
+                    candidate_key = stripped.split('=', 1)[0].strip()
+                    if candidate_key in remaining:
+                        key = candidate_key
+                if key is not None:
+                    lines.append(f'{key}="{remaining.pop(key)}"')
+                else:
+                    lines.append(line)
+
+    for key, value in remaining.items():
+        lines.append(f'{key}="{value}"')
+
+    content = '\n'.join(lines)
+    if content:
+        content += '\n'
+
+    fd, tmp_name = tempfile.mkstemp(
+        dir=str(config_env_path.parent), prefix=f'.{config_env_path.name}.')
+    try:
+        with os.fdopen(fd, 'w') as tmp_f:
+            tmp_f.write(content)
+        os.replace(tmp_name, config_env_path)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+
+
+def handle_post_config(
+    admin_token: str | None, body, config: Config, config_setter,
+) -> tuple[int, dict]:
+    """Validate, persist, and (for live-editable fields) apply a config edit.
+
+    ``config_setter`` is called with the reloaded ``Config`` instance while
+    ``_config_write_lock`` is still held, so the file write and the in-memory
+    swap are serialized as one unit against a second concurrent POST.
+    """
+    if not config.admin_token or admin_token != config.admin_token:
+        return _err(403, 'permission_error', 'Invalid or missing admin token')
+
+    if not isinstance(body, dict):
+        return _err(400, 'invalid_request_error', 'Request body must be a JSON object')
+
+    unknown = sorted(k for k in body if k not in EDITABLE_FIELDS)
+    if unknown:
+        return _err_list(400, 'invalid_request_error',
+                         [f'Unknown config field: {k!r}' for k in unknown])
+
+    missing = sorted(k for k in EDITABLE_FIELDS if k not in body)
+    if missing:
+        return _err_list(400, 'invalid_request_error',
+                         [f'Missing required config field: {k!r}' for k in missing])
+
+    field_errors: list[str] = []
+    coerced: dict[str, object] = {}
+    for name, raw_value in body.items():
+        if not isinstance(raw_value, str):
+            field_errors.append(f'field {name!r} must be a string')
+            continue
+        kind, optional = _FIELD_KIND[name]
+        if kind == 'str':
+            err = _quoting_error(name, raw_value)
+            if err:
+                field_errors.append(err)
+                continue
+            coerced[name] = None if (optional and raw_value == '') else raw_value
+        else:
+            value, err = _coerce_field(name, raw_value, kind)
+            if err:
+                field_errors.append(err)
+            else:
+                coerced[name] = value
+
+    if field_errors:
+        return _err_list(400, 'invalid_request_error', field_errors)
+
+    with _config_write_lock:
+        full_candidate = dataclasses.replace(config, **coerced)
+        validation_errors = validate_config(full_candidate)
+        if validation_errors:
+            return _err_list(400, 'invalid_request_error', validation_errors)
+
+        config_env_path = Path(config.anthrouter_home) / 'config.env'
+        try:
+            _write_config_env(config_env_path, body)
+        except OSError as exc:
+            logger.error('failed to write %s: %s', config_env_path, exc)
+            return _err(500, 'api_error', 'Failed to persist configuration')
+
+        swap_overrides = {k: v for k, v in coerced.items() if not EDITABLE_FIELDS[k]}
+        swap_candidate = dataclasses.replace(config, **swap_overrides)
+        config_setter(swap_candidate)
+
+    return 200, {'status': 'ok'}
 
 
 def _int_param(params: dict, key: str, default: int, max_val: int | None = None) -> int:

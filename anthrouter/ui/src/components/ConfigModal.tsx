@@ -12,7 +12,11 @@ interface ConfigResponse {
 
 export function ConfigModal({ isOpen, onClose }: { isOpen: boolean; onClose: () => void }) {
   const [config, setConfig] = useState<ConfigResponse | null>(null)
+  const [values, setValues] = useState<Record<string, string>>({})
   const [token, setToken] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [saved, setSaved] = useState(false)
 
   useEffect(() => {
     if (!isOpen) return
@@ -21,11 +25,37 @@ export function ConfigModal({ isOpen, onClose }: { isOpen: boolean; onClose: () 
       .then(r => r.json() as Promise<ConfigResponse>)
       .then(data => {
         setConfig(data)
+        setValues(Object.fromEntries(Object.entries(data.fields).map(([name, field]) => [name, field.value])))
+        setError(null)
+        setSaved(false)
       })
       .catch(() => {
         // silently fail
       })
   }, [isOpen])
+
+  const handleSave = () => {
+    setSaving(true)
+    setError(null)
+    fetch('/admin/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Admin-Token': token },
+      body: JSON.stringify(values),
+    })
+      .then(async r => {
+        if (!r.ok) {
+          const data = await r.json().catch(() => null) as { error?: { message?: string } } | null
+          throw new Error(data?.error?.message || `Save failed (${r.status})`)
+        }
+        setSaved(true)
+      })
+      .catch((err: Error) => {
+        setError(err.message || 'Network error while saving configuration')
+      })
+      .finally(() => {
+        setSaving(false)
+      })
+  }
 
   useEffect(() => {
     if (!isOpen) return
@@ -80,10 +110,15 @@ export function ConfigModal({ isOpen, onClose }: { isOpen: boolean; onClose: () 
                     </div>
                     <input
                       type="text"
-                      readOnly
-                      value={field.value}
-                      className="mt-2 w-full rounded border border-slate-300 bg-slate-50 px-3 py-2 text-sm text-slate-800 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-200"
+                      value={values[name] ?? field.value}
+                      onChange={e => setValues(prev => ({ ...prev, [name]: e.target.value }))}
+                      className="mt-2 w-full rounded border border-slate-300 bg-white px-3 py-2 text-sm text-slate-800 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-200"
                     />
+                    {saved && field.restart_required && (
+                      <p className="mt-1 text-xs text-amber-700 dark:text-amber-300">
+                        Takes effect on next restart via the installed launcher.
+                      </p>
+                    )}
                   </div>
                 ))}
             </div>
@@ -105,6 +140,18 @@ export function ConfigModal({ isOpen, onClose }: { isOpen: boolean; onClose: () 
               </div>
             )}
 
+            {error && (
+              <div className="mb-4 rounded border border-red-200 bg-red-50 p-3 text-sm text-red-800 dark:border-red-900 dark:bg-red-900/20 dark:text-red-200">
+                {error}
+              </div>
+            )}
+
+            {saved && !error && (
+              <div className="mb-4 rounded border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-800 dark:border-emerald-900 dark:bg-emerald-900/20 dark:text-emerald-200">
+                Configuration saved.
+              </div>
+            )}
+
             <div className="flex justify-end gap-2">
               <button
                 onClick={onClose}
@@ -113,10 +160,11 @@ export function ConfigModal({ isOpen, onClose }: { isOpen: boolean; onClose: () 
                 Cancel
               </button>
               <button
-                disabled={!config.admin_token_configured}
-                className="rounded bg-slate-400 px-4 py-2 text-sm font-medium text-white disabled:opacity-50 dark:bg-slate-700"
+                onClick={handleSave}
+                disabled={!config.admin_token_configured || saving}
+                className="rounded bg-slate-600 px-4 py-2 text-sm font-medium text-white disabled:opacity-50 dark:bg-slate-700"
               >
-                Save
+                {saving ? 'Saving…' : 'Save'}
               </button>
             </div>
           </>

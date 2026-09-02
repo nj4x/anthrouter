@@ -177,6 +177,7 @@ class Config:
     db_retention_days: int = 30  # Prune request rows older than this; 0 keeps forever
     enable_ui: bool = False     # Whether /admin/* and /ui/* endpoints are active
     model_aliases: dict[str, str] = dataclasses.field(default_factory=dict)  # User-supplied alias overrides
+    admin_token: str | None = None  # Gates POST /admin/config; unset disables config writes
 
 
 def validate_config(cfg: Config) -> list[str]:
@@ -477,6 +478,14 @@ def parse_args(argv=None) -> Config:
         help='Comma-separated alias:model pairs overriding or extending the built-in model alias '
              'table. Example: opus:claude-opus-5,mymodel:claude-sonnet-4-6 '
              '(env: ANTHROUTER_MODEL_ALIASES)',
+    )
+    p.add_argument(
+        '--admin-token',
+        dest='admin_token',
+        default=os.environ.get('ANTHROUTER_ADMIN_TOKEN', None),
+        help='Token required in the X-Admin-Token header on POST /admin/config. Unset (default) '
+             'disables config writes entirely; that endpoint returns 403 regardless of token. '
+             '(env: ANTHROUTER_ADMIN_TOKEN)',
     )
 
     args = p.parse_args(argv)

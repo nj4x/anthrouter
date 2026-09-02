@@ -1,5 +1,7 @@
+import dataclasses
 import http.client
 import json
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -287,6 +289,75 @@ def test_unknown_get_path_is_404(proxy):
     assert status == 404
 
 
+def post_status(server, path, payload, headers=None):
+    request = urllib.request.Request(
+        server.base_url + path,
+        data=json.dumps(payload).encode(),
+        headers={'Content-Type': 'application/json', **(headers or {})},
+        method='POST',
+    )
+    try:
+        with urllib.request.urlopen(request) as resp:
+            return resp.status, json.loads(resp.read().decode())
+    except urllib.error.HTTPError as exc:
+        return exc.code, json.loads(exc.read().decode())
+
+
+def test_post_admin_config_404_when_ui_disabled(proxy):
+    server = proxy(enable_ui=False, admin_token='sekret')
+    status, _body = post_status(server, '/admin/config', {}, {'X-Admin-Token': 'sekret'})
+    assert status == 404
+
+
+def test_post_admin_config_403_without_admin_token_configured(proxy):
+    server = proxy(enable_ui=True)
+    status, _body = post_status(server, '/admin/config', {}, {'X-Admin-Token': 'anything'})
+    assert status == 403
+
+
+def test_post_admin_config_403_with_wrong_token(proxy):
+    server = proxy(enable_ui=True, admin_token='sekret')
+    status, _body = post_status(server, '/admin/config', {}, {'X-Admin-Token': 'nope'})
+    assert status == 403
+
+
+def test_post_admin_config_full_round_trip(proxy, tmp_path):
+    server = proxy(enable_ui=True, admin_token='sekret', anthrouter_home=str(tmp_path))
+
+    current = get(server, '/admin/config')
+    body = {name: field['value'] for name, field in current['fields'].items()}
+    body['db_retention_days'] = '7'
+    body['host'] = '10.0.0.42'
+
+    status, resp = post_status(server, '/admin/config', body, {'X-Admin-Token': 'sekret'})
+    assert status == 200
+    assert resp == {'status': 'ok'}
+
+    # Live-editable field applied immediately, visible to a later request on
+    # the same running server (proves the self.__class__.config swap worked).
+    updated = get(server, '/admin/config')
+    assert updated['fields']['db_retention_days']['value'] == '7'
+
+    # File-editable field written to config.env but not yet applied in memory.
+    assert updated['fields']['host']['value'] == '10.0.0.42'
+    content = (tmp_path / 'config.env').read_text()
+    assert 'ANTHROUTER_HOST="10.0.0.42"' in content
+
+    status_body = get(server, '/admin/status')
+    assert status_body['db_retention_days'] == 7
+
+
+def test_post_admin_config_400_surfaces_field_error(proxy, tmp_path):
+    server = proxy(enable_ui=True, admin_token='sekret', anthrouter_home=str(tmp_path))
+    current = get(server, '/admin/config')
+    body = {name: field['value'] for name, field in current['fields'].items()}
+    body['port'] = 'not-a-port'
+
+    status, resp = post_status(server, '/admin/config', body, {'X-Admin-Token': 'sekret'})
+    assert status == 400
+    assert 'port' in resp['error']['message']
+
+
 def test_ui_path_traversal_serves_the_bundle_not_the_source(proxy):
     server = proxy(enable_ui=True)
     # urllib would normalise the '..' away client-side, so send it raw.
@@ -449,3 +520,294 @@ def test_get_config_live_editable_fields_from_memory(cfg):
     _status, body = admin.handle_get('/admin/config', {}, None, cfg)
     assert body['fields']['log_level']['value'] == 'DEBUG'
     assert body['fields']['log_level']['restart_required'] is False
+
+
+# ---------------------------------------------------------------------------
+# POST /admin/config tests
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def admin_cfg(tmp_path):
+    return Config(
+        upstream_base_url='https://api.anthropic.com',
+        enable_ui=True,
+        anthrouter_home=str(tmp_path),
+        admin_token='sekret',
+    )
+
+
+def _full_body(cfg, overrides=None):
+    """Build a valid full round-trip POST body from a Config instance."""
+    body = {}
+    for name in EDITABLE_FIELDS:
+        value = getattr(cfg, name)
+        if value is None:
+            body[name] = ''
+        elif isinstance(value, bool):
+            body[name] = 'true' if value else 'false'
+        else:
+            body[name] = str(value)
+    if overrides:
+        body.update(overrides)
+    return body
+
+
+def _setter(holder):
+    def _set(cfg):
+        holder['config'] = cfg
+    return _set
+
+
+def test_post_config_403_when_admin_token_unset(cfg):
+    """admin_token unset (default) -> unconditional 403, regardless of header."""
+    holder = {'config': cfg}
+    status, _resp = admin.handle_post_config('anything', _full_body(cfg), cfg, _setter(holder))
+    assert status == 403
+    assert holder['config'] is cfg
+
+
+def test_post_config_403_when_token_wrong(admin_cfg):
+    holder = {'config': admin_cfg}
+    status, _resp = admin.handle_post_config(
+        'wrong-token', _full_body(admin_cfg), admin_cfg, _setter(holder))
+    assert status == 403
+    assert holder['config'] is admin_cfg
+
+
+def test_post_config_403_when_header_missing(admin_cfg):
+    holder = {'config': admin_cfg}
+    status, _resp = admin.handle_post_config(
+        None, _full_body(admin_cfg), admin_cfg, _setter(holder))
+    assert status == 403
+
+
+def test_post_config_400_unknown_key(admin_cfg):
+    holder = {'config': admin_cfg}
+    body = _full_body(admin_cfg, {'totally_unknown_field': 'x'})
+    status, resp = admin.handle_post_config('sekret', body, admin_cfg, _setter(holder))
+    assert status == 400
+    assert 'totally_unknown_field' in resp['error']['message']
+    assert holder['config'] is admin_cfg
+
+
+def test_post_config_400_rejects_admin_token_key(admin_cfg):
+    """admin_token is excluded from EDITABLE_FIELDS; submitting it is an unknown-key 400."""
+    holder = {'config': admin_cfg}
+    body = _full_body(admin_cfg, {'admin_token': 'new-token'})
+    status, resp = admin.handle_post_config('sekret', body, admin_cfg, _setter(holder))
+    assert status == 400
+    assert 'admin_token' in resp['error']['message']
+
+
+def test_post_config_400_missing_key(admin_cfg):
+    holder = {'config': admin_cfg}
+    body = _full_body(admin_cfg)
+    del body['host']
+    status, resp = admin.handle_post_config('sekret', body, admin_cfg, _setter(holder))
+    assert status == 400
+    assert 'host' in resp['error']['message']
+
+
+def test_post_config_400_names_every_unknown_key(admin_cfg):
+    holder = {'config': admin_cfg}
+    body = _full_body(admin_cfg, {'bogus_one': 'x', 'bogus_two': 'y'})
+    status, resp = admin.handle_post_config('sekret', body, admin_cfg, _setter(holder))
+    assert status == 400
+    assert 'bogus_one' in resp['error']['message']
+    assert 'bogus_two' in resp['error']['message']
+    assert len(resp['error']['errors']) == 2
+
+
+def test_post_config_400_names_every_missing_key(admin_cfg):
+    holder = {'config': admin_cfg}
+    body = _full_body(admin_cfg)
+    del body['host']
+    del body['port']
+    status, resp = admin.handle_post_config('sekret', body, admin_cfg, _setter(holder))
+    assert status == 400
+    assert 'host' in resp['error']['message']
+    assert 'port' in resp['error']['message']
+    assert len(resp['error']['errors']) == 2
+
+
+@pytest.mark.parametrize('bad_char', ['"', '\\', '$', '`', '\n'])
+def test_post_config_400_quoting_unsafe_value(admin_cfg, bad_char):
+    holder = {'config': admin_cfg}
+    body = _full_body(admin_cfg, {'lock_requested_model': f'evil{bad_char}value'})
+    status, resp = admin.handle_post_config('sekret', body, admin_cfg, _setter(holder))
+    assert status == 400
+    assert 'lock_requested_model' in resp['error']['message']
+    assert holder['config'] is admin_cfg
+
+
+def test_post_config_int_field_skips_quoting_check(admin_cfg):
+    """int/bool/float fields are exempt from the quoting pre-check."""
+    holder = {'config': admin_cfg}
+    body = _full_body(admin_cfg, {'port': '9090'})
+    status, _resp = admin.handle_post_config('sekret', body, admin_cfg, _setter(holder))
+    assert status == 200
+
+
+def test_post_config_400_int_coercion_failure(admin_cfg):
+    holder = {'config': admin_cfg}
+    body = _full_body(admin_cfg, {'port': 'not-a-number'})
+    status, resp = admin.handle_post_config('sekret', body, admin_cfg, _setter(holder))
+    assert status == 400
+    assert 'port' in resp['error']['message']
+
+
+def test_post_config_400_float_coercion_failure(admin_cfg):
+    holder = {'config': admin_cfg}
+    body = _full_body(admin_cfg, {'sse_keepalive_interval': 'nope'})
+    status, resp = admin.handle_post_config('sekret', body, admin_cfg, _setter(holder))
+    assert status == 400
+    assert 'sse_keepalive_interval' in resp['error']['message']
+
+
+def test_post_config_400_bool_coercion_failure(admin_cfg):
+    holder = {'config': admin_cfg}
+    body = _full_body(admin_cfg, {'auto_model_routing': 'maybe'})
+    status, resp = admin.handle_post_config('sekret', body, admin_cfg, _setter(holder))
+    assert status == 400
+    assert 'auto_model_routing' in resp['error']['message']
+
+
+@pytest.mark.parametrize('raw,expected', [
+    ('true', True), ('TRUE', True), ('1', True), ('yes', True),
+    ('false', False), ('FALSE', False), ('0', False), ('no', False),
+])
+def test_post_config_bool_coercion_accepts_common_forms(admin_cfg, raw, expected):
+    holder = {'config': admin_cfg}
+    body = _full_body(admin_cfg, {'auto_model_routing': raw})
+    status, _resp = admin.handle_post_config('sekret', body, admin_cfg, _setter(holder))
+    assert status == 200
+    assert holder['config'].auto_model_routing is expected
+
+
+def test_post_config_optional_empty_string_maps_to_none(admin_cfg):
+    holder = {'config': admin_cfg}
+    body = _full_body(admin_cfg, {'db_path': ''})
+    status, _resp = admin.handle_post_config('sekret', body, admin_cfg, _setter(holder))
+    assert status == 200
+    assert holder['config'].db_path is None
+
+
+def test_post_config_400_validation_error_blocks_write_and_reload(admin_cfg):
+    """Cross-field validation failure -> 400, no file write, config_setter not called."""
+    holder = {'config': admin_cfg}
+    body = _full_body(admin_cfg, {
+        'auto_model_routing_system_prompt_weight': '0.5',
+        'auto_model_routing_user_prompt_weight': '0.6',
+    })
+    status, _resp = admin.handle_post_config('sekret', body, admin_cfg, _setter(holder))
+    assert status == 400
+    assert holder['config'] is admin_cfg
+    assert not (Path(admin_cfg.anthrouter_home) / 'config.env').exists()
+
+
+def test_post_config_200_applies_live_editable_field_immediately(admin_cfg):
+    holder = {'config': admin_cfg}
+    body = _full_body(admin_cfg, {'db_retention_days': '99'})
+    status, _resp = admin.handle_post_config('sekret', body, admin_cfg, _setter(holder))
+    assert status == 200
+    assert holder['config'].db_retention_days == 99
+
+
+def test_post_config_200_file_editable_field_unchanged_in_memory(admin_cfg):
+    """File-editable fields are written to config.env but kept at their old in-memory value."""
+    holder = {'config': admin_cfg}
+    body = _full_body(admin_cfg, {'host': '10.0.0.5'})
+    status, _resp = admin.handle_post_config('sekret', body, admin_cfg, _setter(holder))
+    assert status == 200
+    assert holder['config'].host == admin_cfg.host  # unchanged in memory
+    content = (Path(admin_cfg.anthrouter_home) / 'config.env').read_text()
+    assert 'ANTHROUTER_HOST="10.0.0.5"' in content
+
+
+def test_post_config_writes_all_submitted_keys_double_quoted(admin_cfg):
+    holder = {'config': admin_cfg}
+    body = _full_body(admin_cfg, {'port': '9999'})
+    status, _resp = admin.handle_post_config('sekret', body, admin_cfg, _setter(holder))
+    assert status == 200
+    content = (Path(admin_cfg.anthrouter_home) / 'config.env').read_text()
+    assert 'ANTHROUTER_PORT="9999"' in content
+
+
+def test_post_config_merge_preserves_untouched_lines(admin_cfg):
+    config_env = Path(admin_cfg.anthrouter_home) / 'config.env'
+    config_env.write_text(
+        '# install.sh header\n'
+        'ANTHROUTER_HOST="127.0.0.1"\n'
+        'ANTHROUTER_SOME_UNKNOWN_KEY="keep-me"\n'
+    )
+    holder = {'config': admin_cfg}
+    body = _full_body(admin_cfg, {'host': '10.0.0.9'})
+    status, _resp = admin.handle_post_config('sekret', body, admin_cfg, _setter(holder))
+    assert status == 200
+    content = config_env.read_text()
+    assert '# install.sh header' in content
+    assert 'ANTHROUTER_SOME_UNKNOWN_KEY="keep-me"' in content
+    assert 'ANTHROUTER_HOST="10.0.0.9"' in content
+    assert content.count('ANTHROUTER_HOST=') == 1
+
+
+def test_post_config_merge_appends_keys_absent_from_file(admin_cfg):
+    config_env = Path(admin_cfg.anthrouter_home) / 'config.env'
+    config_env.write_text('ANTHROUTER_HOST="127.0.0.1"\n')
+    holder = {'config': admin_cfg}
+    body = _full_body(admin_cfg, {'port': '9191'})
+    status, _resp = admin.handle_post_config('sekret', body, admin_cfg, _setter(holder))
+    assert status == 200
+    content = config_env.read_text()
+    assert 'ANTHROUTER_PORT="9191"' in content
+    assert 'ANTHROUTER_HOST="127.0.0.1"' in content
+
+
+def test_post_config_creates_file_when_absent(admin_cfg):
+    config_env = Path(admin_cfg.anthrouter_home) / 'config.env'
+    assert not config_env.exists()
+    holder = {'config': admin_cfg}
+    status, _resp = admin.handle_post_config('sekret', _full_body(admin_cfg), admin_cfg, _setter(holder))
+    assert status == 200
+    assert config_env.exists()
+
+
+def test_post_config_500_on_write_failure_leaves_config_untouched(admin_cfg):
+    """anthrouter_home pointing at a non-existent directory -> write fails -> 5xx, no reload."""
+    bad_cfg = dataclasses.replace(
+        admin_cfg, anthrouter_home=str(Path(admin_cfg.anthrouter_home) / 'does' / 'not' / 'exist'))
+    holder = {'config': bad_cfg}
+    status, _resp = admin.handle_post_config(
+        'sekret', _full_body(bad_cfg), bad_cfg, _setter(holder))
+    assert status >= 500
+    assert holder['config'] is bad_cfg
+
+
+def test_post_config_concurrent_posts_are_serialized(admin_cfg):
+    """Two concurrent POSTs never interleave their file writes or in-memory swap."""
+    results = []
+    barrier = threading.Barrier(2)
+
+    def worker(retention_value):
+        barrier.wait()
+        holder = {'config': admin_cfg}
+        body = _full_body(admin_cfg, {'db_retention_days': retention_value})
+        status, _resp = admin.handle_post_config('sekret', body, admin_cfg, _setter(holder))
+        results.append((status, holder['config']))
+
+    threads = [threading.Thread(target=worker, args=(r,)) for r in ('11', '22')]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert all(status == 200 for status, _ in results)
+    content = (Path(admin_cfg.anthrouter_home) / 'config.env').read_text()
+    # Whichever write went last, the file has exactly one well-formed line per key.
+    assert content.count('ANTHROUTER_DB_RETENTION_DAYS=') == 1
+    written = content.split('ANTHROUTER_DB_RETENTION_DAYS="')[1].split('"')[0]
+    assert written in ('11', '22')
+    # db_retention_days is live-editable: each thread's own reload reflects its
+    # own submission (last writer wins at the intent level, per ADR-0005).
+    final_retentions = {cfg.db_retention_days for _, cfg in results}
+    assert final_retentions == {11, 22}

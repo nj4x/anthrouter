@@ -484,6 +484,8 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
             self._handle_messages()
         elif path == '/v1/messages/count_tokens':
             self._handle_count_tokens()
+        elif path == '/admin/config':
+            self._handle_admin_config_post()
         else:
             self._send_json(404, anthropic_error_payload('not_found_error', 'Not found'))
 
@@ -513,6 +515,32 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         except Exception:
             logger.exception('%s Admin GET failed', self._log_tag())
             self._send_json(500, anthropic_error_payload('api_error', 'Admin handler failed'))
+
+    def _handle_admin_config_post(self):
+        if not self.config.enable_ui:
+            self._send_json(404, anthropic_error_payload('not_found_error', 'Not found'))
+            return
+        try:
+            self._validate_content_type()
+            body = self._parse_json(self._read_body())
+            status, response = admin.handle_post_config(
+                self.headers.get('X-Admin-Token'), body, self.config, self._set_config,
+            )
+            self._send_json(status, response)
+        except AnthropicRequestError as exc:
+            self._send_error(exc)
+        except _CLIENT_DISCONNECT:
+            logger.info('%s client disconnected before response', self._log_tag())
+        except Exception:
+            logger.exception('%s Admin config POST failed', self._log_tag())
+            self._send_json(500, anthropic_error_payload('api_error', 'Admin handler failed'))
+
+    def _set_config(self, new_config) -> None:
+        # Deliberate exception to the "never touch self.__class__ per-request"
+        # rule: ADR-0005's config-reload path swaps the shared Config instance
+        # every request thread reads via self.config, one atomic reference
+        # assignment guarded by admin._config_write_lock.
+        self.__class__.config = new_config
 
     def _serve_ui_file(self, raw_path: str):
         """Serve the built SPA from ``anthrouter/ui/dist``, index.html as fallback."""
