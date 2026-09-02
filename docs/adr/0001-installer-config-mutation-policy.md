@@ -1,10 +1,9 @@
 ---
-lineage-rules: srs
+artifact-type: adr
+lineage-rules: root
 ---
 
 # ADR-0001: Installer config-mutation policy and chain topology
-
-**Source SRS**: SRS-Install-001
 
 ## Status
 
