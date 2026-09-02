@@ -486,7 +486,8 @@ class RequestDB:
             """SELECT e.id, e.request_id, e.event_ts, e.block_type,
                       e.is_allowlisted, e.payload_preview, e.payload_full,
                       r.session_id, r.requested_model,
-                      r.system_prompt_sha256, r.system_prompt_sanitized_sha256
+                      r.system_prompt_sha256, r.system_prompt_sanitized_sha256,
+                      r.system_prompt_score, r.user_prompt_score
                  FROM sanitizer_events e
                  JOIN requests r ON r.id = e.request_id
                 ORDER BY e.id DESC LIMIT ? OFFSET ?""",

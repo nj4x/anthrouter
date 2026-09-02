@@ -39,7 +39,7 @@ export function Requests() {
         {data && data.requests.length === 0 && <Empty message="No requests recorded yet." />}
         {data && data.requests.length > 0 && (
           <>
-            <Table headers={['#', 'Time', 'Session', 'Model', 'Status', 'Tokens', 'Cost', 'Took', 'Prompt']}>
+            <Table headers={['#', 'Time', 'Session', 'Model', 'Status', 'Tokens', 'Cost', 'Took', 'Scores', 'Prompt']}>
               {data.requests.map((row) => (
                 <Row
                   key={row.id}
@@ -76,6 +76,11 @@ function Row({ row, onSelect }: { row: RequestRow; onSelect: () => void }) {
       </td>
       <td className="px-3 py-2 text-slate-700 dark:text-slate-300">{usd(row.cost_estimate)}</td>
       <td className="px-3 py-2 text-slate-600 dark:text-slate-400">{duration(row.duration_ms)}</td>
+      <td className="px-3 py-2 font-mono text-xs text-slate-600 dark:text-slate-400">
+        {row.user_prompt_score != null && row.system_prompt_score != null ? (
+          <span>u:{Math.round(row.user_prompt_score)} s:{Math.round(row.system_prompt_score)}</span>
+        ) : '—'}
+      </td>
       <td className="max-w-md truncate px-3 py-2 text-slate-600 dark:text-slate-400">{row.user_prompt_text ?? '—'}</td>
     </tr>
   )

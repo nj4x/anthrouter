@@ -36,7 +36,7 @@ export function Sanitizer() {
         )}
         {data && data.events.length > 0 && (
           <>
-            <Table headers={['#', 'Time', 'Session', 'Model', 'Block', 'Outcome', 'Preview']}>
+            <Table headers={['#', 'Time', 'Session', 'Model', 'Block', 'Outcome', 'Scores', 'Preview']}>
               {data.events.map((event) => (
                 <tr
                   key={event.id}
@@ -56,6 +56,11 @@ export function Sanitizer() {
                     ) : (
                       <Badge text="flagged" tone="bg-slate-200 dark:bg-slate-700 text-slate-800 dark:text-slate-200" />
                     )}
+                  </td>
+                  <td className="px-3 py-2 font-mono text-xs text-slate-600 dark:text-slate-400">
+                    {event.user_prompt_score != null && event.system_prompt_score != null ? (
+                      <span>u:{Math.round(event.user_prompt_score)} s:{Math.round(event.system_prompt_score)}</span>
+                    ) : '—'}
                   </td>
                   <td className="max-w-md truncate px-3 py-2 font-mono text-xs text-slate-600 dark:text-slate-400">
                     {event.payload_preview ?? '—'}

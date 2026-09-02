@@ -160,6 +160,15 @@ export function RequestDetailDrawer({ requestId, onClose }: Props) {
                       <dd className="text-slate-900 dark:text-slate-200 text-xs font-mono">{req.reason_code}</dd>
                     </div>
                   )}
+                  {(req.user_prompt_score != null || req.system_prompt_score != null) && (
+                    <div className="flex justify-between items-start">
+                      <dt className="text-xs text-slate-600 dark:text-slate-400">Scores</dt>
+                      <dd className="text-slate-900 dark:text-slate-200 text-xs font-mono">
+                        u:{req.user_prompt_score != null ? Math.round(req.user_prompt_score) : '—'} s:{req.system_prompt_score != null ? Math.round(req.system_prompt_score) : '—'}
+                        {req.routing_weighted_score != null && ` → blended ${Math.round(req.routing_weighted_score)}`}
+                      </dd>
+                    </div>
+                  )}
                 </dl>
               </section>
 
@@ -227,11 +236,38 @@ export function RequestDetailDrawer({ requestId, onClose }: Props) {
                 </dl>
               </section>
 
-              {/* Prompt & tools content */}
+              {/* User prompt */}
+              {req.user_prompt_text && (
+                <section>
+                  <h3 className="text-xs font-semibold text-slate-600 dark:text-slate-400 uppercase tracking-wide mb-2 flex items-center justify-between">
+                    <span>User prompt</span>
+                    <CopyButton text={req.user_prompt_text} />
+                  </h3>
+                  <pre className="bg-slate-100 dark:bg-slate-800 p-3 rounded text-xs overflow-auto max-h-48 text-slate-800 dark:text-slate-200 whitespace-pre-wrap break-words">
+                    {req.user_prompt_text}
+                  </pre>
+                </section>
+              )}
+
+              {/* Model response */}
+              {req.response_text && (
+                <section>
+                  <h3 className="text-xs font-semibold text-slate-600 dark:text-slate-400 uppercase tracking-wide mb-2 flex items-center justify-between">
+                    <span>Model response</span>
+                    <CopyButton text={req.response_text} />
+                  </h3>
+                  <pre className="bg-slate-100 dark:bg-slate-800 p-3 rounded text-xs overflow-auto max-h-48 text-slate-800 dark:text-slate-200 whitespace-pre-wrap break-words">
+                    {req.response_text}
+                  </pre>
+                </section>
+              )}
+
+              {/* System prompt */}
               {req.system_prompt_content && (
                 <section>
-                  <h3 className="text-xs font-semibold text-slate-600 dark:text-slate-400 uppercase tracking-wide mb-2">
-                    System prompt (original)
+                  <h3 className="text-xs font-semibold text-slate-600 dark:text-slate-400 uppercase tracking-wide mb-2 flex items-center justify-between">
+                    <span>System prompt (original)</span>
+                    <CopyButton text={req.system_prompt_content} />
                   </h3>
                   <pre className="bg-slate-100 dark:bg-slate-800 p-3 rounded text-xs overflow-auto max-h-48 text-slate-800 dark:text-slate-200 whitespace-pre-wrap break-words">
                     {req.system_prompt_content}
@@ -243,8 +279,9 @@ export function RequestDetailDrawer({ requestId, onClose }: Props) {
                 req.system_prompt_sanitized_content &&
                 req.system_prompt_sha256 !== req.system_prompt_sanitized_sha256 && (
                   <section>
-                    <h3 className="text-xs font-semibold text-slate-600 dark:text-slate-400 uppercase tracking-wide mb-2">
-                      System prompt (sanitized, sent upstream)
+                    <h3 className="text-xs font-semibold text-slate-600 dark:text-slate-400 uppercase tracking-wide mb-2 flex items-center justify-between">
+                      <span>System prompt (sanitized, sent upstream)</span>
+                      <CopyButton text={req.system_prompt_sanitized_content} />
                     </h3>
                     <pre className="bg-slate-100 dark:bg-slate-800 p-3 rounded text-xs overflow-auto max-h-48 text-slate-800 dark:text-slate-200 whitespace-pre-wrap break-words">
                       {req.system_prompt_sanitized_content}
@@ -252,25 +289,15 @@ export function RequestDetailDrawer({ requestId, onClose }: Props) {
                   </section>
                 )}
 
+              {/* Tools */}
               {req.tools_content && (
                 <section>
-                  <h3 className="text-xs font-semibold text-slate-600 dark:text-slate-400 uppercase tracking-wide mb-2">
-                    Tools
+                  <h3 className="text-xs font-semibold text-slate-600 dark:text-slate-400 uppercase tracking-wide mb-2 flex items-center justify-between">
+                    <span>Tools</span>
+                    <CopyButton text={req.tools_content} />
                   </h3>
                   <pre className="bg-slate-100 dark:bg-slate-800 p-3 rounded text-xs overflow-auto max-h-48 text-slate-800 dark:text-slate-200 whitespace-pre-wrap break-words">
                     {req.tools_content}
-                  </pre>
-                </section>
-              )}
-
-              {/* Response */}
-              {req.response_text && (
-                <section>
-                  <h3 className="text-xs font-semibold text-slate-600 dark:text-slate-400 uppercase tracking-wide mb-2">
-                    Response
-                  </h3>
-                  <pre className="bg-slate-100 dark:bg-slate-800 p-3 rounded text-xs overflow-auto max-h-48 text-slate-800 dark:text-slate-200 whitespace-pre-wrap break-words">
-                    {req.response_text}
                   </pre>
                 </section>
               )}
