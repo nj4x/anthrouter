@@ -6,6 +6,7 @@ import pytest
 from anthrouter.config import (
     DEFAULT_UPSTREAM_BASE_URL,
     EDITABLE_FIELDS,
+    FIELD_METADATA,
     Config,
     parse_args,
     validate_config,
@@ -209,6 +210,179 @@ def test_editable_fields_excludes_request_history_size():
 
 
 # =============================================================================
+# Tests for FIELD_METADATA registry
+# =============================================================================
+
+def test_field_metadata_exists():
+    """FIELD_METADATA registry exists and is a dict."""
+    assert isinstance(FIELD_METADATA, dict)
+    assert len(FIELD_METADATA) > 0
+
+
+def test_field_metadata_keys_match_editable_fields():
+    """FIELD_METADATA keys exactly match EDITABLE_FIELDS keys."""
+    assert set(FIELD_METADATA.keys()) == set(EDITABLE_FIELDS.keys())
+
+
+def test_field_metadata_has_required_keys():
+    """Each FIELD_METADATA entry has required keys."""
+    for field_name, meta in FIELD_METADATA.items():
+        assert 'description' in meta, f'{field_name} missing description'
+        assert 'type' in meta, f'{field_name} missing type'
+        assert 'group' in meta, f'{field_name} missing group'
+        assert meta['type'] in ('str', 'int', 'float', 'bool'), f'{field_name} has invalid type'
+
+
+def test_field_metadata_enum_fields():
+    """Enum fields have correct enum values."""
+    assert FIELD_METADATA['log_level']['enum'] == ['DEBUG', 'INFO', 'WARNING', 'ERROR']
+    assert FIELD_METADATA['auto_model_routing_mode']['enum'] == ['classifier', 'rules', 'tag']
+    assert FIELD_METADATA['sanitize_system_prompt']['enum'] == ['off', 'warn', 'strip']
+
+
+def test_field_metadata_has_min_max():
+    """Fields with bounds have min/max defined."""
+    # auto_model_routing_min_confidence [0, 1]
+    assert FIELD_METADATA['auto_model_routing_min_confidence']['min'] == 0.0
+    assert FIELD_METADATA['auto_model_routing_min_confidence']['max'] == 1.0
+    # db_retention_days min=0
+    assert FIELD_METADATA['db_retention_days']['min'] == 0
+    # sse_keepalive_interval min=0
+    assert FIELD_METADATA['sse_keepalive_interval']['min'] == 0.0
+
+
+def test_field_metadata_groups():
+    """Fields are grouped correctly."""
+    groups = {meta['group'] for meta in FIELD_METADATA.values()}
+    expected_groups = {'Logging', 'Upstream', 'Model Routing', 'Prompt Sanitization', 'Database', 'Server'}
+    assert groups == expected_groups
+
+
+def test_field_metadata_order():
+    """FIELD_METADATA order matches expected display order."""
+    keys = list(FIELD_METADATA.keys())
+    # First fields should be Logging group
+    assert FIELD_METADATA[keys[0]]['group'] == 'Logging'
+    # Last fields should be Server group
+    assert FIELD_METADATA[keys[-1]]['group'] == 'Server'
+
+
+# =============================================================================
+# Tests for validate_config() - Enum enforcement
+# =============================================================================
+
+def test_validate_config_invalid_log_level():
+    """Invalid log_level is rejected."""
+    cfg = _make_valid_config(log_level='INVALID')
+    errors = validate_config(cfg)
+    assert len(errors) >= 1
+    assert 'log_level must be one of' in errors[0]
+    assert 'DEBUG' in errors[0]
+
+
+def test_validate_config_valid_log_level():
+    """Valid log_level passes."""
+    for level in ['DEBUG', 'INFO', 'WARNING', 'ERROR']:
+        cfg = _make_valid_config(log_level=level)
+        errors = validate_config(cfg)
+        # log_level check passes (other errors may exist)
+        assert not any('log_level' in e for e in errors)
+
+
+def test_validate_config_invalid_routing_mode():
+    """Invalid auto_model_routing_mode is rejected."""
+    cfg = _make_valid_config(auto_model_routing_mode='invalid_mode')
+    errors = validate_config(cfg)
+    assert len(errors) >= 1
+    assert 'auto_model_routing_mode must be one of' in errors[0]
+    assert 'classifier' in errors[0]
+
+
+def test_validate_config_valid_routing_mode():
+    """Valid auto_model_routing_mode passes."""
+    for mode in ['classifier', 'rules', 'tag']:
+        cfg = _make_valid_config(auto_model_routing_mode=mode)
+        errors = validate_config(cfg)
+        assert not any('auto_model_routing_mode' in e for e in errors)
+
+
+def test_validate_config_invalid_sanitize_system_prompt():
+    """Invalid sanitize_system_prompt is rejected."""
+    cfg = _make_valid_config(sanitize_system_prompt='invalid')
+    errors = validate_config(cfg)
+    assert len(errors) >= 1
+    assert 'sanitize_system_prompt must be one of' in errors[0]
+    assert 'off' in errors[0]
+
+
+def test_validate_config_valid_sanitize_system_prompt():
+    """Valid sanitize_system_prompt passes."""
+    for mode in ['off', 'warn', 'strip']:
+        cfg = _make_valid_config(sanitize_system_prompt=mode)
+        errors = validate_config(cfg)
+        assert not any('sanitize_system_prompt' in e for e in errors)
+
+
+# =============================================================================
+# Tests for validate_config() - min_confidence range [0, 1]
+# =============================================================================
+
+def test_validate_config_min_confidence_below_range():
+    """auto_model_routing_min_confidence < 0 is rejected."""
+    cfg = _make_valid_config(auto_model_routing_min_confidence=-0.5)
+    errors = validate_config(cfg)
+    assert len(errors) >= 1
+    assert 'auto_model_routing_min_confidence must be in [0.0, 1.0]' in errors[0]
+
+
+def test_validate_config_min_confidence_above_range():
+    """auto_model_routing_min_confidence > 1 is rejected."""
+    cfg = _make_valid_config(auto_model_routing_min_confidence=1.5)
+    errors = validate_config(cfg)
+    assert len(errors) >= 1
+    assert 'auto_model_routing_min_confidence must be in [0.0, 1.0]' in errors[0]
+
+
+def test_validate_config_min_confidence_boundary_low():
+    """auto_model_routing_min_confidence = 0 is valid."""
+    cfg = _make_valid_config(auto_model_routing_min_confidence=0.0)
+    errors = validate_config(cfg)
+    assert not any('auto_model_routing_min_confidence' in e for e in errors)
+
+
+def test_validate_config_min_confidence_boundary_high():
+    """auto_model_routing_min_confidence = 1 is valid."""
+    cfg = _make_valid_config(auto_model_routing_min_confidence=1.0)
+    errors = validate_config(cfg)
+    assert not any('auto_model_routing_min_confidence' in e for e in errors)
+
+
+def test_validate_config_min_confidence_mid_range():
+    """auto_model_routing_min_confidence = 0.5 is valid."""
+    cfg = _make_valid_config(auto_model_routing_min_confidence=0.5)
+    errors = validate_config(cfg)
+    assert not any('auto_model_routing_min_confidence' in e for e in errors)
+
+
+# =============================================================================
+# Tests for validate_config() - Error message uses field names not CLI flags
+# =============================================================================
+
+def test_validate_config_error_messages_use_field_names():
+    """Validation errors reference Python field names, not CLI flags."""
+    cfg = _make_valid_config(
+        auto_model_routing_system_prompt_weight=0.5,
+        auto_model_routing_user_prompt_weight=0.6,
+    )
+    errors = validate_config(cfg)
+    # Error should use field name, not --flag-name
+    assert any('auto_model_routing_system_prompt_weight' in e for e in errors)
+    assert any('auto_model_routing_user_prompt_weight' in e for e in errors)
+    # Should NOT use CLI flag spelling
+    assert not any('--auto-model-routing-system-prompt-weight' in e for e in errors)
+
+
+# =============================================================================
 # Tests for validate_config() - Single-field bounds checks
 # =============================================================================
 
@@ -229,7 +403,7 @@ def test_validate_config_empty_classifier_model():
     cfg = _make_valid_config(auto_model_routing_classifier_model='')
     errors = validate_config(cfg)
     assert len(errors) == 1
-    assert '--auto-model-routing-classifier-model must be a non-empty string' in errors[0]
+    assert 'auto_model_routing_classifier_model must be a non-empty string' in errors[0]
 
 
 def test_validate_config_whitespace_classifier_model():
@@ -237,7 +411,7 @@ def test_validate_config_whitespace_classifier_model():
     cfg = _make_valid_config(auto_model_routing_classifier_model='   ')
     errors = validate_config(cfg)
     assert len(errors) == 1
-    assert '--auto-model-routing-classifier-model must be a non-empty string' in errors[0]
+    assert 'auto_model_routing_classifier_model must be a non-empty string' in errors[0]
 
 
 def test_validate_config_negative_sse_keepalive():
@@ -245,7 +419,7 @@ def test_validate_config_negative_sse_keepalive():
     cfg = _make_valid_config(sse_keepalive_interval=-0.1)
     errors = validate_config(cfg)
     assert len(errors) == 1
-    assert '--sse-keepalive-interval must be >= 0' in errors[0]
+    assert 'sse_keepalive_interval must be >=' in errors[0]
 
 
 def test_validate_config_zero_sse_keepalive():
@@ -260,7 +434,7 @@ def test_validate_config_negative_db_retention():
     cfg = _make_valid_config(db_retention_days=-1)
     errors = validate_config(cfg)
     assert len(errors) == 1
-    assert '--db-retention-days must be >= 0' in errors[0]
+    assert 'db_retention_days must be >=' in errors[0]
 
 
 def test_validate_config_zero_db_retention():
@@ -275,7 +449,7 @@ def test_validate_config_negative_long_context_threshold():
     cfg = _make_valid_config(auto_model_routing_long_context_threshold=-1)
     errors = validate_config(cfg)
     assert len(errors) == 1
-    assert '--auto-model-routing-long-context-threshold must be >= 0' in errors[0]
+    assert 'auto_model_routing_long_context_threshold must be >=' in errors[0]
 
 
 def test_validate_config_zero_long_context_threshold():
@@ -290,7 +464,7 @@ def test_validate_config_prior_limit_too_low():
     cfg = _make_valid_config(auto_model_routing_prior_response_summary_limit=49)
     errors = validate_config(cfg)
     assert len(errors) == 1
-    assert '--auto-model-routing-prior-response-summary-limit must be in [50, 32000]' in errors[0]
+    assert 'auto_model_routing_prior_response_summary_limit must be in [50, 32000]' in errors[0]
 
 
 def test_validate_config_prior_limit_boundary_low():
@@ -305,7 +479,7 @@ def test_validate_config_prior_limit_too_high():
     cfg = _make_valid_config(auto_model_routing_prior_response_summary_limit=32001)
     errors = validate_config(cfg)
     assert len(errors) == 1
-    assert '--auto-model-routing-prior-response-summary-limit must be in [50, 32000]' in errors[0]
+    assert 'auto_model_routing_prior_response_summary_limit must be in [50, 32000]' in errors[0]
 
 
 def test_validate_config_prior_limit_boundary_high():
@@ -320,7 +494,7 @@ def test_validate_config_cache_size_zero():
     cfg = _make_valid_config(auto_model_routing_system_prompt_cache_size=0)
     errors = validate_config(cfg)
     assert len(errors) == 1
-    assert '--auto-model-routing-system-prompt-cache-size must be >= 1' in errors[0]
+    assert 'auto_model_routing_system_prompt_cache_size must be >=' in errors[0]
 
 
 def test_validate_config_cache_size_one():
@@ -335,7 +509,7 @@ def test_validate_config_preview_limit_zero():
     cfg = _make_valid_config(auto_model_routing_system_prompt_preview_limit=0)
     errors = validate_config(cfg)
     assert len(errors) == 1
-    assert '--auto-model-routing-system-prompt-preview-limit must be >= 1' in errors[0]
+    assert 'auto_model_routing_system_prompt_preview_limit must be >=' in errors[0]
 
 
 def test_validate_config_preview_limit_one():
@@ -350,7 +524,7 @@ def test_validate_config_empty_upstream_base_url():
     cfg = _make_valid_config(upstream_base_url='')
     errors = validate_config(cfg)
     assert len(errors) == 1
-    assert '--upstream-base-url must be a non-empty URL' in errors[0]
+    assert 'upstream_base_url must be a non-empty URL' in errors[0]
 
 
 # =============================================================================
@@ -365,7 +539,7 @@ def test_validate_config_weights_sum_less_than_one():
     )
     errors = validate_config(cfg)
     assert len(errors) == 1
-    assert '--auto-model-routing-system-prompt-weight + --auto-model-routing-user-prompt-weight must equal 1.0' in errors[0]
+    assert 'auto_model_routing_system_prompt_weight + auto_model_routing_user_prompt_weight must equal 1.0' in errors[0]
 
 
 def test_validate_config_weights_sum_greater_than_one():
@@ -376,7 +550,7 @@ def test_validate_config_weights_sum_greater_than_one():
     )
     errors = validate_config(cfg)
     assert len(errors) == 1
-    assert '--auto-model-routing-system-prompt-weight + --auto-model-routing-user-prompt-weight must equal 1.0' in errors[0]
+    assert 'auto_model_routing_system_prompt_weight + auto_model_routing_user_prompt_weight must equal 1.0' in errors[0]
 
 
 def test_validate_config_weights_sum_exactly_one():
@@ -397,7 +571,7 @@ def test_validate_config_system_prompt_weight_zero():
     )
     errors = validate_config(cfg)
     assert len(errors) >= 1
-    assert any('--auto-model-routing-system-prompt-weight must be > 0' in e for e in errors)
+    assert any('auto_model_routing_system_prompt_weight must be > 0' in e for e in errors)
 
 
 def test_validate_config_user_prompt_weight_zero():
@@ -408,7 +582,7 @@ def test_validate_config_user_prompt_weight_zero():
     )
     errors = validate_config(cfg)
     assert len(errors) >= 1
-    assert any('--auto-model-routing-user-prompt-weight must be > 0' in e for e in errors)
+    assert any('auto_model_routing_user_prompt_weight must be > 0' in e for e in errors)
 
 
 def test_validate_config_thresholds_equal():
@@ -419,7 +593,7 @@ def test_validate_config_thresholds_equal():
     )
     errors = validate_config(cfg)
     assert len(errors) == 1
-    assert '--auto-model-routing-trivial-threshold must be < --auto-model-routing-standard-threshold' in errors[0]
+    assert 'auto_model_routing_trivial_threshold must be < auto_model_routing_standard_threshold' in errors[0]
 
 
 def test_validate_config_thresholds_reversed():
@@ -430,7 +604,7 @@ def test_validate_config_thresholds_reversed():
     )
     errors = validate_config(cfg)
     assert len(errors) == 1
-    assert '--auto-model-routing-trivial-threshold must be < --auto-model-routing-standard-threshold' in errors[0]
+    assert 'auto_model_routing_trivial_threshold must be < auto_model_routing_standard_threshold' in errors[0]
 
 
 def test_validate_config_thresholds_valid():
@@ -457,6 +631,6 @@ def test_validate_config_multiple_errors():
     errors = validate_config(cfg)
     assert len(errors) >= 3
     error_text = '\n'.join(errors)
-    assert '--auto-model-routing-classifier-model must be a non-empty string' in error_text
-    assert '--sse-keepalive-interval must be >= 0' in error_text
-    assert '--db-retention-days must be >= 0' in error_text
+    assert 'auto_model_routing_classifier_model must be a non-empty string' in error_text
+    assert 'sse_keepalive_interval must be >=' in error_text
+    assert 'db_retention_days must be >=' in error_text

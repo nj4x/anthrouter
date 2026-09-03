@@ -22,7 +22,7 @@ import types
 import typing
 from pathlib import Path
 
-from anthrouter.config import EDITABLE_FIELDS, Config, validate_config
+from anthrouter.config import EDITABLE_FIELDS, FIELD_METADATA, Config, validate_config
 
 logger = logging.getLogger(__name__)
 
@@ -317,11 +317,16 @@ def _read_config_env(anthrouter_home: str) -> dict[str, str]:
 
 
 def _get_config(config) -> tuple[int, dict]:
-    """Return current config with restart-required metadata."""
+    """Return current config with restart-required metadata and field hints."""
     file_values = _read_config_env(config.anthrouter_home)
 
     fields = {}
-    for field_name, restart_required in EDITABLE_FIELDS.items():
+    field_order = list(FIELD_METADATA.keys())
+    
+    for field_name in field_order:
+        meta = FIELD_METADATA[field_name]
+        restart_required = EDITABLE_FIELDS.get(field_name, False)
+        
         if restart_required:
             env_key = 'ANTHROUTER_' + field_name.upper()
             if env_key in file_values:
@@ -331,14 +336,27 @@ def _get_config(config) -> tuple[int, dict]:
         else:
             value = str(getattr(config, field_name, ''))
 
-        fields[field_name] = {
+        field_data: dict = {
             'restart_required': restart_required,
             'value': value,
+            'description': meta.get('description', ''),
+            'type': meta.get('type', 'str'),
+            'group': meta.get('group', ''),
         }
+        
+        if 'enum' in meta and meta['enum'] is not None:
+            field_data['enum'] = meta['enum']
+        if 'min' in meta and meta['min'] is not None:
+            field_data['min'] = meta['min']
+        if 'max' in meta and meta['max'] is not None:
+            field_data['max'] = meta['max']
+        
+        fields[field_name] = field_data
 
     return 200, {
         'admin_token_configured': bool(getattr(config, 'admin_token', None)),
         'fields': fields,
+        'field_order': field_order,
     }
 
 

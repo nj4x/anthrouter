@@ -3,11 +3,18 @@ import { useEffect, useState } from 'react'
 interface ConfigField {
   restart_required: boolean
   value: string
+  description: string
+  type: 'str' | 'int' | 'float' | 'bool'
+  enum?: string[]
+  min?: number
+  max?: number
+  group: string
 }
 
 interface ConfigResponse {
   admin_token_configured: boolean
   fields: Record<string, ConfigField>
+  field_order: string[]
 }
 
 export function ConfigModal({ isOpen, onClose }: { isOpen: boolean; onClose: () => void }) {
@@ -67,6 +74,88 @@ export function ConfigModal({ isOpen, onClose }: { isOpen: boolean; onClose: () 
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [isOpen, onClose])
 
+  const renderField = (name: string, field: ConfigField) => {
+    const currentValue = values[name] ?? field.value
+
+    const renderInput = () => {
+      // Enum field -> select
+      if (field.enum) {
+        return (
+          <select
+            value={currentValue}
+            onChange={e => setValues(prev => ({ ...prev, [name]: e.target.value }))}
+            className="mt-2 w-full rounded border border-slate-300 bg-white px-3 py-2 text-sm text-slate-800 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-200"
+          >
+            {field.enum.map(opt => (
+              <option key={opt} value={opt}>{opt}</option>
+            ))}
+          </select>
+        )
+      }
+
+      // Bool field -> checkbox
+      if (field.type === 'bool') {
+        const isChecked = currentValue === 'true'
+        return (
+          <div className="mt-2 flex items-center gap-2">
+            <input
+              type="checkbox"
+              checked={isChecked}
+              onChange={e => setValues(prev => ({ ...prev, [name]: e.target.checked ? 'true' : 'false' }))}
+              className="h-4 w-4 rounded border-slate-300 text-slate-600 focus:ring-slate-500 dark:border-slate-600 dark:bg-slate-900"
+            />
+            <span className="text-sm text-slate-600 dark:text-slate-400">{isChecked ? 'Yes' : 'No'}</span>
+          </div>
+        )
+      }
+
+      // Numeric field -> input type="number"
+      if (field.type === 'int' || field.type === 'float') {
+        return (
+          <input
+            type="number"
+            value={currentValue}
+            onChange={e => setValues(prev => ({ ...prev, [name]: e.target.value }))}
+            min={field.min}
+            max={field.max}
+            step={field.type === 'int' ? '1' : 'any'}
+            className="mt-2 w-full rounded border border-slate-300 bg-white px-3 py-2 text-sm text-slate-800 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-200"
+          />
+        )
+      }
+
+      // String field -> input type="text"
+      return (
+        <input
+          type="text"
+          value={currentValue}
+          onChange={e => setValues(prev => ({ ...prev, [name]: e.target.value }))}
+          className="mt-2 w-full rounded border border-slate-300 bg-white px-3 py-2 text-sm text-slate-800 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-200"
+        />
+      )
+    }
+
+    return (
+      <div key={name} className="rounded border border-slate-200 p-3 dark:border-slate-700">
+        <div className="flex items-center justify-between">
+          <label className="text-sm font-mono text-slate-700 dark:text-slate-300">{name}</label>
+          {field.restart_required && (
+            <span className="inline-block rounded bg-red-100 px-2 py-1 text-xs font-semibold text-red-800 dark:bg-red-900 dark:text-red-200">
+              Restart required
+            </span>
+          )}
+        </div>
+        {renderInput()}
+        <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">{field.description}</p>
+        {saved && field.restart_required && (
+          <p className="mt-1 text-xs text-amber-700 dark:text-amber-300">
+            Takes effect on next restart via the installed launcher.
+          </p>
+        )}
+      </div>
+    )
+  }
+
   if (!isOpen) return null
 
   return (
@@ -96,31 +185,22 @@ export function ConfigModal({ isOpen, onClose }: { isOpen: boolean; onClose: () 
         {config ? (
           <>
             <div className="mb-6 max-h-96 space-y-3 overflow-y-auto">
-              {Object.entries(config.fields)
-                .sort(([a], [b]) => a.localeCompare(b))
-                .map(([name, field]) => (
-                  <div key={name} className="rounded border border-slate-200 p-3 dark:border-slate-700">
-                    <div className="flex items-center justify-between">
-                      <label className="text-sm font-mono text-slate-700 dark:text-slate-300">{name}</label>
-                      {field.restart_required && (
-                        <span className="inline-block rounded bg-red-100 px-2 py-1 text-xs font-semibold text-red-800 dark:bg-red-900 dark:text-red-200">
-                          Restart required
-                        </span>
-                      )}
-                    </div>
-                    <input
-                      type="text"
-                      value={values[name] ?? field.value}
-                      onChange={e => setValues(prev => ({ ...prev, [name]: e.target.value }))}
-                      className="mt-2 w-full rounded border border-slate-300 bg-white px-3 py-2 text-sm text-slate-800 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-200"
-                    />
-                    {saved && field.restart_required && (
-                      <p className="mt-1 text-xs text-amber-700 dark:text-amber-300">
-                        Takes effect on next restart via the installed launcher.
-                      </p>
+              {config.field_order.map((name, index) => {
+                const field = config.fields[name]
+                const prevField = index > 0 ? config.fields[config.field_order[index - 1]] : null
+                const showGroupHeading = !prevField || prevField.group !== field.group
+
+                return (
+                  <div key={name}>
+                    {showGroupHeading && (
+                      <h3 className="mb-2 mt-4 text-sm font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                        {field.group}
+                      </h3>
                     )}
+                    {renderField(name, field)}
                   </div>
-                ))}
+                )
+              })}
             </div>
 
             <div className="mb-6 rounded border border-slate-200 bg-slate-50 p-3 dark:border-slate-700 dark:bg-slate-900">

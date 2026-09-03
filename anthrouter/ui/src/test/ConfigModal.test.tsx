@@ -5,9 +5,23 @@ import { ConfigModal } from '../components/ConfigModal'
 
 const CONFIG_RESPONSE = {
   admin_token_configured: true,
+  field_order: ['host', 'log_level'],
   fields: {
-    host: { restart_required: true, value: '127.0.0.1' },
-    log_level: { restart_required: false, value: 'INFO' },
+    host: {
+      restart_required: true,
+      value: '127.0.0.1',
+      description: 'Network address the server binds to.',
+      type: 'str',
+      group: 'Server',
+    },
+    log_level: {
+      restart_required: false,
+      value: 'INFO',
+      description: 'Minimum severity level for log messages.',
+      type: 'str',
+      enum: ['DEBUG', 'INFO', 'WARNING', 'ERROR'],
+      group: 'Logging',
+    },
   },
 }
 
@@ -109,5 +123,128 @@ describe('ConfigModal', () => {
     render(<ConfigModal isOpen onClose={() => {}} />)
     await screen.findByDisplayValue('127.0.0.1')
     expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled()
+  })
+
+  it('renders enum field as a select with correct options', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(new Response(
+      JSON.stringify({
+        admin_token_configured: true,
+        field_order: ['log_level'],
+        fields: {
+          log_level: {
+            restart_required: false,
+            value: 'INFO',
+            description: 'Minimum severity level for log messages.',
+            type: 'str',
+            enum: ['DEBUG', 'INFO', 'WARNING', 'ERROR'],
+            group: 'Logging',
+          },
+        },
+      }),
+      { status: 200 },
+    ))))
+    render(<ConfigModal isOpen onClose={() => {}} />)
+    const select = await screen.findByRole('combobox') as HTMLSelectElement
+    expect(select).toBeInTheDocument()
+    expect(select.value).toBe('INFO')
+    const options = Array.from(select.options).map(opt => opt.value)
+    expect(options).toEqual(['DEBUG', 'INFO', 'WARNING', 'ERROR'])
+  })
+
+  it('renders bool field as a checkbox', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(new Response(
+      JSON.stringify({
+        admin_token_configured: true,
+        field_order: ['auto_model_routing'],
+        fields: {
+          auto_model_routing: {
+            restart_required: false,
+            value: 'false',
+            description: 'Automatically route requests to a configured target model based on complexity.',
+            type: 'bool',
+            group: 'Model Routing',
+          },
+        },
+      }),
+      { status: 200 },
+    ))))
+    render(<ConfigModal isOpen onClose={() => {}} />)
+    const checkbox = await screen.findByRole('checkbox') as HTMLInputElement
+    expect(checkbox).toBeInTheDocument()
+    expect(checkbox.checked).toBe(false)
+    fireEvent.click(checkbox)
+    expect(checkbox.checked).toBe(true)
+  })
+
+  it('renders numeric field with min/max attributes', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(new Response(
+      JSON.stringify({
+        admin_token_configured: true,
+        field_order: ['db_retention_days'],
+        fields: {
+          db_retention_days: {
+            restart_required: false,
+            value: '30',
+            description: 'Delete request rows older than this many days; 0 keeps rows forever.',
+            type: 'int',
+            min: 0,
+            max: 365,
+            group: 'Database',
+          },
+        },
+      }),
+      { status: 200 },
+    ))))
+    render(<ConfigModal isOpen onClose={() => {}} />)
+    const input = await screen.findByRole('spinbutton') as HTMLInputElement
+    expect(input).toBeInTheDocument()
+    expect(input.type).toBe('number')
+    expect(input.min).toBe('0')
+    expect(input.max).toBe('365')
+  })
+
+  it('displays field description text', async () => {
+    render(<ConfigModal isOpen onClose={() => {}} />)
+    await screen.findByDisplayValue('127.0.0.1')
+    // Check that description text is present
+    expect(screen.getByText('Network address the server binds to.')).toBeInTheDocument()
+  })
+
+  it('renders group headings in field_order sequence', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(new Response(
+      JSON.stringify({
+        admin_token_configured: true,
+        field_order: ['log_level', 'log_file', 'upstream_base_url'],
+        fields: {
+          log_level: {
+            restart_required: false,
+            value: 'INFO',
+            description: 'Log level description.',
+            type: 'str',
+            group: 'Logging',
+          },
+          log_file: {
+            restart_required: true,
+            value: '/tmp/anthrouter.log',
+            description: 'Log file description.',
+            type: 'str',
+            group: 'Logging',
+          },
+          upstream_base_url: {
+            restart_required: true,
+            value: 'https://api.anthropic.com',
+            description: 'Upstream URL description.',
+            type: 'str',
+            group: 'Upstream',
+          },
+        },
+      }),
+      { status: 200 },
+    ))))
+    render(<ConfigModal isOpen onClose={() => {}} />)
+    await screen.findByDisplayValue('INFO')
+    // Check group headings appear
+    expect(screen.getByText('Logging')).toBeInTheDocument()
+    expect(screen.getByText('Upstream')).toBeInTheDocument()
   })
 })

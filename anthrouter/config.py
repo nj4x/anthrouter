@@ -44,6 +44,170 @@ EDITABLE_FIELDS: dict[str, bool] = {
     'db_retention_days': False,
 }
 
+
+# FieldMetadata: per-field metadata for the admin UI config editor
+# Each entry has: description, type, enum (optional), min (optional), max (optional), group
+# The insertion order IS the display order in the UI
+FIELD_METADATA: dict[str, dict] = {
+    # === Logging ===
+    'log_level': {
+        'description': 'Minimum severity level for log messages.',
+        'type': 'str',
+        'enum': ['DEBUG', 'INFO', 'WARNING', 'ERROR'],
+        'group': 'Logging',
+    },
+    'log_file': {
+        'description': 'Path to the log file where messages are written.',
+        'type': 'str',
+        'group': 'Logging',
+    },
+    # === Upstream ===
+    'upstream_base_url': {
+        'description': 'Base URL of the Anthropic API to forward requests to.',
+        'type': 'str',
+        'group': 'Upstream',
+    },
+    # === Model Routing ===
+    'auto_model_routing': {
+        'description': 'Automatically route requests to a configured target model based on complexity.',
+        'type': 'bool',
+        'group': 'Model Routing',
+    },
+    'auto_model_routing_mode': {
+        'description': 'Classification mode for auto routing: "classifier" uses an LLM, "rules" uses deterministic keyword rules, "tag" routes by task name.',
+        'type': 'str',
+        'enum': ['classifier', 'rules', 'tag'],
+        'group': 'Model Routing',
+    },
+    'auto_model_routing_classifier_model': {
+        'description': 'Model alias used for the internal complexity-classifier call when auto routing is enabled.',
+        'type': 'str',
+        'group': 'Model Routing',
+    },
+    'auto_model_routing_long': {
+        'description': 'Model forced by the long-context size floor; "off" disables the floor.',
+        'type': 'str',
+        'group': 'Model Routing',
+    },
+    'auto_model_routing_long_context_threshold': {
+        'description': 'Estimated input token threshold at or above which auto routing deterministically forces the long model; 0 disables the floor.',
+        'type': 'int',
+        'min': 0,
+        'group': 'Model Routing',
+    },
+    'auto_model_routing_trivial_threshold': {
+        'description': 'Weighted score threshold below which the blended tier is "trivial"; must be strictly less than auto_model_routing_standard_threshold.',
+        'type': 'float',
+        'group': 'Model Routing',
+    },
+    'auto_model_routing_standard_threshold': {
+        'description': 'Weighted score threshold at or above which the blended tier is "deep"; values between auto_model_routing_trivial_threshold and this are "standard".',
+        'type': 'float',
+        'group': 'Model Routing',
+    },
+    'auto_model_routing_system_prompt_weight': {
+        'description': 'Weight applied to the system-prompt tier score in the weighted blend; must sum to 1.0 with auto_model_routing_user_prompt_weight and both must be > 0.',
+        'type': 'float',
+        'min': 0.0,
+        'max': 1.0,
+        'group': 'Model Routing',
+    },
+    'auto_model_routing_user_prompt_weight': {
+        'description': 'Weight applied to the user-prompt tier score in the weighted blend; must sum to 1.0 with auto_model_routing_system_prompt_weight and both must be > 0.',
+        'type': 'float',
+        'min': 0.0,
+        'max': 1.0,
+        'group': 'Model Routing',
+    },
+    'auto_model_routing_system_prompt_cache_size': {
+        'description': 'Maximum number of system-prompt SHA256 to tier-score entries in the in-memory LRU cache.',
+        'type': 'int',
+        'min': 1,
+        'group': 'Model Routing',
+    },
+    'auto_model_routing_system_prompt_preview_limit': {
+        'description': 'Maximum characters of the system prompt sent to the system-prompt classifier.',
+        'type': 'int',
+        'min': 1,
+        'group': 'Model Routing',
+    },
+    'auto_model_routing_confidence_bump': {
+        'description': 'When enabled, the classifier uses a structured JSON output format that includes a confidence score; turns classified below auto_model_routing_min_confidence are bumped to the next tier.',
+        'type': 'bool',
+        'group': 'Model Routing',
+    },
+    'auto_model_routing_min_confidence': {
+        'description': 'Minimum confidence score (0.0 to 1.0) required before the classifier tier label is used as-is; turns below this threshold are bumped up.',
+        'type': 'float',
+        'min': 0.0,
+        'max': 1.0,
+        'group': 'Model Routing',
+    },
+    'auto_model_routing_affirmation_inherit': {
+        'description': 'When auto routing is on, treat a bare confirmation turn as a continuation and inherit the conversation established tier instead of classifying it as trivial.',
+        'type': 'bool',
+        'group': 'Model Routing',
+    },
+    'auto_model_routing_prior_response_summary_limit': {
+        'description': 'Maximum characters of the prior assistant response sent to the classifier during affirmation enrichment.',
+        'type': 'int',
+        'min': 50,
+        'max': 32000,
+        'group': 'Model Routing',
+    },
+    'lock_requested_model': {
+        'description': 'Override the incoming request model with a fixed baseline before auto routing fires; "off" disables the lock and passes the client model through unchanged.',
+        'type': 'str',
+        'group': 'Model Routing',
+    },
+    # === Prompt Sanitization ===
+    'sanitize_system_prompt': {
+        'description': 'Handle cache-hostile volatile blocks in the inbound system prompt: "strip" removes allowlisted telemetry blocks, "warn" only detects and warns, "off" disables both.',
+        'type': 'str',
+        'enum': ['off', 'warn', 'strip'],
+        'group': 'Prompt Sanitization',
+    },
+    # === Database ===
+    'db_path': {
+        'description': 'Path to the SQLite database file for request and routing records.',
+        'type': 'str',
+        'group': 'Database',
+    },
+    'db_retention_days': {
+        'description': 'Delete request rows older than this many days; 0 keeps rows forever.',
+        'type': 'int',
+        'min': 0,
+        'group': 'Database',
+    },
+    # === Server ===
+    'host': {
+        'description': 'Network address the server binds to.',
+        'type': 'str',
+        'group': 'Server',
+    },
+    'port': {
+        'description': 'TCP port the server listens on.',
+        'type': 'int',
+        'group': 'Server',
+    },
+    'sse_keepalive_interval': {
+        'description': 'Seconds between SSE keepalive comment lines sent to the client while waiting for the upstream first byte; 0 disables keepalive.',
+        'type': 'float',
+        'min': 0.0,
+        'group': 'Server',
+    },
+}
+
+# Fail-closed invariant: FIELD_METADATA keys must exactly match EDITABLE_FIELDS keys
+if set(FIELD_METADATA.keys()) != set(EDITABLE_FIELDS.keys()):
+    missing_in_metadata = set(EDITABLE_FIELDS.keys()) - set(FIELD_METADATA.keys())
+    extra_in_metadata = set(FIELD_METADATA.keys()) - set(EDITABLE_FIELDS.keys())
+    raise RuntimeError(
+        f'FIELD_METADATA keys diverge from EDITABLE_FIELDS keys. '
+        f'Missing in metadata: {sorted(missing_in_metadata)}. '
+        f'Extra in metadata: {sorted(extra_in_metadata)}.'
+    )
+
 _DEFAULT_CLASSIFICATION: dict[str, str] = {
     'trivial': 'haiku',
     'standard': 'sonnet',
@@ -186,58 +350,109 @@ def validate_config(cfg: Config) -> list[str]:
     Returns an empty list if the config is valid.
     
     Validates:
-    - Cross-field invariants: weight pairs summing to 1.0, threshold ordering
-    - Single-field bounds: sse_keepalive_interval >= 0, db_retention_days >= 0,
-      long_context_threshold >= 0, prior_limit in [50, 32000], 
+    - Enum values: log_level, auto_model_routing_mode, sanitize_system_prompt
+    - Numeric bounds: min_confidence in [0, 1], sse_keepalive_interval >= 0,
+      db_retention_days >= 0, long_context_threshold >= 0, prior_limit in [50, 32000],
       system_prompt_cache_size >= 1, system_prompt_preview_limit >= 1,
-      upstream_base_url non-empty, auto_model_routing_classifier_model non-empty
+      weight bounds [0, 1]
+    - Cross-field invariants: weight pairs summing to 1.0, threshold ordering
+    - Non-empty: upstream_base_url, auto_model_routing_classifier_model
     
     Does NOT enforce config.env quoting rules (serialization concern).
     """
     errors: list[str] = []
     
+    # Enum enforcement (sourced from FIELD_METADATA)
+    log_level_meta = FIELD_METADATA.get('log_level', {})
+    if log_level_meta.get('enum') and cfg.log_level not in log_level_meta['enum']:
+        errors.append(f"log_level must be one of {log_level_meta['enum']}, got {cfg.log_level!r}")
+    
+    mode_meta = FIELD_METADATA.get('auto_model_routing_mode', {})
+    if mode_meta.get('enum') and cfg.auto_model_routing_mode not in mode_meta['enum']:
+        errors.append(f"auto_model_routing_mode must be one of {mode_meta['enum']}, got {cfg.auto_model_routing_mode!r}")
+    
+    sanitize_meta = FIELD_METADATA.get('sanitize_system_prompt', {})
+    if sanitize_meta.get('enum') and cfg.sanitize_system_prompt not in sanitize_meta['enum']:
+        errors.append(f"sanitize_system_prompt must be one of {sanitize_meta['enum']}, got {cfg.sanitize_system_prompt!r}")
+    
+    # Numeric bounds: auto_model_routing_min_confidence [0, 1]
+    min_conf_meta = FIELD_METADATA.get('auto_model_routing_min_confidence', {})
+    min_conf_min = min_conf_meta.get('min', 0.0)
+    min_conf_max = min_conf_meta.get('max', 1.0)
+    if cfg.auto_model_routing_min_confidence < min_conf_min or cfg.auto_model_routing_min_confidence > min_conf_max:
+        errors.append(f'auto_model_routing_min_confidence must be in [{min_conf_min}, {min_conf_max}], got {cfg.auto_model_routing_min_confidence}')
+    
     # Single-field bounds checks
     if not cfg.auto_model_routing_classifier_model.strip():
-        errors.append('--auto-model-routing-classifier-model must be a non-empty string')
+        errors.append('auto_model_routing_classifier_model must be a non-empty string')
     
-    if cfg.sse_keepalive_interval < 0:
-        errors.append('--sse-keepalive-interval must be >= 0')
+    sse_meta = FIELD_METADATA.get('sse_keepalive_interval', {})
+    sse_min = sse_meta.get('min', 0.0)
+    if cfg.sse_keepalive_interval < sse_min:
+        errors.append(f'sse_keepalive_interval must be >= {sse_min}, got {cfg.sse_keepalive_interval}')
     
-    if cfg.db_retention_days < 0:
-        errors.append('--db-retention-days must be >= 0')
+    db_ret_meta = FIELD_METADATA.get('db_retention_days', {})
+    db_ret_min = db_ret_meta.get('min', 0)
+    if cfg.db_retention_days < db_ret_min:
+        errors.append(f'db_retention_days must be >= {db_ret_min}, got {cfg.db_retention_days}')
     
-    if cfg.auto_model_routing_long_context_threshold < 0:
-        errors.append('--auto-model-routing-long-context-threshold must be >= 0')
+    ctx_meta = FIELD_METADATA.get('auto_model_routing_long_context_threshold', {})
+    ctx_min = ctx_meta.get('min', 0)
+    if cfg.auto_model_routing_long_context_threshold < ctx_min:
+        errors.append(f'auto_model_routing_long_context_threshold must be >= {ctx_min}, got {cfg.auto_model_routing_long_context_threshold}')
     
+    prior_meta = FIELD_METADATA.get('auto_model_routing_prior_response_summary_limit', {})
+    prior_min = prior_meta.get('min', 50)
+    prior_max = prior_meta.get('max', 32000)
     prior_limit = cfg.auto_model_routing_prior_response_summary_limit
-    if prior_limit < 50 or prior_limit > 32_000:
-        errors.append(f'--auto-model-routing-prior-response-summary-limit must be in [50, 32000], got {prior_limit}')
+    if prior_limit < prior_min or prior_limit > prior_max:
+        errors.append(f'auto_model_routing_prior_response_summary_limit must be in [{prior_min}, {prior_max}], got {prior_limit}')
     
-    if cfg.auto_model_routing_system_prompt_cache_size < 1:
-        errors.append(f'--auto-model-routing-system-prompt-cache-size must be >= 1, got {cfg.auto_model_routing_system_prompt_cache_size}')
+    cache_meta = FIELD_METADATA.get('auto_model_routing_system_prompt_cache_size', {})
+    cache_min = cache_meta.get('min', 1)
+    if cfg.auto_model_routing_system_prompt_cache_size < cache_min:
+        errors.append(f'auto_model_routing_system_prompt_cache_size must be >= {cache_min}, got {cfg.auto_model_routing_system_prompt_cache_size}')
     
-    if cfg.auto_model_routing_system_prompt_preview_limit < 1:
-        errors.append(f'--auto-model-routing-system-prompt-preview-limit must be >= 1, got {cfg.auto_model_routing_system_prompt_preview_limit}')
+    preview_meta = FIELD_METADATA.get('auto_model_routing_system_prompt_preview_limit', {})
+    preview_min = preview_meta.get('min', 1)
+    if cfg.auto_model_routing_system_prompt_preview_limit < preview_min:
+        errors.append(f'auto_model_routing_system_prompt_preview_limit must be >= {preview_min}, got {cfg.auto_model_routing_system_prompt_preview_limit}')
     
     if not cfg.upstream_base_url:
-        errors.append('--upstream-base-url must be a non-empty URL')
+        errors.append('upstream_base_url must be a non-empty URL')
     
-    # Cross-field invariants
+    # Weight bounds [0, 1] from metadata
+    sys_w_meta = FIELD_METADATA.get('auto_model_routing_system_prompt_weight', {})
+    usr_w_meta = FIELD_METADATA.get('auto_model_routing_user_prompt_weight', {})
+    sys_w_min = sys_w_meta.get('min', 0.0)
+    sys_w_max = sys_w_meta.get('max', 1.0)
+    usr_w_min = usr_w_meta.get('min', 0.0)
+    usr_w_max = usr_w_meta.get('max', 1.0)
+    
     sys_w = cfg.auto_model_routing_system_prompt_weight
     usr_w = cfg.auto_model_routing_user_prompt_weight
-    if abs(sys_w + usr_w - 1.0) >= 1e-9:
-        errors.append(f'--auto-model-routing-system-prompt-weight + --auto-model-routing-user-prompt-weight must equal 1.0, got {sys_w} + {usr_w} = {sys_w + usr_w}')
     
+    if sys_w < sys_w_min or sys_w > sys_w_max:
+        errors.append(f'auto_model_routing_system_prompt_weight must be in [{sys_w_min}, {sys_w_max}], got {sys_w}')
+    if usr_w < usr_w_min or usr_w > usr_w_max:
+        errors.append(f'auto_model_routing_user_prompt_weight must be in [{usr_w_min}, {usr_w_max}], got {usr_w}')
+    
+    # Cross-field invariants: weight sum
+    if abs(sys_w + usr_w - 1.0) >= 1e-9:
+        errors.append(f'auto_model_routing_system_prompt_weight + auto_model_routing_user_prompt_weight must equal 1.0, got {sys_w} + {usr_w} = {sys_w + usr_w}')
+    
+    # Cross-field invariants: weight > 0 (separate from bounds check)
     if sys_w <= 0:
-        errors.append(f'--auto-model-routing-system-prompt-weight must be > 0, got {sys_w}')
+        errors.append(f'auto_model_routing_system_prompt_weight must be > 0, got {sys_w}')
     
     if usr_w <= 0:
-        errors.append(f'--auto-model-routing-user-prompt-weight must be > 0, got {usr_w}')
+        errors.append(f'auto_model_routing_user_prompt_weight must be > 0, got {usr_w}')
     
+    # Cross-field invariants: threshold ordering
     trivial_t = cfg.auto_model_routing_trivial_threshold
     standard_t = cfg.auto_model_routing_standard_threshold
     if trivial_t >= standard_t:
-        errors.append(f'--auto-model-routing-trivial-threshold must be < --auto-model-routing-standard-threshold, got {trivial_t} >= {standard_t}')
+        errors.append(f'auto_model_routing_trivial_threshold must be < auto_model_routing_standard_threshold, got {trivial_t} >= {standard_t}')
     
     return errors
 
@@ -248,25 +463,33 @@ def parse_args(argv=None) -> Config:
         description='Single-backend Anthropic proxy with model-tier routing '
                     'and system-prompt sanitization',
     )
+    
+    # Helper to build help text from FIELD_METADATA
+    def _help_from_meta(field_name: str, extra: str = '') -> str:
+        """Build argparse help from FIELD_METADATA description plus optional extra."""
+        meta = FIELD_METADATA.get(field_name, {})
+        desc = meta.get('description', '')
+        parts = [desc] if desc else []
+        if extra:
+            parts.append(extra)
+        return ' '.join(parts)
+    
     p.add_argument('--host', default=os.environ.get('ANTHROUTER_HOST', '127.0.0.1'),
-                   help='Bind address (default: 127.0.0.1, env: ANTHROUTER_HOST)')
+                   help=f'{_help_from_meta("host")} (default: 127.0.0.1, env: ANTHROUTER_HOST)')
     p.add_argument('--port', type=int,
                    default=int(os.environ.get('ANTHROUTER_PORT', '8083')),
-                   help='Bind port (default: 8083, env: ANTHROUTER_PORT)')
+                   help=f'{_help_from_meta("port")} (default: 8083, env: ANTHROUTER_PORT)')
     p.add_argument('--upstream-base-url', dest='upstream_base_url',
                    default=os.environ.get('ANTHROUTER_UPSTREAM_BASE_URL',
                                           DEFAULT_UPSTREAM_BASE_URL),
-                   help=f'Base URL of the Anthropic API to forward to '
-                        f'(default: {DEFAULT_UPSTREAM_BASE_URL}, '
-                        f'env: ANTHROUTER_UPSTREAM_BASE_URL)')
+                   help=f'{_help_from_meta("upstream_base_url")} (default: {DEFAULT_UPSTREAM_BASE_URL}, env: ANTHROUTER_UPSTREAM_BASE_URL)')
     p.add_argument('--log-level',
                    default=os.environ.get('ANTHROUTER_LOG_LEVEL', 'INFO'),
                    choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'],
-                   help='Log level (default: INFO, env: ANTHROUTER_LOG_LEVEL)')
+                   help=f'{_help_from_meta("log_level")} Choices: DEBUG, INFO, WARNING, ERROR. (default: INFO, env: ANTHROUTER_LOG_LEVEL)')
     p.add_argument('--log-file',
                    default=os.environ.get('ANTHROUTER_LOG_FILE', '/tmp/anthrouter.log'),
-                   help='Write log to this file at --log-level verbosity '
-                        '(default: /tmp/anthrouter.log, env: ANTHROUTER_LOG_FILE)')
+                   help=f'{_help_from_meta("log_file")} (default: /tmp/anthrouter.log, env: ANTHROUTER_LOG_FILE)')
     p.add_argument('--anthrouter-home', dest='anthrouter_home',
                    default=os.environ.get('ANTHROUTER_HOME', ''),
                    help='Root directory for anthrouter config and state'

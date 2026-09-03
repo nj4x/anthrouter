@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from anthrouter import admin
-from anthrouter.config import EDITABLE_FIELDS, Config
+from anthrouter.config import EDITABLE_FIELDS, FIELD_METADATA, Config
 from anthrouter.db import RequestDB
 from tests.conftest import SESSION, post
 
@@ -161,12 +161,12 @@ def cfg():
 
 
 def test_handle_get_without_a_db_is_unavailable(cfg):
-    status, body = admin.handle_get('/admin/requests', {}, None, cfg)
+    status, _ = admin.handle_get('/admin/requests', {}, None, cfg)
     assert status == 503
 
 
 def test_handle_get_unknown_path_is_404(db, cfg):
-    status, body = admin.handle_get('/admin/backends', {}, db, cfg)
+    status, _ = admin.handle_get('/admin/backends', {}, db, cfg)
     assert status == 404
 
 
@@ -520,6 +520,73 @@ def test_get_config_live_editable_fields_from_memory(cfg):
     _status, body = admin.handle_get('/admin/config', {}, None, cfg)
     assert body['fields']['log_level']['value'] == 'DEBUG'
     assert body['fields']['log_level']['restart_required'] is False
+
+
+# ---------------------------------------------------------------------------
+# GET /admin/config - FIELD_METADATA tests (ADR-0007)
+# ---------------------------------------------------------------------------
+
+def test_get_config_includes_field_order(cfg):
+    """GET /admin/config includes field_order array."""
+    _status, body = admin.handle_get('/admin/config', {}, None, cfg)
+    assert 'field_order' in body
+    assert isinstance(body['field_order'], list)
+    assert len(body['field_order']) == len(EDITABLE_FIELDS)
+
+
+def test_get_config_field_order_matches_metadata_keys(cfg):
+    """field_order matches FIELD_METADATA insertion order."""
+    _status, body = admin.handle_get('/admin/config', {}, None, cfg)
+    assert body['field_order'] == list(FIELD_METADATA.keys())
+
+
+def test_get_config_includes_field_metadata(cfg):
+    """Each field includes metadata: description, type, group."""
+    _status, body = admin.handle_get('/admin/config', {}, None, cfg)
+    for field_name, field_data in body['fields'].items():
+        assert 'description' in field_data, f'{field_name} missing description'
+        assert 'type' in field_data, f'{field_name} missing type'
+        assert 'group' in field_data, f'{field_name} missing group'
+
+
+def test_get_config_enum_fields_have_enum_array(cfg):
+    """Enum fields include enum array."""
+    _status, body = admin.handle_get('/admin/config', {}, None, cfg)
+    # log_level is an enum field
+    assert 'enum' in body['fields']['log_level']
+    assert body['fields']['log_level']['enum'] == ['DEBUG', 'INFO', 'WARNING', 'ERROR']
+    # auto_model_routing_mode is an enum field
+    assert 'enum' in body['fields']['auto_model_routing_mode']
+    assert body['fields']['auto_model_routing_mode']['enum'] == ['classifier', 'rules', 'tag']
+    # host is not an enum field
+    assert 'enum' not in body['fields']['host']
+
+
+def test_get_config_numeric_fields_have_min_max(cfg):
+    """Numeric fields include min/max where applicable."""
+    _status, body = admin.handle_get('/admin/config', {}, None, cfg)
+    # auto_model_routing_min_confidence has min/max
+    assert 'min' in body['fields']['auto_model_routing_min_confidence']
+    assert 'max' in body['fields']['auto_model_routing_min_confidence']
+    assert body['fields']['auto_model_routing_min_confidence']['min'] == 0.0
+    assert body['fields']['auto_model_routing_min_confidence']['max'] == 1.0
+    # db_retention_days has min
+    assert 'min' in body['fields']['db_retention_days']
+    assert body['fields']['db_retention_days']['min'] == 0
+    # host has no min/max
+    assert 'min' not in body['fields']['host']
+    assert 'max' not in body['fields']['host']
+
+
+def test_get_config_groups_are_correct(cfg):
+    """Fields are grouped by subsystem."""
+    _status, body = admin.handle_get('/admin/config', {}, None, cfg)
+    assert body['fields']['log_level']['group'] == 'Logging'
+    assert body['fields']['upstream_base_url']['group'] == 'Upstream'
+    assert body['fields']['auto_model_routing']['group'] == 'Model Routing'
+    assert body['fields']['sanitize_system_prompt']['group'] == 'Prompt Sanitization'
+    assert body['fields']['db_path']['group'] == 'Database'
+    assert body['fields']['host']['group'] == 'Server'
 
 
 # ---------------------------------------------------------------------------
