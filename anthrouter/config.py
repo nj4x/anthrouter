@@ -5,6 +5,8 @@ import logging
 import os
 from pathlib import Path
 
+from .pace import resolve_timezone
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_UPSTREAM_BASE_URL = 'https://api.anthropic.com'
@@ -42,6 +44,7 @@ EDITABLE_FIELDS: dict[str, bool] = {
     'sanitize_system_prompt': False,
     'sse_keepalive_interval': False,
     'db_retention_days': False,
+    'oauth_usage_timezone': True,
 }
 
 
@@ -196,6 +199,12 @@ FIELD_METADATA: dict[str, dict] = {
         'min': 0.0,
         'group': 'Server',
     },
+    # === OAuth Usage ===
+    'oauth_usage_timezone': {
+        'description': 'Timezone used for workday-aware OAuth usage pace baseline. If unset, auto-detects with a Pacific (America/Los_Angeles) fallback. Explicit "UTC" is honoured; auto-detected UTC falls back to America/Los_Angeles.',
+        'type': 'str',
+        'group': 'OAuth Usage',
+    },
 }
 
 # Fail-closed invariant: FIELD_METADATA keys must exactly match EDITABLE_FIELDS keys
@@ -342,6 +351,7 @@ class Config:
     enable_ui: bool = False     # Whether /admin/* and /ui/* endpoints are active
     model_aliases: dict[str, str] = dataclasses.field(default_factory=dict)  # User-supplied alias overrides
     admin_token: str | None = None  # Gates POST /admin/config; unset disables config writes
+    oauth_usage_timezone: str | None = None  # Timezone for workday-aware OAuth pace baseline; None auto-detects with Pacific fallback
 
 
 def validate_config(cfg: Config) -> list[str]:
@@ -710,8 +720,21 @@ def parse_args(argv=None) -> Config:
              'disables config writes entirely; that endpoint returns 403 regardless of token. '
              '(env: ANTHROUTER_ADMIN_TOKEN)',
     )
+    p.add_argument(
+        '--oauth-usage-timezone',
+        dest='oauth_usage_timezone',
+        default=os.environ.get('ANTHROUTER_OAUTH_USAGE_TIMEZONE', None),
+        help=f'{_help_from_meta("oauth_usage_timezone")} (default: auto-detect with Pacific fallback, env: ANTHROUTER_OAUTH_USAGE_TIMEZONE)',
+    )
 
     args = p.parse_args(argv)
+
+    # Resolve here, not at first use: an unusable zone must be fatal at startup, and
+    # downstream code (and the config dump) should always see a concrete IANA name.
+    try:
+        args.oauth_usage_timezone = str(resolve_timezone(args.oauth_usage_timezone).key)
+    except Exception as exc:  # noqa: BLE001 - argparse p.error() requires generic catch
+        p.error(f'--oauth-usage-timezone: {exc}')
 
     args.auto_model_routing_classification = _parse_classification_str(
         args.auto_model_routing_classification, p

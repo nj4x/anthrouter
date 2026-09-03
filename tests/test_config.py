@@ -144,6 +144,7 @@ def test_editable_fields_file_editable_fields():
     expected = {
         'host', 'port', 'log_file', 'db_path',
         'upstream_base_url', 'auto_model_routing_classifier_model',
+        'oauth_usage_timezone',
     }
     assert file_editable == expected
 
@@ -254,7 +255,7 @@ def test_field_metadata_has_min_max():
 def test_field_metadata_groups():
     """Fields are grouped correctly."""
     groups = {meta['group'] for meta in FIELD_METADATA.values()}
-    expected_groups = {'Logging', 'Upstream', 'Model Routing', 'Prompt Sanitization', 'Database', 'Server'}
+    expected_groups = {'Logging', 'Upstream', 'Model Routing', 'Prompt Sanitization', 'Database', 'Server', 'OAuth Usage'}
     assert groups == expected_groups
 
 
@@ -263,8 +264,8 @@ def test_field_metadata_order():
     keys = list(FIELD_METADATA.keys())
     # First fields should be Logging group
     assert FIELD_METADATA[keys[0]]['group'] == 'Logging'
-    # Last fields should be Server group
-    assert FIELD_METADATA[keys[-1]]['group'] == 'Server'
+    # Last fields should be OAuth Usage group (newest group added)
+    assert FIELD_METADATA[keys[-1]]['group'] == 'OAuth Usage'
 
 
 # =============================================================================
@@ -634,3 +635,62 @@ def test_validate_config_multiple_errors():
     assert 'auto_model_routing_classifier_model must be a non-empty string' in error_text
     assert 'sse_keepalive_interval must be >=' in error_text
     assert 'db_retention_days must be >=' in error_text
+
+
+# =============================================================================
+# Tests for --oauth-usage-timezone (ADR-0008)
+# =============================================================================
+
+def test_oauth_usage_timezone_defaults_to_none():
+    """--oauth-usage-timezone defaults to None (auto-detect with Pacific fallback)."""
+    cfg = parse_args([])
+    # After resolution, should be a concrete IANA name (either detected or fallback)
+    assert cfg.oauth_usage_timezone is not None
+
+
+def test_oauth_usage_timezone_explicit_valid():
+    """Explicit valid timezone is honoured."""
+    cfg = parse_args(['--oauth-usage-timezone', 'Europe/Berlin'])
+    assert cfg.oauth_usage_timezone == 'Europe/Berlin'
+
+
+def test_oauth_usage_timezone_explicit_utc():
+    """Explicit 'UTC' is honoured (no fallback)."""
+    cfg = parse_args(['--oauth-usage-timezone', 'UTC'])
+    assert cfg.oauth_usage_timezone == 'UTC'
+
+
+def test_oauth_usage_timezone_invalid_rejected():
+    """Invalid timezone name causes SystemExit."""
+    with pytest.raises(SystemExit):
+        parse_args(['--oauth-usage-timezone', 'Not/AZone'])
+
+
+def test_oauth_usage_timezone_env_var(monkeypatch):
+    """ANTHROUTER_OAUTH_USAGE_TIMEZONE env var is honoured."""
+    monkeypatch.setenv('ANTHROUTER_OAUTH_USAGE_TIMEZONE', 'America/New_York')
+    cfg = parse_args([])
+    assert cfg.oauth_usage_timezone == 'America/New_York'
+
+
+def test_oauth_usage_timezone_flag_overrides_env(monkeypatch):
+    """CLI flag overrides ANTHROUTER_OAUTH_USAGE_TIMEZONE env var."""
+    monkeypatch.setenv('ANTHROUTER_OAUTH_USAGE_TIMEZONE', 'America/New_York')
+    cfg = parse_args(['--oauth-usage-timezone', 'Asia/Tokyo'])
+    assert cfg.oauth_usage_timezone == 'Asia/Tokyo'
+
+
+def test_oauth_usage_timezone_in_editable_fields():
+    """oauth_usage_timezone is in EDITABLE_FIELDS (file-editable, restart required)."""
+    assert 'oauth_usage_timezone' in EDITABLE_FIELDS
+    assert EDITABLE_FIELDS['oauth_usage_timezone'] is True  # restart required
+
+
+def test_oauth_usage_timezone_in_field_metadata():
+    """oauth_usage_timezone has FIELD_METADATA entry."""
+    assert 'oauth_usage_timezone' in FIELD_METADATA
+    meta = FIELD_METADATA['oauth_usage_timezone']
+    assert meta['type'] == 'str'
+    assert 'description' in meta
+    assert 'group' in meta
+    assert meta['group'] == 'OAuth Usage'

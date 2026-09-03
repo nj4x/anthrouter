@@ -445,6 +445,12 @@ def _get_oauth_usage(query_params: dict, oauth_cache) -> tuple[int, dict]:
             'cooldown_remaining_seconds': usage.cooldown_remaining_seconds,
             'usage_age_seconds': usage.usage_age_seconds,
             'usage_stale': usage.usage_stale,
+            'workday_elapsed_pct': usage.workday_elapsed_pct,
+            'calendar_elapsed_pct': usage.calendar_elapsed_pct,
+            'workday_timezone': usage.workday_timezone,
+            'period_start': usage.period_start,
+            'period_end': usage.period_end,
+            'period_workday_count': usage.period_workday_count,
         }
     }
 

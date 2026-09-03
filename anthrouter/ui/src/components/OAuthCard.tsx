@@ -1,6 +1,23 @@
+import { useState } from 'react'
 import useSWR from 'swr'
 import type { OAuthToken } from '../api'
 import { fetchJson } from '../api'
+
+type MeterMode = 'workdays' | 'calendar'
+
+const STORAGE_KEY = 'anthrouter.oauthMeterMode'
+
+function getStoredMode(): MeterMode {
+  try {
+    const stored = localStorage.getItem(STORAGE_KEY)
+    if (stored === 'workdays' || stored === 'calendar') {
+      return stored
+    }
+  } catch {
+    // Safari private mode throws on access; the meter must still render.
+  }
+  return 'workdays'
+}
 
 function formatAge(ageSecs: number | null | undefined): string | null {
   if (ageSecs == null) return null
@@ -15,6 +32,17 @@ export function OAuthCard() {
     fetchJson,
     { refreshInterval: 5000 },
   )
+
+  const [mode, setMode] = useState<MeterMode>(() => getStoredMode())
+
+  const handleModeChange = (newMode: MeterMode) => {
+    setMode(newMode)
+    try {
+      localStorage.setItem(STORAGE_KEY, newMode)
+    } catch {
+      // Losing the persisted choice is preferable to breaking the toggle.
+    }
+  }
 
   if (!data?.oauth_token) {
     return (
@@ -42,18 +70,65 @@ export function OAuthCard() {
         ? 'bg-emerald-100 dark:bg-emerald-900 text-emerald-800 dark:text-emerald-200'
         : 'bg-slate-100 dark:bg-slate-800 text-slate-800 dark:text-slate-200'
 
+  const baseline = mode === 'workdays'
+    ? token.workday_elapsed_pct
+    : token.calendar_elapsed_pct
+
+  const displayBaseline = baseline ?? token.month_elapsed_pct ?? null
+
+  const periodLabel = (() => {
+    if (!token.period_start || !token.period_end) return null
+    const start = new Date(token.period_start)
+    const month = start.toLocaleDateString('en-US', { month: 'long', year: 'numeric' })
+    if (mode === 'workdays' && token.period_workday_count != null && token.workday_timezone) {
+      return `${token.period_workday_count} workdays · ${token.workday_timezone} · ${month}`
+    }
+    if (mode === 'calendar') {
+      return `Calendar month · ${month}`
+    }
+    return null
+  })()
+
   return (
     <div className="bg-slate-50 dark:bg-slate-800 rounded-lg p-4 space-y-3 border border-slate-200 dark:border-slate-700">
-      <div className="flex items-center gap-2">
-        <span className="text-sm font-medium text-slate-900 dark:text-slate-100">
-          Anthropic-OAuth token
-        </span>
-        {ageLabel && (
-          <span className="text-xs text-slate-600 dark:text-slate-400">
-            updated {ageLabel}
-            {token.usage_stale ? ' (stale)' : ''}
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <span className="text-sm font-medium text-slate-900 dark:text-slate-100">
+            Anthropic-OAuth token
           </span>
-        )}
+          {ageLabel && (
+            <span className="text-xs text-slate-600 dark:text-slate-400">
+              updated {ageLabel}
+              {token.usage_stale ? ' (stale)' : ''}
+            </span>
+          )}
+        </div>
+        <div className="flex items-center gap-2" role="group" aria-label="Meter mode">
+          <button
+            type="button"
+            className={`px-2 py-0.5 text-xs rounded font-medium border ${
+              mode === 'workdays'
+                ? 'bg-blue-600 text-white border-blue-600'
+                : 'bg-slate-200 dark:bg-slate-700 text-slate-700 dark:text-slate-300 border-slate-300 dark:border-slate-600'
+            }`}
+            aria-pressed={mode === 'workdays'}
+            onClick={() => handleModeChange('workdays')}
+          >
+            Workdays
+          </button>
+          <button
+            type="button"
+            className={`px-2 py-0.5 text-xs rounded font-medium border ${
+              mode === 'calendar'
+                ? 'bg-blue-600 text-white border-blue-600'
+                : 'bg-slate-200 dark:bg-slate-700 text-slate-700 dark:text-slate-300 border-slate-300 dark:border-slate-600'
+            }`}
+            aria-pressed={mode === 'calendar'}
+            onClick={() => handleModeChange('calendar')}
+          >
+            Calendar
+          </button>
+        </div>
       </div>
       <div className="flex items-center gap-2">
         <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${statusColor}`}>
@@ -82,25 +157,31 @@ export function OAuthCard() {
               }`}
               style={{ width: `${pct}%` }}
             />
-            {token.month_elapsed_pct != null && token.burn_pct > token.month_elapsed_pct && (
+            {displayBaseline != null && token.burn_pct > displayBaseline && (
               <div
                 className="absolute inset-y-0 bg-red-500"
                 style={{
-                  left: `${token.month_elapsed_pct}%`,
-                  width: `${token.burn_pct - token.month_elapsed_pct}%`,
+                  left: `${displayBaseline}%`,
+                  width: `${token.burn_pct - displayBaseline}%`,
                 }}
               />
             )}
-            {token.month_elapsed_pct != null &&
-              token.month_elapsed_pct - token.burn_pct > 0.5 && (
+            {displayBaseline != null &&
+              displayBaseline - token.burn_pct > 0.5 && (
                 <div
                   className="absolute inset-y-0 bg-emerald-500 opacity-40"
                   style={{
                     left: `${token.burn_pct}%`,
-                    width: `${token.month_elapsed_pct - token.burn_pct}%`,
+                    width: `${displayBaseline - token.burn_pct}%`,
                   }}
                 />
               )}
+          </div>
+        )}
+        {displayBaseline != null && (
+          <div className="text-xs text-slate-500 dark:text-slate-400 mt-1">
+            pace {displayBaseline.toFixed(1)}%
+            {periodLabel && <span className="ml-2 text-slate-400 dark:text-slate-500">· {periodLabel}</span>}
           </div>
         )}
       </div>

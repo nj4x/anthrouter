@@ -66,6 +66,12 @@ export interface OAuthToken {
   used_usd: number | null
   total_usd: number | null
   month_elapsed_pct: number | null
+  workday_elapsed_pct: number | null
+  calendar_elapsed_pct: number | null
+  workday_timezone: string | null
+  period_start: string | null
+  period_end: string | null
+  period_workday_count: number | null
   monthly_blocked: boolean
   eligible: boolean
   cooldown_remaining_seconds: number

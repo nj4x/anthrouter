@@ -44,7 +44,7 @@ def create_server(config: Config) -> ThreadingHTTPServer:
         logger.info('Recording requests to %s (retention: %s)', config.db_path,
                     f'{config.db_retention_days} days' if config.db_retention_days
                     else 'forever')
-    oauth_cache = OAuthUsageCache()
+    oauth_cache = OAuthUsageCache(timezone_name=config.oauth_usage_timezone)
 
     handler_class = make_handler_class(config, transport, sessions, request_db, oauth_cache)
     server = ThreadingHTTPServer((config.host, config.port), handler_class)

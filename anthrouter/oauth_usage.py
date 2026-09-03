@@ -1,6 +1,5 @@
 """Cached OAuth usage fetcher for Anthropic enterprise tokens."""
 
-import calendar
 import datetime as dt
 import hashlib
 import http.client
@@ -9,7 +8,8 @@ import logging
 import threading
 import time
 from dataclasses import dataclass
-from typing import Optional
+
+from . import pace
 
 logger = logging.getLogger(__name__)
 
@@ -20,25 +20,29 @@ CACHE_TTL_SECONDS = 60
 FETCH_INTERVAL_SECONDS = 30  # Throttle: single background thread sleeps between fetches
 
 
-def _month_elapsed_pct(now: dt.datetime) -> float:
-    """Fraction of the current UTC month already elapsed, 0-100."""
-    days_in_month = calendar.monthrange(now.year, now.month)[1]
-    seconds_into_day = now.hour * 3600 + now.minute * 60 + now.second
-    return (now.day - 1 + seconds_into_day / 86400.0) / days_in_month * 100.0
-
-
 @dataclass
 class OAuthUsage:
-    """OAuth enterprise token usage snapshot."""
-    burn_pct: Optional[float]
-    used_usd: Optional[float]
-    total_usd: Optional[float]
-    month_elapsed_pct: Optional[float]
+    """OAuth enterprise token usage snapshot.
+
+    ``month_elapsed_pct`` is deprecated: it duplicates ``calendar_elapsed_pct`` and is
+    retained only so existing clients keep working. New consumers read
+    ``workday_elapsed_pct`` / ``calendar_elapsed_pct`` and pick a mode (ADR-0008).
+    """
+    burn_pct: float | None
+    used_usd: float | None
+    total_usd: float | None
+    month_elapsed_pct: float | None
     monthly_blocked: bool
     eligible: bool
     cooldown_remaining_seconds: int
-    usage_age_seconds: Optional[int]
+    usage_age_seconds: int | None
     usage_stale: bool
+    workday_elapsed_pct: float | None = None
+    calendar_elapsed_pct: float | None = None
+    workday_timezone: str | None = None
+    period_start: str | None = None
+    period_end: str | None = None
+    period_workday_count: int | None = None
 
 
 class OAuthUsageCache:
@@ -49,17 +53,18 @@ class OAuthUsageCache:
     spawning that causes quota exhaustion.
     """
 
-    def __init__(self):
+    def __init__(self, timezone_name: str | None = None):
         self._lock = threading.Lock()
-        self._token_hash: Optional[str] = None
-        self._usage: Optional[OAuthUsage] = None
+        self._token_hash: str | None = None
+        self._usage: OAuthUsage | None = None
         self._cached_at: float = 0
         self._fetch_scheduled_at: float = 0
-        self._fetch_thread: Optional[threading.Thread] = None
+        self._fetch_thread: threading.Thread | None = None
         self._stop_event = threading.Event()
-        self._current_token: Optional[str] = None
+        self._current_token: str | None = None
+        self._tz = pace.resolve_timezone(timezone_name)
 
-    def get(self, access_token: str) -> Optional[OAuthUsage]:
+    def get(self, access_token: str) -> OAuthUsage | None:
         """Fetch cached usage or refresh if stale. Never blocks on network."""
         token_hash = hashlib.sha256(access_token.encode()).hexdigest()
         now = time.time()
@@ -87,7 +92,7 @@ class OAuthUsageCache:
 
             return self._usage
 
-    def get_usage(self) -> Optional[OAuthUsage]:
+    def get_usage(self) -> OAuthUsage | None:
         """Issue 3 Fix: Public getter for cached OAuth usage.
 
         Returns the last cached usage data (may be None on first load or if no
@@ -187,14 +192,27 @@ class OAuthUsageCache:
             and used_credits is not None and used_credits >= 0 and utilization is not None and utilization >= 0
         burn_pct = utilization if valid else None
 
+        # One instant for every derived field, so the two baselines and the period
+        # bounds can never straddle a clock tick and disagree.
+        now = dt.datetime.now(dt.timezone.utc)
+        period_start, period_end = pace.period_bounds(now)
+        calendar_pct = pace.calendar_elapsed_pct(now)
+        workday_pct, period_wd_count = pace.workday_elapsed_pct(now, self._tz)
+
         return OAuthUsage(
             burn_pct=burn_pct,
             used_usd=used_usd,
             total_usd=total_usd,
-            month_elapsed_pct=_month_elapsed_pct(dt.datetime.now(dt.timezone.utc)),
+            month_elapsed_pct=calendar_pct,
             monthly_blocked=cap_reached,
             eligible=valid and not cap_reached,
             cooldown_remaining_seconds=0,
             usage_age_seconds=None,
             usage_stale=False,
+            workday_elapsed_pct=workday_pct,
+            calendar_elapsed_pct=calendar_pct,
+            workday_timezone=self._tz.key,
+            period_start=period_start.isoformat(),
+            period_end=period_end.isoformat(),
+            period_workday_count=period_wd_count,
         )
