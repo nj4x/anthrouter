@@ -134,6 +134,14 @@ if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/pyproject.toml" ] && [ -d "$SCRIPT_
   SOURCE_MODE="local"
 fi
 
+# Resolve the upstream URL now so a bad checkout aborts before any mutation.
+if [ "$SOURCE_MODE" = "clone" ]; then
+  UPSTREAM_URL="$REPO_URL"
+else
+  UPSTREAM_URL="$(git -C "$SCRIPT_DIR" remote get-url origin 2>/dev/null)" \
+    || die "Cannot determine upstream URL: '$SCRIPT_DIR' has no 'origin' remote. Add an origin remote and re-run install.sh."
+fi
+
 # ------------------------------------------------------------- pre-flight ---
 
 say "Running pre-flight checks..."
@@ -209,23 +217,27 @@ say "Creating $HOME_DIR..."
 mkdir -p "$HOME_DIR" "$BACKUP_DIR"
 MUTATING=1
 
-if [ "$SOURCE_MODE" = "local" ]; then
-  INSTALL_SRC="$SCRIPT_DIR"
-  cp "$SCRIPT_DIR/uninstall.sh" "$HOME_DIR/uninstall.sh"
-else
-  command -v git >/dev/null 2>&1 || die "git not found on PATH (needed to fetch anthrouter)"
-  say "Cloning $REPO_URL..."
-  git clone --depth 1 "$REPO_URL" "$SRC_DIR" >/dev/null 2>&1 \
-    || die "could not clone $REPO_URL"
-  INSTALL_SRC="$SRC_DIR"
-  cp "$SRC_DIR/uninstall.sh" "$HOME_DIR/uninstall.sh"
-fi
-chmod +x "$HOME_DIR/uninstall.sh"
+  if [ "$SOURCE_MODE" = "local" ]; then
+    INSTALL_SRC="$SCRIPT_DIR"
+    cp "$SCRIPT_DIR/uninstall.sh" "$HOME_DIR/uninstall.sh"
+    cp "$SCRIPT_DIR/update.sh" "$HOME_DIR/update.sh"
+  else
+    command -v git >/dev/null 2>&1 || die "git not found on PATH (needed to fetch anthrouter)"
+    say "Cloning $REPO_URL..."
+    git clone --depth 1 "$REPO_URL" "$SRC_DIR" >/dev/null 2>&1 \
+      || die "could not clone $REPO_URL"
+    INSTALL_SRC="$SRC_DIR"
+    cp "$SRC_DIR/uninstall.sh" "$HOME_DIR/uninstall.sh"
+    cp "$SRC_DIR/update.sh" "$HOME_DIR/update.sh"
+  fi
+  chmod +x "$HOME_DIR/uninstall.sh"
+  chmod +x "$HOME_DIR/update.sh"
 
 mf_write installedAt "\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\""
 mf_set home "$HOME_DIR"
 mf_set topology "$TOPOLOGY"
 mf_set sourceMode "$SOURCE_MODE"
+mf_set upstreamUrl "$UPSTREAM_URL"
 mf_set claudeSettings "$SETTINGS"
 mf_write settingsSlot null
 mf_write cavemanSlot null
