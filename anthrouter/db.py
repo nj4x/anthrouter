@@ -480,40 +480,6 @@ class RequestDB:
         ).fetchone()
         return dict(row)
 
-    def get_recent_sanitizer_events(self, limit: int = 50, offset: int = 0) -> list[dict]:
-        """Sanitizer events across all requests, most recent first."""
-        rows = self._read_conn().execute(
-            """SELECT e.id, e.request_id, e.event_ts, e.block_type,
-                      e.is_allowlisted, e.payload_preview, e.payload_full,
-                      r.session_id, r.requested_model,
-                      r.system_prompt_sha256, r.system_prompt_sanitized_sha256,
-                      r.system_prompt_score, r.user_prompt_score
-                 FROM sanitizer_events e
-                 JOIN requests r ON r.id = e.request_id
-                ORDER BY e.id DESC LIMIT ? OFFSET ?""",
-            (limit, offset),
-        ).fetchall()
-        return [dict(r) for r in rows]
-
-    def get_sanitizer_summary(self) -> dict:
-        """Event totals plus how many requests the sanitizer actually changed."""
-        conn = self._read_conn()
-        row = conn.execute(
-            """SELECT COUNT(*)                                            AS total_events,
-                      COUNT(DISTINCT request_id)                          AS requests_with_events,
-                      SUM(CASE WHEN is_allowlisted = 1 THEN 1 ELSE 0 END) AS allowlisted,
-                      COUNT(DISTINCT block_type)                          AS distinct_block_types
-                 FROM sanitizer_events"""
-        ).fetchone()
-        changed = conn.execute(
-            """SELECT COUNT(*) AS n FROM requests
-                WHERE system_prompt_sanitized_sha256 IS NOT NULL
-                  AND system_prompt_sanitized_sha256 != system_prompt_sha256"""
-        ).fetchone()
-        summary = dict(row)
-        summary['requests_changed'] = changed['n']
-        return summary
-
     def get_latest_ratelimit(self) -> dict | None:
         """Most recent response that carried an ``anthropic-ratelimit-*`` header."""
         row = self._read_conn().execute(

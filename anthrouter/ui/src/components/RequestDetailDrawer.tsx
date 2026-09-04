@@ -210,35 +210,6 @@ export function RequestDetailDrawer({ requestId, onClose }: Props) {
                 </dl>
               </section>
 
-              {/* Prompts */}
-              <section>
-                <h3 className="text-xs font-semibold text-slate-600 dark:text-slate-400 uppercase tracking-wide mb-3">
-                  Prompt Hashes
-                </h3>
-                <dl className="space-y-2">
-                  <div>
-                    <dt className="text-xs text-slate-600 dark:text-slate-400 mb-1">System</dt>
-                    <dd className="flex items-center gap-1">
-                      <code className="text-xs font-mono text-slate-600 dark:text-slate-400 truncate bg-slate-100 dark:bg-slate-800 px-2 py-1 rounded flex-1">
-                        {req.system_prompt_sha256 ?? '—'}
-                      </code>
-                      {req.system_prompt_sha256 && <CopyButton text={req.system_prompt_sha256} />}
-                    </dd>
-                  </div>
-                  {req.system_prompt_sanitized_sha256 && (
-                    <div>
-                      <dt className="text-xs text-slate-600 dark:text-slate-400 mb-1">Sanitized</dt>
-                      <dd className="flex items-center gap-1">
-                        <code className="text-xs font-mono text-slate-600 dark:text-slate-400 truncate bg-slate-100 dark:bg-slate-800 px-2 py-1 rounded flex-1">
-                          {req.system_prompt_sanitized_sha256}
-                        </code>
-                        <CopyButton text={req.system_prompt_sanitized_sha256} />
-                      </dd>
-                    </div>
-                  )}
-                </dl>
-              </section>
-
               {/* User prompt */}
               {req.user_prompt_text && (
                 <section>
@@ -288,24 +259,6 @@ export function RequestDetailDrawer({ requestId, onClose }: Props) {
                 </section>
               )}
 
-              {/* Tools */}
-              {req.tools_content && (
-                <section>
-                  <h3 className="text-xs font-semibold text-slate-600 dark:text-slate-400 uppercase tracking-wide mb-2 flex items-center justify-between">
-                    <span>
-                      Tools{' '}
-                      <span className="normal-case font-normal text-slate-400 dark:text-slate-500">
-                        (~{estimateTokens(req.tools_content).toLocaleString()} tok)
-                      </span>
-                    </span>
-                    <CopyButton text={req.tools_content} />
-                  </h3>
-                  <pre className="bg-slate-100 dark:bg-slate-800 p-3 rounded text-xs overflow-auto max-h-48 text-slate-800 dark:text-slate-200 whitespace-pre-wrap break-words">
-                    {prettyPrintMaybeJson(req.tools_content)}
-                  </pre>
-                </section>
-              )}
-
               {/* Stripped blocks */}
               {data?.sanitizer_events && data.sanitizer_events.length > 0 && (
                 <section>
@@ -341,6 +294,24 @@ export function RequestDetailDrawer({ requestId, onClose }: Props) {
                       </div>
                     ))}
                   </div>
+                </section>
+              )}
+
+              {/* Tools */}
+              {req.tools_content && (
+                <section>
+                  <h3 className="text-xs font-semibold text-slate-600 dark:text-slate-400 uppercase tracking-wide mb-2 flex items-center justify-between">
+                    <span>
+                      Tools{' '}
+                      <span className="normal-case font-normal text-slate-400 dark:text-slate-500">
+                        (~{estimateTokens(req.tools_content).toLocaleString()} tok)
+                      </span>
+                    </span>
+                    <CopyButton text={req.tools_content} />
+                  </h3>
+                  <pre className="bg-slate-100 dark:bg-slate-800 p-3 rounded text-xs overflow-auto max-h-48 text-slate-800 dark:text-slate-200 whitespace-pre-wrap break-words">
+                    {prettyPrintMaybeJson(req.tools_content)}
+                  </pre>
                 </section>
               )}
             </>

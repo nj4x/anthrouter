@@ -96,35 +96,6 @@ def test_routing_summary_on_empty_db(db):
     assert summary['net_savings_usd'] is None
 
 
-def test_sanitizer_event_feed_joins_the_request(db):
-    request_id = seed(db, sanitizer_events=[
-        {'block_type': 'cc_prompt_id', 'is_allowlisted': False,
-         'payload_preview': 'cc_prompt_id: 0d1f...'},
-        {'block_type': 'env_block', 'is_allowlisted': True},
-    ])
-
-    events = db.get_recent_sanitizer_events()
-    assert len(events) == 2
-    assert {e['block_type'] for e in events} == {'cc_prompt_id', 'env_block'}
-    assert all(e['request_id'] == request_id for e in events)
-    assert all(e['session_id'] == 'sess-1' for e in events)
-
-    summary = db.get_sanitizer_summary()
-    assert summary['total_events'] == 2
-    assert summary['requests_with_events'] == 1
-    assert summary['allowlisted'] == 1
-
-
-def test_sanitizer_summary_counts_changed_requests(db):
-    seed(db, system_prompt_sha256='aaa', system_prompt_sanitized_sha256='bbb')
-    seed(db, system_prompt_sha256='ccc', system_prompt_sanitized_sha256='ccc')
-    seed(db, system_prompt_sha256='ddd')
-
-    # Equal hashes mean the sanitizer ran and matched nothing; NULL means it
-    # never ran.  Neither is a change.
-    assert db.get_sanitizer_summary()['requests_changed'] == 1
-
-
 def test_latest_ratelimit_prefers_the_newest_row_with_a_window(db):
     seed(db, ratelimit={'requests_remaining': 10, 'reset_at': '2026-08-31T10:00:00Z'})
     seed(db, ratelimit={'requests_remaining': 4, 'reset_at': '2026-08-31T11:00:00Z'})

@@ -2,14 +2,12 @@ import { useState } from 'react'
 
 import { Requests } from './views/Requests'
 import { Routing } from './views/Routing'
-import { Sanitizer } from './views/Sanitizer'
 import { Usage } from './views/Usage'
 
 const VIEWS = {
   usage: { label: 'Usage', render: () => <Usage /> },
   requests: { label: 'Requests', render: () => <Requests /> },
   routing: { label: 'Routing', render: () => <Routing /> },
-  sanitizer: { label: 'Sanitizer', render: () => <Sanitizer /> },
 } as const
 
 type ViewName = keyof typeof VIEWS

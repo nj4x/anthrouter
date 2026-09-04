@@ -62,21 +62,6 @@ const ROUTES: Record<string, unknown> = {
     limit: 50,
     offset: 0,
   },
-  '/admin/sanitizer-events': {
-    events: [{
-      id: 7, request_id: 1, event_ts: '2026-08-31T10:00:00.000Z',
-      block_type: 'cc_prompt_id', is_allowlisted: 1,
-      payload_preview: 'cc_prompt_id: 0d1f', session_id: REQUEST.session_id,
-      requested_model: REQUEST.requested_model,
-      system_prompt_sha256: 'aaa', system_prompt_sanitized_sha256: 'bbb',
-    }],
-    summary: {
-      total_events: 1, requests_with_events: 1, allowlisted: 1,
-      distinct_block_types: 1, requests_changed: 1,
-    },
-    limit: 50,
-    offset: 0,
-  },
   '/admin/status': {
     upstream_base_url: 'https://api.anthropic.com',
     auto_model_routing: true,
@@ -157,13 +142,6 @@ describe('App', () => {
     expect(await screen.findByText('classified')).toBeInTheDocument()
     // 3 of 4 decisions applied.
     expect(screen.getByText('75%')).toBeInTheDocument()
-  })
-
-  it('labels an allowlisted sanitizer event as stripped', async () => {
-    render(<App />)
-    await switchTo('Sanitizer')
-    expect(await screen.findByText('cc_prompt_id')).toBeInTheDocument()
-    expect(screen.getByText('stripped')).toBeInTheDocument()
   })
 
   it('shows the usage totals and the configuration', async () => {
