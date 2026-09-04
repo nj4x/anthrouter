@@ -134,6 +134,17 @@ if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/pyproject.toml" ] && [ -d "$SCRIPT_
   SOURCE_MODE="local"
 fi
 
+# --------------------------------------------------------- argument parsing ---
+
+BROWSER_OPEN=1
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --no-browser) BROWSER_OPEN=0 ;;
+    *) die "unknown argument: $1" ;;
+  esac
+  shift
+done
+
 # Resolve the upstream URL now so a bad checkout aborts before any mutation.
 if [ "$SOURCE_MODE" = "clone" ]; then
   UPSTREAM_URL="$REPO_URL"
@@ -480,6 +491,7 @@ say "Running on $ANTHROUTER_URL, pid $PID, UI at $ANTHROUTER_URL/ui/"
 say "Config: $CONFIG_ENV   Logs: $HOME_DIR/anthrouter.log"
 say "Start/stop by hand: $SHIM   |   kill $PID"
 say "Uninstall: $HOME_DIR/uninstall.sh"
+say "Update:    $HOME_DIR/update.sh"
 case ":$PATH:" in
   *":$SHIM_DIR:"*) ;;
   *) say "note: $SHIM_DIR is not on PATH — add it to run \`anthrouter\` by name" ;;
@@ -488,4 +500,12 @@ if [ "$TOPOLOGY" = "chained" ]; then
   say "Restart your shell (or re-source $PROFILE_FILE) so caveman picks up the allowlist, then restart caveman."
 else
   say "Restart Claude Code so it picks up the new ANTHROPIC_BASE_URL."
+fi
+
+if [ "$BROWSER_OPEN" = "1" ]; then
+  if command -v open &>/dev/null; then
+    open "$ANTHROUTER_URL/ui/" &
+  elif command -v xdg-open &>/dev/null; then
+    xdg-open "$ANTHROUTER_URL/ui/" &
+  fi
 fi

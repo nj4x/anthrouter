@@ -324,3 +324,4 @@ say "  - Logs: $HOME_DIR/anthrouter.log"
 # ============================================================ Done ===
 
 say "Update complete"
+say "Update:    $HOME_DIR/update.sh"
