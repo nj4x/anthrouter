@@ -301,7 +301,7 @@ describe('OAuthCard', () => {
     expect(meterBar()?.querySelector('.bg-blue-500')?.getAttribute('style')).toContain('width: 45%')
   })
 
-  it('renders pace percentage text', async () => {
+  it('renders daily pace rate text', async () => {
     mockFetch({ oauth_token: makeToken() })
     renderCard()
 
@@ -310,7 +310,7 @@ describe('OAuthCard', () => {
     const quotaSection = screen.getByText('Monthly quota').closest('div')?.parentElement
     const paceDiv = quotaSection?.querySelector('.text-slate-500')
     expect(paceDiv).toBeInTheDocument()
-    expect(paceDiv?.textContent).toMatch(/pace \d+\.?\d*%/)
+    expect(paceDiv?.textContent).toMatch(/daily \d+\.?\d*%/)
   })
 
   it('renders segment dividers in workdays mode', async () => {
@@ -320,7 +320,7 @@ describe('OAuthCard', () => {
     await screen.findByText('Anthropic-OAuth token')
 
     const meterBarEl = meterBar()
-    const segments = meterBarEl?.querySelectorAll('.border-r')
+    const segments = meterBarEl?.querySelectorAll('div[style*="border-right"]')
     expect(segments?.length).toBe(23)
   })
 

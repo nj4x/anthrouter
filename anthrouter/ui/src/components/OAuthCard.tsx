@@ -74,13 +74,26 @@ export function OAuthCard() {
     ? token.workday_elapsed_pct
     : token.calendar_elapsed_pct
 
-  const displayBaseline = baseline ?? token.month_elapsed_pct ?? null
+  const rawBaseline = baseline ?? token.month_elapsed_pct ?? null
+  // Round once so every derived display (delta, pace) agrees with the others.
+  const displayBaseline = rawBaseline != null ? Math.round(rawBaseline * 10) / 10 : null
+
+  const daysInPeriod = mode === 'workdays'
+    ? (token.period_workday_count ?? null)
+    : (() => {
+        if (!token.period_start || !token.period_end) return null
+        const start = new Date(token.period_start)
+        const end = new Date(token.period_end)
+        return Math.max(1, Math.ceil((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24)))
+      })()
+
+  const dailyRate = daysInPeriod ? 100 / daysInPeriod : null
 
   const periodLabel = (() => {
-    if (!token.period_start || !token.period_end || displayBaseline == null) return null
+    if (!token.period_start || !token.period_end || dailyRate == null) return null
     const start = new Date(token.period_start)
     const month = start.toLocaleDateString('en-US', { month: 'long', year: 'numeric' })
-    const dailyLabel = `daily ${displayBaseline.toFixed(1)}%`
+    const dailyLabel = `daily ${dailyRate.toFixed(1)}%`
     if (mode === 'workdays' && token.period_workday_count != null && token.workday_timezone) {
       return `${token.period_workday_count} workdays · ${dailyLabel} · ${token.workday_timezone} · ${month}`
     }
@@ -161,31 +174,6 @@ export function OAuthCard() {
         )}
         {token.burn_pct != null && (
           <div className="mt-1 h-3 bg-slate-200 dark:bg-slate-700 rounded-full overflow-hidden relative">
-            {/* Meter segments - thin vertical dividers */}
-            <div className="absolute inset-0 flex">
-              {(() => {
-                const segmentCount = mode === 'workdays'
-                  ? (token.period_workday_count ?? 1)
-                  : (() => {
-                      if (!token.period_start || !token.period_end) return 1;
-                      const start = new Date(token.period_start);
-                      const end = new Date(token.period_end);
-                      const days = Math.ceil((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24));
-                      return Math.max(1, days);
-                    })();
-                const segments = [];
-                for (let i = 0; i < segmentCount; i++) {
-                  segments.push(
-                    <div
-                      key={i}
-                      className="h-full border-r border-slate-500 dark:border-slate-400 flex-1"
-                      style={{ borderRightWidth: i === segmentCount - 1 ? '0' : '1.5px' }}
-                    />
-                  );
-                }
-                return segments;
-              })()}
-            </div>
             {/* Base fill */}
             <div
               className={`absolute inset-y-0 left-0 transition-all ${
@@ -218,20 +206,26 @@ export function OAuthCard() {
                   }}
                 />
               )}
+            {/* Meter segments - dividers drawn on top so they stay visible over any fill color */}
+            {daysInPeriod != null && (
+              <div className="absolute inset-0 flex" style={{ mixBlendMode: 'overlay' }}>
+                {Array.from({ length: daysInPeriod }, (_, i) => (
+                  <div
+                    key={i}
+                    className="h-full flex-1"
+                    style={{
+                      borderRight: i === daysInPeriod - 1 ? 'none' : '1.5px solid white',
+                    }}
+                  />
+                ))}
+              </div>
+            )}
           </div>
         )}
         {/* Period allowance and days remaining */}
-        {token.used_usd != null && token.total_usd != null && token.period_workday_count != null && (
+        {token.used_usd != null && token.total_usd != null && daysInPeriod != null && (
           <div className="text-xs text-slate-600 dark:text-slate-400 mt-1">
             {(() => {
-              const daysInPeriod = mode === 'workdays'
-                ? token.period_workday_count
-                : (() => {
-                    if (!token.period_start || !token.period_end) return 1;
-                    const start = new Date(token.period_start);
-                    const end = new Date(token.period_end);
-                    return Math.max(1, Math.ceil((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24)));
-                  })();
               const perDay = token.total_usd / daysInPeriod;
               const dayLabel = mode === 'workdays' ? 'workday' : 'calendar-day';
               return `Period allowance: $${token.total_usd.toFixed(2)} total | $${perDay.toFixed(2)}/${dayLabel}`;
