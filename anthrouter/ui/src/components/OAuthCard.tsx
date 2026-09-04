@@ -77,14 +77,15 @@ export function OAuthCard() {
   const displayBaseline = baseline ?? token.month_elapsed_pct ?? null
 
   const periodLabel = (() => {
-    if (!token.period_start || !token.period_end) return null
+    if (!token.period_start || !token.period_end || displayBaseline == null) return null
     const start = new Date(token.period_start)
     const month = start.toLocaleDateString('en-US', { month: 'long', year: 'numeric' })
+    const dailyLabel = `daily ${displayBaseline.toFixed(1)}%`
     if (mode === 'workdays' && token.period_workday_count != null && token.workday_timezone) {
-      return `${token.period_workday_count} workdays · ${token.workday_timezone} · ${month}`
+      return `${token.period_workday_count} workdays · ${dailyLabel} · ${token.workday_timezone} · ${month}`
     }
     if (mode === 'calendar') {
-      return `Calendar month · ${month}`
+      return `Calendar month · ${dailyLabel} · ${month}`
     }
     return null
   })()
@@ -138,7 +139,20 @@ export function OAuthCard() {
       <div>
         <div className="text-xs text-slate-600 dark:text-slate-400 mb-1">Monthly quota</div>
         <div className="text-sm text-slate-900 dark:text-slate-100">
-          {token.burn_pct != null ? `${token.burn_pct.toFixed(0)}% used` : '—'}
+          {token.burn_pct != null ? (() => {
+            let label = `${token.burn_pct.toFixed(0)}% used`
+            if (displayBaseline != null) {
+              const delta = token.burn_pct - displayBaseline
+              const sign = delta > 0.5 ? '+' : delta < -0.5 ? '−' : ''
+              if (sign) {
+                const paceStr = delta > 0
+                  ? `over pace`
+                  : `under pace`
+                label += ` (${sign}${Math.abs(delta).toFixed(1)}% ${paceStr})`
+              }
+            }
+            return label
+          })() : '—'}
         </div>
         {token.used_usd != null && token.total_usd != null && (
           <div className="text-xs text-slate-600 dark:text-slate-400 mt-0.5">
@@ -146,7 +160,7 @@ export function OAuthCard() {
           </div>
         )}
         {token.burn_pct != null && (
-          <div className="mt-1 h-1.5 bg-slate-200 dark:bg-slate-700 rounded-full overflow-hidden relative">
+          <div className="mt-1 h-3 bg-slate-200 dark:bg-slate-700 rounded-full overflow-hidden relative">
             {/* Meter segments - thin vertical dividers */}
             <div className="absolute inset-0 flex">
               {(() => {
@@ -164,8 +178,8 @@ export function OAuthCard() {
                   segments.push(
                     <div
                       key={i}
-                      className="h-full border-r border-slate-400/50 dark:border-slate-500/50 flex-1"
-                      style={{ borderRightWidth: i === segmentCount - 1 ? '0' : '1px' }}
+                      className="h-full border-r border-slate-500 dark:border-slate-400 flex-1"
+                      style={{ borderRightWidth: i === segmentCount - 1 ? '0' : '1.5px' }}
                     />
                   );
                 }
@@ -240,10 +254,9 @@ export function OAuthCard() {
             })()}
           </div>
         )}
-        {displayBaseline != null && (
+        {periodLabel && (
           <div className="text-xs text-slate-500 dark:text-slate-400 mt-1">
-            pace {displayBaseline.toFixed(1)}%
-            {periodLabel && <span className="ml-2 text-slate-400 dark:text-slate-500">· {periodLabel}</span>}
+            {periodLabel}
           </div>
         )}
       </div>
