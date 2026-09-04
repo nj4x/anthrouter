@@ -1,6 +1,6 @@
 # Anthrouter
 
-A single-backend Anthropic Messages API proxy that classifies requests, rewrites model tiers, sanitizes system prompts, and records activity to SQLite for a read-only admin UI.
+A single-backend Anthropic Messages API proxy that classifies requests, rewrites model tiers, sanitizes system prompts, and records activity to SQLite for an admin UI that is read-only by default (`POST /admin/config` is the sole write endpoint, gated by `ANTHROUTER_ADMIN_TOKEN` — see ADR-0005).
 
 ## Language
 

@@ -63,7 +63,7 @@ anthrouter          # reads ~/.anthrouter/config.env
 
 Settings live in `~/.anthrouter/config.env` (every one has a matching flag; see
 `anthrouter --help`). Logs go to `~/.anthrouter/anthrouter.log`, requests to
-`~/.anthrouter/anthrouter.db`, and the read-only UI is at
+`~/.anthrouter/anthrouter.db`, and the admin UI is at
 <http://127.0.0.1:8083/ui/>.
 
 ## Uninstall
@@ -86,10 +86,14 @@ The update script performs an in-place update (ADR 0006): stops the running proc
 
 ## Admin UI
 
-`--enable-ui` turns on the read-only `/admin/*` JSON API and serves the built
-SPA at `/ui/`. Four views: the request log (searchable over prompt and response
-text), routing decisions, sanitizer strip events, and the rate-limit window.
-There are no runtime controls — with one backend there is nothing to switch.
+`--enable-ui` turns on the `/admin/*` JSON API and serves the built SPA at
+`/ui/`. Four views: the request log (searchable over prompt and response text),
+routing decisions, sanitizer strip events, and the rate-limit window.
+
+Every GET is read-only. `POST /admin/config` is the sole write endpoint — it
+edits configuration at runtime and is gated behind an `X-Admin-Token` header
+(ADR 0005). With no `ANTHROUTER_ADMIN_TOKEN` set the write endpoint is
+unconditionally disabled and the admin surface is fully read-only.
 
 Both surfaces are unauthenticated and expose conversation text, so keep the
 server bound to loopback unless something else in front of it authenticates.

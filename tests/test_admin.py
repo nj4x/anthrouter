@@ -557,7 +557,7 @@ def test_get_config_enum_fields_have_enum_array(cfg):
     assert body['fields']['log_level']['enum'] == ['DEBUG', 'INFO', 'WARNING', 'ERROR']
     # auto_model_routing_mode is an enum field
     assert 'enum' in body['fields']['auto_model_routing_mode']
-    assert body['fields']['auto_model_routing_mode']['enum'] == ['classifier', 'rules', 'tag']
+    assert body['fields']['auto_model_routing_mode']['enum'] == ['classifier', 'rules']
     # host is not an enum field
     assert 'enum' not in body['fields']['host']
 

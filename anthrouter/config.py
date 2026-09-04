@@ -14,10 +14,10 @@ DEFAULT_UPSTREAM_BASE_URL = 'https://api.anthropic.com'
 # EDITABLE_FIELDS: registry of config fields that can be edited via admin API
 # True = file-editable (restart required for changes to apply)
 # False = live-editable (applies immediately)
-# Excluded fields (not in this registry): admin_token, auto_model_routing_classification,
-#   auto_model_routing_task_tiers, model_aliases, anthrouter_home, enable_ui, request_history_size
+# Excluded fields (not in this registry): admin_token, model_aliases, anthrouter_home, enable_ui, request_history_size
 EDITABLE_FIELDS: dict[str, bool] = {
-    # File-editable (restart required)
+    # Live-editable (applies immediately)
+    'auto_model_routing_classification': False,
     'host': True,
     'port': True,
     'log_file': True,
@@ -77,13 +77,18 @@ FIELD_METADATA: dict[str, dict] = {
         'group': 'Model Routing',
     },
     'auto_model_routing_mode': {
-        'description': 'Classification mode for auto routing: "classifier" uses an LLM, "rules" uses deterministic keyword rules, "tag" routes by task name.',
+        'description': 'Classification mode for auto routing: "classifier" uses an LLM, "rules" uses deterministic keyword rules.',
         'type': 'str',
-        'enum': ['classifier', 'rules', 'tag'],
+        'enum': ['classifier', 'rules'],
         'group': 'Model Routing',
     },
     'auto_model_routing_classifier_model': {
         'description': 'Model alias used for the internal complexity-classifier call when auto routing is enabled.',
+        'type': 'str',
+        'group': 'Model Routing',
+    },
+    'auto_model_routing_classification': {
+        'description': 'Comma-separated label:model pairs mapping complexity tiers to model aliases. Valid labels: trivial, standard, deep. Example: "trivial:haiku,standard:sonnet,deep:opus". Unspecified labels keep their defaults.',
         'type': 'str',
         'group': 'Model Routing',
     },
@@ -335,7 +340,6 @@ class Config:
     auto_model_routing_confidence_bump: bool = False
     auto_model_routing_min_confidence: float = 0.0
     auto_model_routing_mode: str = 'classifier'
-    auto_model_routing_task_tiers: dict[str, str] | None = None
     auto_model_routing_prior_response_summary_limit: int = 1000
     auto_model_routing_system_prompt_weight: float = 0.20
     auto_model_routing_user_prompt_weight: float = 0.80
@@ -586,21 +590,11 @@ def parse_args(argv=None) -> Config:
         '--auto-model-routing-mode',
         dest='auto_model_routing_mode',
         default=os.environ.get('ANTHROUTER_AUTO_MODEL_ROUTING_MODE', 'classifier'),
-        choices=['classifier', 'rules', 'tag'],
+        choices=['classifier', 'rules'],
         help='Classification mode for --auto-model-routing: "classifier" (default) calls a '
              'lightweight LLM classifier upstream; "rules" uses deterministic keyword rules '
-             'with no LLM call; "tag" routes via a supplied task name against '
-             '--auto-model-routing-task-tiers. '
+             'with no LLM call. '
              '(env: ANTHROUTER_AUTO_MODEL_ROUTING_MODE)',
-    )
-    p.add_argument(
-        '--auto-model-routing-task-tiers',
-        dest='auto_model_routing_task_tiers',
-        default=os.environ.get('ANTHROUTER_AUTO_MODEL_ROUTING_TASK_TIERS', ''),
-        help='JSON object mapping task names to model tier aliases for '
-             '--auto-model-routing-mode=tag. Example: \'{"extraction":"haiku","analysis":"sonnet"}\'. '
-             'Unknown task names fail-closed to the requested model. '
-             '(env: ANTHROUTER_AUTO_MODEL_ROUTING_TASK_TIERS)',
     )
     p.add_argument(
         '--auto-model-routing-prior-response-summary-limit',
@@ -703,7 +697,8 @@ def parse_args(argv=None) -> Config:
                         ' env: ANTHROUTER_DB_RETENTION_DAYS)')
     p.add_argument('--enable-ui', dest='enable_ui',
                    action='store_true', default=False,
-                   help='Enable the read-only observability API and web UI at /admin/* and /ui/*')
+                   help='Enable the observability API and web UI at /admin/* and /ui/*'
+                        ' (read-only unless --admin-token enables POST /admin/config)')
     p.add_argument(
         '--model-aliases',
         dest='model_aliases',
@@ -745,22 +740,6 @@ def parse_args(argv=None) -> Config:
     args.auto_model_routing_min_confidence = max(
         0.0, min(1.0, args.auto_model_routing_min_confidence)
     )
-
-    raw_task_tiers = (args.auto_model_routing_task_tiers or '').strip()
-    if raw_task_tiers:
-        try:
-            tiers_parsed = json.loads(raw_task_tiers)
-        except json.JSONDecodeError as exc:
-            p.error(f'--auto-model-routing-task-tiers: invalid JSON: {exc}')
-        if not isinstance(tiers_parsed, dict):
-            p.error('--auto-model-routing-task-tiers must be a JSON object mapping '
-                    'task names to tier aliases')
-        args.auto_model_routing_task_tiers = {
-            str(k): str(v) for k, v in tiers_parsed.items()
-        }
-    else:
-        args.auto_model_routing_task_tiers = None
-
     args.lock_requested_model = (args.lock_requested_model or '').strip() or 'off'
     args.upstream_base_url = (args.upstream_base_url or '').strip().rstrip('/')
     if not args.upstream_base_url:

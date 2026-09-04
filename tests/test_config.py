@@ -83,20 +83,6 @@ def test_classification_unknown_label_rejected():
         parse_args(['--auto-model-routing-classification', 'huge:opus'])
 
 
-def test_task_tiers_parsed():
-    cfg = parse_args(['--auto-model-routing-task-tiers',
-                      json.dumps({'extraction': 'haiku'})])
-    assert cfg.auto_model_routing_task_tiers == {'extraction': 'haiku'}
-
-
-def test_task_tiers_invalid_json_rejected():
-    with pytest.raises(SystemExit):
-        parse_args(['--auto-model-routing-task-tiers', '{not json'])
-
-
-def test_task_tiers_non_object_rejected():
-    with pytest.raises(SystemExit):
-        parse_args(['--auto-model-routing-task-tiers', '[1, 2]'])
 
 
 def test_weights_must_sum_to_one():
@@ -171,6 +157,7 @@ def test_editable_fields_live_editable_fields():
         'sanitize_system_prompt',
         'sse_keepalive_interval',
         'db_retention_days',
+        'auto_model_routing_classification',
     }
     assert live_editable == expected
 
@@ -180,14 +167,10 @@ def test_editable_fields_excludes_admin_token():
     assert 'admin_token' not in EDITABLE_FIELDS
 
 
-def test_editable_fields_excludes_classification():
-    """auto_model_routing_classification is not in EDITABLE_FIELDS."""
-    assert 'auto_model_routing_classification' not in EDITABLE_FIELDS
-
-
-def test_editable_fields_excludes_task_tiers():
-    """auto_model_routing_task_tiers is not in EDITABLE_FIELDS."""
-    assert 'auto_model_routing_task_tiers' not in EDITABLE_FIELDS
+def test_editable_fields_includes_classification():
+    """auto_model_routing_classification is in EDITABLE_FIELDS (live-editable)."""
+    assert 'auto_model_routing_classification' in EDITABLE_FIELDS
+    assert EDITABLE_FIELDS['auto_model_routing_classification'] is False  # live-editable, no restart required
 
 
 def test_editable_fields_excludes_model_aliases():
@@ -237,7 +220,7 @@ def test_field_metadata_has_required_keys():
 def test_field_metadata_enum_fields():
     """Enum fields have correct enum values."""
     assert FIELD_METADATA['log_level']['enum'] == ['DEBUG', 'INFO', 'WARNING', 'ERROR']
-    assert FIELD_METADATA['auto_model_routing_mode']['enum'] == ['classifier', 'rules', 'tag']
+    assert FIELD_METADATA['auto_model_routing_mode']['enum'] == ['classifier', 'rules']
     assert FIELD_METADATA['sanitize_system_prompt']['enum'] == ['off', 'warn', 'strip']
 
 
@@ -301,7 +284,7 @@ def test_validate_config_invalid_routing_mode():
 
 def test_validate_config_valid_routing_mode():
     """Valid auto_model_routing_mode passes."""
-    for mode in ['classifier', 'rules', 'tag']:
+    for mode in ['classifier', 'rules']:
         cfg = _make_valid_config(auto_model_routing_mode=mode)
         errors = validate_config(cfg)
         assert not any('auto_model_routing_mode' in e for e in errors)

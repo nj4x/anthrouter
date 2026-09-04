@@ -1,0 +1,142 @@
+[
+  {
+    "id": "ID-001",
+    "group": "B",
+    "claim": "Root CLAUDE.md 'What this is' still says 'read-only admin UI' after S-1",
+    "evidence": "CLAUDE.md:7 vs architecture.md:42-44; admin.py:157 defines handle_post_config",
+    "severity": "major",
+    "fix": "Rewrote root summary to state read-only by default with POST /admin/config gated by ANTHROUTER_ADMIN_TOKEN (ADR-0005)",
+    "status": "fixed",
+    "introduced_pass": null
+  },
+  {
+    "id": "ID-002",
+    "group": "C",
+    "claim": "CONTEXT.md:3 repeats the stale 'read-only admin UI' phrase",
+    "evidence": "CONTEXT.md:3 vs admin.py:157",
+    "severity": "major",
+    "fix": "Applied the same correction to CONTEXT.md:3",
+    "status": "fixed",
+    "introduced_pass": null
+  },
+  {
+    "id": "ID-003",
+    "group": "A",
+    "claim": "Literal duplicate CONTEXT-MAP.md bullet in domain.md",
+    "evidence": "docs/agents/domain.md:14-15 identical; absent from pre-edit backup",
+    "severity": "major",
+    "fix": "Removed the duplicate bullet",
+    "status": "fixed",
+    "introduced_pass": 1
+  },
+  {
+    "id": "ID-004",
+    "group": "A",
+    "claim": "dist/ rebuild block verbatim-duplicated across root and build-and-test.md",
+    "evidence": "CLAUDE.md:22-23 and build-and-test.md:13-19",
+    "severity": "minor",
+    "fix": "Root is authoritative; satellite now cross-references it",
+    "status": "fixed",
+    "introduced_pass": 1
+  },
+  {
+    "id": "ID-005",
+    "group": "A",
+    "claim": "Installer constraint 'only pip install, never npm build' dropped without accounting",
+    "evidence": "backup line 20 vs new root line 23",
+    "severity": "minor",
+    "fix": "Restored in root dist/ paragraph and recorded in the disposition map",
+    "status": "fixed",
+    "introduced_pass": 1
+  },
+  {
+    "id": "ID-006",
+    "group": "A",
+    "claim": "python -m anthrouter stated twice within root",
+    "evidence": "CLAUDE.md:14 code block and CLAUDE.md:21 section opener",
+    "severity": "minor",
+    "fix": "Collapsed 'Core commands' and 'Running the proxy' into one section",
+    "status": "fixed",
+    "introduced_pass": 1
+  },
+  {
+    "id": "ID-007",
+    "group": "A",
+    "claim": "code-style.md is a 1-instruction, 5-line satellite",
+    "evidence": "docs/agents/code-style.md sole content is the config-flag registration process",
+    "severity": "minor",
+    "fix": "Merged into root 'Code conventions' as a third bullet; file deleted and reference removed",
+    "status": "fixed",
+    "introduced_pass": 1
+  },
+  {
+    "id": "ID-008",
+    "group": "A",
+    "claim": "Classifier-input privacy contract reproduced in full in both root and architecture.md",
+    "evidence": "CLAUDE.md:40-43 and architecture.md:22-24",
+    "severity": "minor",
+    "fix": "Root is authoritative; architecture.md cross-references it and keeps only the sentinel mechanics",
+    "status": "fixed",
+    "introduced_pass": 1
+  },
+  {
+    "id": "ID-009",
+    "group": "C",
+    "claim": "code-style.md scope boundary undefined",
+    "evidence": "root 'Code conventions' kept two bullets inline while deferring only config flags",
+    "severity": "minor",
+    "fix": "Resolved by ID-007 — the satellite no longer exists, so there is no boundary to define",
+    "status": "fixed",
+    "introduced_pass": 1
+  },
+  {
+    "id": "ID-010",
+    "group": "B",
+    "claim": "README.md still says the admin UI is unconditionally read-only with no runtime controls",
+    "evidence": "README.md:66, :89, :92 vs admin.py:157 and ADR-0005",
+    "severity": "major",
+    "fix": "Rewrote the Admin UI section to match ADR-0005: GETs read-only, POST /admin/config sole write endpoint gated by X-Admin-Token, fully read-only when no token set",
+    "status": "fixed",
+    "introduced_pass": null
+  },
+  {
+    "id": "ID-011",
+    "group": "B",
+    "claim": "Research comparison doc claims anthrouter admin is read-only by design with no POST endpoints",
+    "evidence": "docs/research/2026-08-31-anthproxy-vs-anthrouter-comparison.md:41,196 vs admin.py:157",
+    "severity": "minor",
+    "fix": "Added a header note marking that one claim stale as of ADR-0005; dated research artifact otherwise left intact",
+    "status": "fixed",
+    "introduced_pass": null
+  },
+  {
+    "id": "ID-012",
+    "group": "C",
+    "claim": "Disposition map in docs/agents/ has no inbound See reference from root",
+    "evidence": "docs/agents/disposition-1788484534.md unreferenced; violates the reference-integrity rule it audits",
+    "severity": "minor",
+    "fix": "Moved to plans/ alongside the review manifest — it is a transient audit artifact, not agent guidance",
+    "status": "fixed",
+    "introduced_pass": 1
+  },
+  {
+    "id": "ID-013",
+    "group": "C",
+    "claim": "Disposition map line-count metadata does not match the actual files",
+    "evidence": "claimed '389 lines to 78 lines'; measured 90 and 55 by wc -l",
+    "severity": "minor",
+    "fix": "Corrected to '90 to 55 lines by wc -l'",
+    "status": "fixed",
+    "introduced_pass": 1
+  },
+  {
+    "id": "ID-014",
+    "group": "B",
+    "claim": "--enable-ui help text describes the observability API as read-only",
+    "evidence": "anthrouter/config.py:706 'Enable the read-only observability API'",
+    "severity": "minor",
+    "fix": "Reworded to note the API is read-only unless --admin-token enables POST /admin/config. Found by an independent repo-wide sweep, not by the critic.",
+    "status": "fixed",
+    "introduced_pass": null
+  }
+]

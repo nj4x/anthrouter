@@ -4565,19 +4565,6 @@ class TestBlendedReasonCodes:
         decision = route_model(payload, target, {})
         assert '_blended_' not in decision.reason_code
 
-    def test_tag_mode_unaffected(self):
-        backend = MagicMock()
-        backend.send_classifier_message = MagicMock(
-            side_effect=AssertionError('classifier must not be called in tag mode'))
-        target = _target(backend=backend, routing=True)
-        target.config.auto_model_routing_mode = 'tag'
-        target.config.auto_model_routing_task_map = {'docs': 'haiku'}
-        payload = _payload(model='sonnet', content='write the docs',
-                           system='You are a helpful assistant.',
-                           metadata={'task': 'docs'})
-        decision = route_model(payload, target, {})
-        assert '_blended_' not in decision.reason_code
-
     def test_all_six_blended_codes_in_reason_code_literal(self):
         import typing
         from anthrouter.model_router import ReasonCode

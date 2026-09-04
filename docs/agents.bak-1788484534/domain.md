@@ -4,14 +4,8 @@ How the engineering skills should consume this repo's domain documentation when 
 
 ## Before exploring, read these
 
-### Domain glossary and decisions
-
-- **`CONTEXT.md`** at the repo root — holds the domain model (Tier, Routing decision, Classifier, etc.). Read this before modifying routing or classification logic.
-- **`docs/adr/`** — architecture decisions that govern how requests flow through the proxy. Required reading before touching `install.sh`/`uninstall.sh`, routing, or admin APIs (see ADR-0001, ADR-0005).
-
-### When working in multi-context repos
-
-- **`CONTEXT-MAP.md`** at the repo root if it exists — points at one `CONTEXT.md` per context. Read each one relevant to the topic.
+- **`CONTEXT.md`** at the repo root, or
+- **`CONTEXT-MAP.md`** at the repo root if it exists — it points at one `CONTEXT.md` per context. Read each one relevant to the topic.
 - **`docs/adr/`** — read ADRs that touch the area you're about to work in. In multi-context repos, also check `src/<context>/docs/adr/` for context-scoped decisions.
 - **`.data/requirements/`** at the repo root — formal requirements docs (FS, SRS, API definitions, test cases). Read docs relevant to the feature you're working on.
 - **`.data/docs/`** at the repo root — external reference documentation (vendor APIs, third-party integrations). Skills in `.data/docs/skills/` may provide additional tools.

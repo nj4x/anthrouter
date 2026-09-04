@@ -13,7 +13,7 @@ Accepted
 
 The runtime config editor (ADR-0005) renders every one of the 20 `EDITABLE_FIELDS` as a plain text input labeled with the raw field name — no description, no allowed-values hint, no type-aware control. `GET /admin/config` returns only `{restart_required, value}` per field. All human-readable documentation of these fields lives exclusively in argparse `help=` strings in `config.py`, which never reach the frontend.
 
-A related gap was found while surveying: `validate_config()` does not enforce the enum choices for `log_level` (`DEBUG|INFO|WARNING|ERROR`), `auto_model_routing_mode` (`classifier|rules|tag`), or `sanitize_system_prompt` (`off|warn|strip`). Those choices are checked only by argparse at startup, so `POST /admin/config` can persist an invalid enum value to both memory and `config.env`.
+A related gap was found while surveying: `validate_config()` does not enforce the enum choices for `log_level` (`DEBUG|INFO|WARNING|ERROR`), `auto_model_routing_mode` (`classifier|rules`), or `sanitize_system_prompt` (`off|warn|strip`). Those choices are checked only by argparse at startup, so `POST /admin/config` can persist an invalid enum value to both memory and `config.env`.
 
 ## Decision
 

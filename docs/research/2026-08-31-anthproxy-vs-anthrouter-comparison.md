@@ -4,6 +4,11 @@
 **Type**: Research/Comparison  
 **Scope**: Deep-compare of predecessor (anthproxy) and successor (anthrouter) codebases
 
+> **Stale in one respect.** This report predates ADR-0005 (runtime config editor). Its
+> claim that anthrouter's admin surface is read-only by design with no POST endpoints
+> is no longer true: `POST /admin/config` now exists, gated by `ANTHROUTER_ADMIN_TOKEN`.
+> Everything else in the comparison stands.
+
 ---
 
 ## 1. Architecture-Level Diff: Module/Responsibility Mapping

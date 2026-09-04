@@ -375,10 +375,6 @@ ReasonCode = Literal[
     'classifier_rules_standard',
     'classifier_rules_deep',
     'rules_no_signal',
-    # Tag-mode reason codes
-    'task_tag_routed',
-    'no_task_tag',
-    'unknown_task_tag',
 ]
 
 
@@ -1358,7 +1354,6 @@ def _dispatch_classifier_mode(
     est_tokens: int,
     requested: str,
     log_tag: str,
-    task_tag: str | None = None,
     prior_response_summary: str | None = None,
 ) -> tuple[int | str | None, str, int, int, str | None, str | None, str | None, str | None]:
     """Dispatch to the appropriate classification mode.
@@ -1370,43 +1365,14 @@ def _dispatch_classifier_mode(
     * For ``'classifier'`` mode: a raw 0–100 integer score, or ``None`` on failure.
     * For ``'rules'`` mode: a classification label (``'trivial'``, ``'standard'``,
       or ``'deep'``), or ``None`` on failure.
-    * For ``'tag'`` mode: the tier/model string from
-      ``config.auto_model_routing_task_tiers``, or ``None`` on failure.
 
     ``None`` first element means the caller must fail-closed to the requested model.
     Unknown or empty mode values fall back to ``'classifier'``.
 
     The last four elements (clf_model, clf_summary_json, clf_raw_response,
     clf_format) are only populated on the successful LLM call path; they are
-    ``None`` for rules, tag, failure, and invalid paths.
+    ``None`` for rules, failure, and invalid paths.
     """
-    if mode == 'tag':
-        # Tag mode: look up the task name in the configured task→tier map.
-        if not task_tag:
-            logger.info(
-                '%s Model router: tag mode but no task_tag supplied — '
-                'fail-closed to %s',
-                log_tag, requested,
-            )
-            return None, 'no_task_tag', 0, 0, None, None, None, None
-        task_tiers = getattr(config, 'auto_model_routing_task_tiers', None)
-        if not task_tiers or task_tag not in task_tiers:
-            logger.warning(
-                '%s Model router: unknown task tag %r in tag mode '
-                '(configured: %s) — fail-closed to %s',
-                log_tag, task_tag,
-                list(task_tiers) if task_tiers else '(none)',
-                requested,
-            )
-            return None, 'unknown_task_tag', 0, 0, None, None, None, None
-        tier = task_tiers[task_tag]
-        logger.info(
-            '%s Model router: tag mode task=%r → tier=%s '
-            '(requested=%s)',
-            log_tag, task_tag, tier, requested,
-        )
-        return tier, 'task_tag_routed', 0, 0, None, None, None, None
-
     if mode == 'rules':
         # Rules mode: deterministic keyword-based classification; no LLM call.
         label = classify_by_rules(summary)
@@ -1550,7 +1516,6 @@ def route_model(
     session_estimate_ratio: float = 1.0,
     log_tag: str = '',
     override_mode: str | None = None,
-    task_tag: str | None = None,
     ctx_key: str | None = None,
     baseline_model: str | None = None,
 ) -> ModelRoutingDecision:
@@ -1957,7 +1922,7 @@ def route_model(
     (score_or_label_or_tier, dispatch_reason, clf_in_tokens, clf_out_tokens,
      clf_model, clf_summary_json, clf_raw_response, clf_format) = _dispatch_classifier_mode(
         effective_mode, summary, config, target, credentials,
-        est_tokens, routing_baseline, log_tag, task_tag,
+        est_tokens, routing_baseline, log_tag,
         prior_response_summary=prior_response_summary,
     )
 
@@ -1976,8 +1941,8 @@ def route_model(
         )
 
     # --- Weighted blend (ADR 0010): applies in 'classifier' mode only.
-    # For 'rules' and 'tag' modes the system-prompt classifier is not called —
-    # 'rules' avoids LLM calls by design; 'tag' produces a direct model string.
+    # For 'rules' mode the system-prompt classifier is not called —
+    # 'rules' avoids LLM calls by design.
     blend_sys_tier: str | None = None
     blend_sys_score: int | None = None
     blend_user_score: int | None = None
@@ -2012,18 +1977,12 @@ def route_model(
         dispatch_reason = dispatch_reason_str  # type: ignore[assignment]
 
     # Map result to the final model string
-    if effective_mode == 'tag':
-        # score_or_label_or_tier is already the model/tier string from the task map
-        routed = score_or_label_or_tier  # type: ignore[assignment]
-        classification = None
-        reason: ReasonCode = dispatch_reason  # type: ignore[assignment]
-    else:
-        # classifier or rules mode: score_or_label_or_tier is 'trivial'/'standard'/'deep'
-        label_str: str = score_or_label_or_tier  # type: ignore[assignment]
-        # classification = raw user-prompt tier (pre-blend); rules mode uses the rules tier.
-        classification = user_prompt_tier if user_prompt_tier is not None else label_str
-        routed = config.auto_model_routing_classification[label_str]
-        reason = dispatch_reason  # type: ignore[assignment]
+    # classifier or rules mode: score_or_label_or_tier is 'trivial'/'standard'/'deep'
+    label_str: str = score_or_label_or_tier  # type: ignore[assignment]
+    # classification = raw user-prompt tier (pre-blend); rules mode uses the rules tier.
+    classification = user_prompt_tier if user_prompt_tier is not None else label_str
+    routed = config.auto_model_routing_classification[label_str]
+    reason: ReasonCode = dispatch_reason  # type: ignore[assignment]
 
     payload['model'] = routed
     return ModelRoutingDecision(
