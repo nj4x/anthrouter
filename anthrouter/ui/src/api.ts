@@ -125,12 +125,6 @@ export interface SanitizerEvent {
   is_allowlisted: number
   payload_preview: string | null
   payload_full: string | null
-  session_id: string
-  requested_model: string
-  system_prompt_sha256: string | null
-  system_prompt_sanitized_sha256: string | null
-  system_prompt_score: number | null
-  user_prompt_score: number | null
 }
 
 export interface RequestDetail {
