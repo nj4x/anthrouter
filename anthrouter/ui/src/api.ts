@@ -133,21 +133,6 @@ export interface SanitizerEvent {
   user_prompt_score: number | null
 }
 
-export interface SanitizerSummary {
-  total_events: number
-  requests_with_events: number
-  allowlisted: number | null
-  distinct_block_types: number
-  requests_changed: number
-}
-
-export interface SanitizerResponse {
-  events: SanitizerEvent[]
-  summary: SanitizerSummary
-  limit: number
-  offset: number
-}
-
 export interface RequestDetail {
   request: RequestRow
   sanitizer_events: SanitizerEvent[]

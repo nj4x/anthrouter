@@ -269,8 +269,6 @@ def handle_get(path: str, query_params: dict, db, config, oauth_cache=None) -> t
         return _get_request_detail(int(raw), db)
     if route == '/admin/routing':
         return _get_routing(query_params, db)
-    if route == '/admin/sanitizer-events':
-        return _get_sanitizer_events(query_params, db)
     if route == '/admin/ratelimit':
         return _get_ratelimit(db)
     if route == '/admin/oauth-usage':
@@ -410,16 +408,6 @@ def _get_routing(query_params: dict, db) -> tuple[int, dict]:
     return 200, {
         'decisions': db.get_routing_decisions(limit=limit, offset=offset),
         'summary': db.get_routing_summary(),
-        'limit': limit,
-        'offset': offset,
-    }
-
-
-def _get_sanitizer_events(query_params: dict, db) -> tuple[int, dict]:
-    limit, offset = _page(query_params)
-    return 200, {
-        'events': db.get_recent_sanitizer_events(limit=limit, offset=offset),
-        'summary': db.get_sanitizer_summary(),
         'limit': limit,
         'offset': offset,
     }
