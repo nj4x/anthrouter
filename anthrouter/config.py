@@ -13,10 +13,11 @@ DEFAULT_UPSTREAM_BASE_URL = 'https://api.anthropic.com'
 # EDITABLE_FIELDS: registry of config fields that can be edited via admin API
 # True = file-editable (restart required for changes to apply)
 # False = live-editable (applies immediately)
-# Excluded fields (not in this registry): admin_token, model_aliases, anthrouter_home, enable_ui, request_history_size
+# Excluded fields (not in this registry): admin_token, anthrouter_home, enable_ui, request_history_size
 EDITABLE_FIELDS: dict[str, bool] = {
     # Live-editable (applies immediately)
     'auto_model_routing_classification': False,
+    'model_aliases': True,
     'host': True,
     'port': True,
     'log_file': True,
@@ -88,6 +89,11 @@ FIELD_METADATA: dict[str, dict] = {
     },
     'auto_model_routing_classification': {
         'description': 'Comma-separated label:model pairs mapping complexity tiers to model aliases. Valid labels: trivial, standard, deep. Example: "trivial:haiku,standard:sonnet,deep:opus". Unspecified labels keep their defaults.',
+        'type': 'str',
+        'group': 'Model Routing',
+    },
+    'model_aliases': {
+        'description': 'Comma-separated alias:model pairs mapping model aliases to target models. Example: "gpt4:claude-opus-4,turbo:claude-opus-3.5-sonnet".',
         'type': 'str',
         'group': 'Model Routing',
     },
@@ -164,6 +170,11 @@ FIELD_METADATA: dict[str, dict] = {
     },
     'lock_requested_model': {
         'description': 'Override the incoming request model with a fixed baseline before auto routing fires; "off" disables the lock and passes the client model through unchanged.',
+        'type': 'str',
+        'group': 'Model Routing',
+    },
+    'model_aliases': {
+        'description': 'Comma-separated alias:model pairs mapping model aliases to target models. Example: "gpt4:claude-opus-4,turbo:claude-sonnet-4". Empty to disable aliasing.',
         'type': 'str',
         'group': 'Model Routing',
     },

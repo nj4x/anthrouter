@@ -312,4 +312,81 @@ describe('OAuthCard', () => {
     expect(paceDiv).toBeInTheDocument()
     expect(paceDiv?.textContent).toMatch(/pace \d+\.?\d*%/)
   })
+
+  it('renders segment dividers in workdays mode', async () => {
+    mockFetch({ oauth_token: makeToken({ period_workday_count: 23 }) })
+    renderCard()
+
+    await screen.findByText('Anthropic-OAuth token')
+
+    const meterBarEl = meterBar()
+    const segments = meterBarEl?.querySelectorAll('.border-r')
+    expect(segments?.length).toBe(23)
+  })
+
+  it('renders period allowance text in workdays mode', async () => {
+    mockFetch({ oauth_token: makeToken({ total_usd: 100.00, period_workday_count: 23 }) })
+    renderCard()
+
+    await screen.findByText('Anthropic-OAuth token')
+
+    expect(screen.getByText(/Period allowance:/)).toBeInTheDocument()
+    expect(screen.getByText(/\$100\.00 total/)).toBeInTheDocument()
+    expect(screen.getByText(/\$4\.35\/workday/)).toBeInTheDocument()
+  })
+
+  it('renders period allowance text in calendar mode', async () => {
+    mockFetch({
+      oauth_token: makeToken({
+        total_usd: 100.00,
+        period_start: '2026-09-01T00:00:00+00:00',
+        period_end: '2026-10-01T00:00:00+00:00',
+      }),
+    })
+    renderCard()
+
+    await screen.findByText('Anthropic-OAuth token')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Calendar' }))
+    await waitFor(() => {
+      expect(screen.getByText(/Period allowance:/)).toBeInTheDocument()
+      expect(screen.getByText(/\$100\.00 total/)).toBeInTheDocument()
+      expect(screen.getByText(/\$3\.33\/calendar-day/)).toBeInTheDocument()
+    })
+  })
+
+  it('renders days remaining in workdays mode', async () => {
+    mockFetch({
+      oauth_token: makeToken({
+        workday_elapsed_pct: 48,
+        period_workday_count: 23,
+        period_start: '2026-09-01T00:00:00+00:00',
+        period_end: '2026-10-01T00:00:00+00:00',
+      }),
+    })
+    renderCard()
+
+    await screen.findByText('Anthropic-OAuth token')
+
+    expect(screen.getByText(/Days remaining:/)).toBeInTheDocument()
+    expect(screen.getByText(/\(workdays\)/)).toBeInTheDocument()
+  })
+
+  it('renders days remaining in calendar mode', async () => {
+    mockFetch({
+      oauth_token: makeToken({
+        period_start: '2026-09-01T00:00:00+00:00',
+        period_end: '2026-10-01T00:00:00+00:00',
+      }),
+    })
+    renderCard()
+
+    await screen.findByText('Anthropic-OAuth token')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Calendar' }))
+    await waitFor(() => {
+      expect(screen.getByText(/Days remaining:/)).toBeInTheDocument()
+      expect(screen.getByText(/\(calendar\)/)).toBeInTheDocument()
+    })
+  })
 })

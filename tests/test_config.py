@@ -129,7 +129,7 @@ def test_editable_fields_file_editable_fields():
     expected = {
         'host', 'port', 'log_file', 'db_path',
         'upstream_base_url', 'auto_model_routing_classifier_model',
-        'oauth_usage_timezone',
+        'model_aliases', 'oauth_usage_timezone',
     }
     assert file_editable == expected
 
@@ -172,9 +172,10 @@ def test_editable_fields_includes_classification():
     assert EDITABLE_FIELDS['auto_model_routing_classification'] is False  # live-editable, no restart required
 
 
-def test_editable_fields_excludes_model_aliases():
-    """model_aliases is not in EDITABLE_FIELDS."""
-    assert 'model_aliases' not in EDITABLE_FIELDS
+def test_editable_fields_includes_model_aliases():
+    """model_aliases is in EDITABLE_FIELDS (file-editable, requires restart)."""
+    assert 'model_aliases' in EDITABLE_FIELDS
+    assert EDITABLE_FIELDS['model_aliases'] is True  # file-editable, requires restart
 
 
 def test_editable_fields_excludes_anthrouter_home():

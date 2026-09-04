@@ -612,6 +612,8 @@ def _full_body(cfg, overrides=None):
             body[name] = ''
         elif isinstance(value, bool):
             body[name] = 'true' if value else 'false'
+        elif isinstance(value, dict):
+            body[name] = ','.join(f'{k}:{v}' for k, v in value.items())
         else:
             body[name] = str(value)
     if overrides:

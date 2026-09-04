@@ -22,7 +22,7 @@ import types
 import typing
 from pathlib import Path
 
-from anthrouter.config import EDITABLE_FIELDS, FIELD_METADATA, Config, validate_config
+from anthrouter.config import EDITABLE_FIELDS, FIELD_METADATA, Config, validate_config, _parse_classification_str, _parse_model_aliases_str
 
 logger = logging.getLogger(__name__)
 
@@ -202,6 +202,16 @@ def handle_post_config(
     if field_errors:
         return _err_list(400, 'invalid_request_error', field_errors)
 
+    # Special-case: parse dict fields from string format before validation/replace
+    if 'auto_model_routing_classification' in coerced and isinstance(coerced['auto_model_routing_classification'], str):
+        from argparse import ArgumentParser
+        _dummy_parser = ArgumentParser()
+        coerced['auto_model_routing_classification'] = _parse_classification_str(coerced['auto_model_routing_classification'], _dummy_parser)
+    if 'model_aliases' in coerced and isinstance(coerced['model_aliases'], str):
+        from argparse import ArgumentParser
+        _dummy_parser = ArgumentParser()
+        coerced['model_aliases'] = _parse_model_aliases_str(coerced['model_aliases'], _dummy_parser)
+
     with _config_write_lock:
         full_candidate = dataclasses.replace(config, **coerced)
         validation_errors = validate_config(full_candidate)
@@ -332,9 +342,23 @@ def _get_config(config) -> tuple[int, dict]:
             if env_key in file_values:
                 value = file_values[env_key]
             else:
-                value = str(getattr(config, field_name, ''))
+                attr_value = getattr(config, field_name, '')
+                # Special-case: format dict fields as comma-separated string
+                if field_name == 'auto_model_routing_classification' and isinstance(attr_value, dict):
+                    value = ','.join(f'{k}:{v}' for k, v in attr_value.items())
+                elif field_name == 'model_aliases' and isinstance(attr_value, dict):
+                    value = ','.join(f'{k}:{v}' for k, v in attr_value.items())
+                else:
+                    value = str(attr_value)
         else:
-            value = str(getattr(config, field_name, ''))
+            attr_value = getattr(config, field_name, '')
+            # Special-case: format dict fields as comma-separated string
+            if field_name == 'auto_model_routing_classification' and isinstance(attr_value, dict):
+                value = ','.join(f'{k}:{v}' for k, v in attr_value.items())
+            elif field_name == 'model_aliases' and isinstance(attr_value, dict):
+                value = ','.join(f'{k}:{v}' for k, v in attr_value.items())
+            else:
+                value = str(attr_value)
 
         field_data: dict = {
             'restart_required': restart_required,

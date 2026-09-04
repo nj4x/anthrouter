@@ -147,6 +147,32 @@ export function OAuthCard() {
         )}
         {token.burn_pct != null && (
           <div className="mt-1 h-1.5 bg-slate-200 dark:bg-slate-700 rounded-full overflow-hidden relative">
+            {/* Meter segments - thin vertical dividers */}
+            <div className="absolute inset-0 flex">
+              {(() => {
+                const segmentCount = mode === 'workdays'
+                  ? (token.period_workday_count ?? 1)
+                  : (() => {
+                      if (!token.period_start || !token.period_end) return 1;
+                      const start = new Date(token.period_start);
+                      const end = new Date(token.period_end);
+                      const days = Math.ceil((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24));
+                      return Math.max(1, days);
+                    })();
+                const segments = [];
+                for (let i = 0; i < segmentCount; i++) {
+                  segments.push(
+                    <div
+                      key={i}
+                      className="h-full border-r border-slate-400/50 dark:border-slate-500/50 flex-1"
+                      style={{ borderRightWidth: i === segmentCount - 1 ? '0' : '1px' }}
+                    />
+                  );
+                }
+                return segments;
+              })()}
+            </div>
+            {/* Base fill */}
             <div
               className={`absolute inset-y-0 left-0 transition-all ${
                 token.burn_pct >= 100
@@ -157,6 +183,7 @@ export function OAuthCard() {
               }`}
               style={{ width: `${pct}%` }}
             />
+            {/* Overuse overlay */}
             {displayBaseline != null && token.burn_pct > displayBaseline && (
               <div
                 className="absolute inset-y-0 bg-red-500"
@@ -166,6 +193,7 @@ export function OAuthCard() {
                 }}
               />
             )}
+            {/* Underuse overlay */}
             {displayBaseline != null &&
               displayBaseline - token.burn_pct > 0.5 && (
                 <div
@@ -176,6 +204,40 @@ export function OAuthCard() {
                   }}
                 />
               )}
+          </div>
+        )}
+        {/* Period allowance and days remaining */}
+        {token.used_usd != null && token.total_usd != null && token.period_workday_count != null && (
+          <div className="text-xs text-slate-600 dark:text-slate-400 mt-1">
+            {(() => {
+              const daysInPeriod = mode === 'workdays'
+                ? token.period_workday_count
+                : (() => {
+                    if (!token.period_start || !token.period_end) return 1;
+                    const start = new Date(token.period_start);
+                    const end = new Date(token.period_end);
+                    return Math.max(1, Math.ceil((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24)));
+                  })();
+              const perDay = token.total_usd / daysInPeriod;
+              const dayLabel = mode === 'workdays' ? 'workday' : 'calendar-day';
+              return `Period allowance: $${token.total_usd.toFixed(2)} total | $${perDay.toFixed(2)}/${dayLabel}`;
+            })()}
+          </div>
+        )}
+        {token.period_start && token.period_end && (
+          <div className="text-xs text-slate-600 dark:text-slate-400">
+            Days remaining: {(() => {
+              const now = new Date();
+              const end = new Date(token.period_end);
+              const calendarDays = Math.max(0, Math.ceil((end.getTime() - now.getTime()) / (1000 * 60 * 60 * 24)));
+              if (mode === 'calendar') {
+                return `${calendarDays} (calendar)`;
+              }
+              // Workdays remaining
+              const workdayElapsedPct = token.workday_elapsed_pct ?? 0;
+              const workdaysRemaining = Math.max(0, Math.round((100 - workdayElapsedPct) * (token.period_workday_count ?? 0) / 100));
+              return `${workdaysRemaining} (workdays)`;
+            })()}
           </div>
         )}
         {displayBaseline != null && (
