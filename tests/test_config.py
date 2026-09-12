@@ -41,6 +41,24 @@ def test_admin_token_env(monkeypatch):
     assert parse_args([]).admin_token == 'from-env'
 
 
+def test_tls_system_trust_defaults_to_false():
+    assert parse_args([]).tls_system_trust is False
+
+
+def test_tls_system_trust_flag():
+    assert parse_args(['--tls-system-trust']).tls_system_trust is True
+
+
+def test_tls_system_trust_no_flag_overrides_env(monkeypatch):
+    monkeypatch.setenv('ANTHROUTER_TLS_SYSTEM_TRUST', '1')
+    assert parse_args(['--no-tls-system-trust']).tls_system_trust is False
+
+
+def test_tls_system_trust_env(monkeypatch):
+    monkeypatch.setenv('ANTHROUTER_TLS_SYSTEM_TRUST', '1')
+    assert parse_args([]).tls_system_trust is True
+
+
 def test_env_overrides(monkeypatch):
     monkeypatch.setenv('ANTHROUTER_PORT', '9001')
     monkeypatch.setenv('ANTHROUTER_AUTO_MODEL_ROUTING', '1')
@@ -191,6 +209,11 @@ def test_editable_fields_excludes_enable_ui():
 def test_editable_fields_excludes_request_history_size():
     """request_history_size is not in EDITABLE_FIELDS."""
     assert 'request_history_size' not in EDITABLE_FIELDS
+
+
+def test_editable_fields_excludes_tls_system_trust():
+    """tls_system_trust is not in EDITABLE_FIELDS (patches ssl at process start)."""
+    assert 'tls_system_trust' not in EDITABLE_FIELDS
 
 
 # =============================================================================

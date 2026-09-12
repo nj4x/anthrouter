@@ -13,7 +13,9 @@ DEFAULT_UPSTREAM_BASE_URL = 'https://api.anthropic.com'
 # EDITABLE_FIELDS: registry of config fields that can be edited via admin API
 # True = file-editable (restart required for changes to apply)
 # False = live-editable (applies immediately)
-# Excluded fields (not in this registry): admin_token, anthrouter_home, enable_ui, request_history_size
+# Excluded fields (not in this registry): admin_token, anthrouter_home, enable_ui,
+# request_history_size, tls_system_trust (patches the ssl module once at process
+# start; an admin-API write would show as "changed" without ever taking effect)
 EDITABLE_FIELDS: dict[str, bool] = {
     # Live-editable (applies immediately)
     'auto_model_routing_classification': False,
@@ -366,6 +368,7 @@ class Config:
     model_aliases: dict[str, str] = dataclasses.field(default_factory=dict)  # User-supplied alias overrides
     admin_token: str | None = None  # Gates POST /admin/config; unset disables config writes
     oauth_usage_timezone: str | None = None  # Timezone for workday-aware OAuth pace baseline; None auto-detects with Pacific fallback
+    tls_system_trust: bool = False  # Delegate TLS verification to the OS trust store via truststore (requires the truststore package)
 
 
 def validate_config(cfg: Config) -> list[str]:
@@ -730,6 +733,18 @@ def parse_args(argv=None) -> Config:
         dest='oauth_usage_timezone',
         default=os.environ.get('ANTHROUTER_OAUTH_USAGE_TIMEZONE', None),
         help=f'{_help_from_meta("oauth_usage_timezone")} (default: auto-detect with Pacific fallback, env: ANTHROUTER_OAUTH_USAGE_TIMEZONE)',
+    )
+    p.add_argument(
+        '--tls-system-trust',
+        dest='tls_system_trust',
+        action=argparse.BooleanOptionalAction,
+        default=_env_bool('ANTHROUTER_TLS_SYSTEM_TRUST', False),
+        help='Delegate TLS certificate verification to the OS trust store (via the '
+             'truststore package) instead of the bundled CA bundle. Use this when a '
+             "TLS-intercepting proxy's certificate is trusted by the OS but rejected by "
+             'Python\'s OpenSSL (e.g. "Missing Authority Key Identifier"). Requires '
+             '`pip install truststore`; startup fails if the flag is set and the package '
+             'is missing (default: off, env: ANTHROUTER_TLS_SYSTEM_TRUST)',
     )
 
     args = p.parse_args(argv)

@@ -11,6 +11,7 @@ dependencies = []
 
 [project.optional-dependencies]
 dev = ["ruff>=0.8.0"]
+systrust = ["truststore>=0.10.0"]
 
 [project.scripts]
 anthrouter = "anthrouter.__main__:main"
