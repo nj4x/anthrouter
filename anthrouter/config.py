@@ -368,7 +368,7 @@ class Config:
     model_aliases: dict[str, str] = dataclasses.field(default_factory=dict)  # User-supplied alias overrides
     admin_token: str | None = None  # Gates POST /admin/config; unset disables config writes
     oauth_usage_timezone: str | None = None  # Timezone for workday-aware OAuth pace baseline; None auto-detects with Pacific fallback
-    tls_system_trust: bool = False  # Delegate TLS verification to the OS trust store via truststore (requires the truststore package)
+    tls_system_trust: bool = True  # Delegate TLS verification to the OS trust store via truststore; --no-tls-system-trust falls back to OpenSSL
 
 
 def validate_config(cfg: Config) -> list[str]:
@@ -738,13 +738,13 @@ def parse_args(argv=None) -> Config:
         '--tls-system-trust',
         dest='tls_system_trust',
         action=argparse.BooleanOptionalAction,
-        default=_env_bool('ANTHROUTER_TLS_SYSTEM_TRUST', False),
+        default=_env_bool('ANTHROUTER_TLS_SYSTEM_TRUST', True),
         help='Delegate TLS certificate verification to the OS trust store (via the '
-             'truststore package) instead of the bundled CA bundle. Use this when a '
-             "TLS-intercepting proxy's certificate is trusted by the OS but rejected by "
-             'Python\'s OpenSSL (e.g. "Missing Authority Key Identifier"). Requires '
-             '`pip install truststore`; startup fails if the flag is set and the package '
-             'is missing (default: off, env: ANTHROUTER_TLS_SYSTEM_TRUST)',
+             'truststore package) instead of Python\'s bundled CA bundle. On by default '
+             "because TLS-intercepting proxies often issue certificates the OS trusts but "
+             'OpenSSL 3.x strict mode (default since Python 3.13) rejects, e.g. "Missing '
+             'Authority Key Identifier". Pass --no-tls-system-trust to fall back to '
+             'OpenSSL verification (default: on, env: ANTHROUTER_TLS_SYSTEM_TRUST)',
     )
 
     args = p.parse_args(argv)

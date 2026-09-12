@@ -18,15 +18,15 @@ def _setup_logging(level: str, log_file: str) -> None:
 
 
 def _maybe_inject_system_trust(cfg, logger: logging.Logger) -> bool:
-    """Delegate TLS verification to the OS trust store, if requested.
+    """Delegate TLS verification to the OS trust store unless opted out.
 
     Must run before any ssl.SSLContext is created (before create_server()):
     truststore.inject_into_ssl() patches the ssl module process-wide, so every
     client built afterwards - main passthrough, classifier, oauth usage meter -
-    picks it up. Returns False (caller should abort startup) if the flag is set
-    but truststore isn't installed, per the fail-closed convention: silently
-    falling back to the (already broken) default verification would just
-    reproduce CERTIFICATE_VERIFY_FAILED downstream instead of at startup.
+    picks it up. truststore is a declared dependency, so ImportError means a
+    broken install; return False (caller aborts startup) rather than silently
+    falling back to OpenSSL verification, which on intercepted networks just
+    reproduces CERTIFICATE_VERIFY_FAILED downstream instead of at startup.
     """
     if not cfg.tls_system_trust:
         return True

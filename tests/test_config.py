@@ -41,22 +41,23 @@ def test_admin_token_env(monkeypatch):
     assert parse_args([]).admin_token == 'from-env'
 
 
-def test_tls_system_trust_defaults_to_false():
-    assert parse_args([]).tls_system_trust is False
+def test_tls_system_trust_defaults_to_true(monkeypatch):
+    monkeypatch.delenv('ANTHROUTER_TLS_SYSTEM_TRUST', raising=False)
+    assert parse_args([]).tls_system_trust is True
 
 
-def test_tls_system_trust_flag():
-    assert parse_args(['--tls-system-trust']).tls_system_trust is True
-
-
-def test_tls_system_trust_no_flag_overrides_env(monkeypatch):
-    monkeypatch.setenv('ANTHROUTER_TLS_SYSTEM_TRUST', '1')
+def test_tls_system_trust_no_flag():
     assert parse_args(['--no-tls-system-trust']).tls_system_trust is False
 
 
-def test_tls_system_trust_env(monkeypatch):
-    monkeypatch.setenv('ANTHROUTER_TLS_SYSTEM_TRUST', '1')
-    assert parse_args([]).tls_system_trust is True
+def test_tls_system_trust_flag_overrides_env(monkeypatch):
+    monkeypatch.setenv('ANTHROUTER_TLS_SYSTEM_TRUST', '0')
+    assert parse_args(['--tls-system-trust']).tls_system_trust is True
+
+
+def test_tls_system_trust_env_disables(monkeypatch):
+    monkeypatch.setenv('ANTHROUTER_TLS_SYSTEM_TRUST', '0')
+    assert parse_args([]).tls_system_trust is False
 
 
 def test_env_overrides(monkeypatch):

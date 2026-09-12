@@ -7,11 +7,10 @@ name = "anthrouter"
 version = "0.1.0"
 description = "Single-backend Anthropic proxy with model-tier routing and system-prompt sanitization"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = ["truststore>=0.10.0"]
 
 [project.optional-dependencies]
 dev = ["ruff>=0.8.0"]
-systrust = ["truststore>=0.10.0"]
 
 [project.scripts]
 anthrouter = "anthrouter.__main__:main"
