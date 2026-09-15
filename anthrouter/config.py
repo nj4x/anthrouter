@@ -47,6 +47,7 @@ EDITABLE_FIELDS: dict[str, bool] = {
     'sse_keepalive_interval': False,
     'db_retention_days': False,
     'oauth_usage_timezone': True,
+    'oauth_usage_poll_interval': False,
 }
 
 
@@ -222,6 +223,13 @@ FIELD_METADATA: dict[str, dict] = {
         'type': 'str',
         'group': 'OAuth Usage',
     },
+    'oauth_usage_poll_interval': {
+        'description': 'Base polling interval (seconds) for background OAuth usage fetch. Applies exponential backoff on errors up to 5 minutes.',
+        'type': 'int',
+        'min': 1,
+        'max': 300,
+        'group': 'OAuth Usage',
+    },
 }
 
 # Fail-closed invariant: FIELD_METADATA keys must exactly match EDITABLE_FIELDS keys
@@ -368,6 +376,7 @@ class Config:
     model_aliases: dict[str, str] = dataclasses.field(default_factory=dict)  # User-supplied alias overrides
     admin_token: str | None = None  # Gates POST /admin/config; unset disables config writes
     oauth_usage_timezone: str | None = None  # Timezone for workday-aware OAuth pace baseline; None auto-detects with Pacific fallback
+    oauth_usage_poll_interval: int = 60  # Base polling interval (seconds) for background OAuth usage fetch
     tls_system_trust: bool = True  # Delegate TLS verification to the OS trust store via truststore; --no-tls-system-trust falls back to OpenSSL
 
 
@@ -733,6 +742,13 @@ def parse_args(argv=None) -> Config:
         dest='oauth_usage_timezone',
         default=os.environ.get('ANTHROUTER_OAUTH_USAGE_TIMEZONE', None),
         help=f'{_help_from_meta("oauth_usage_timezone")} (default: auto-detect with Pacific fallback, env: ANTHROUTER_OAUTH_USAGE_TIMEZONE)',
+    )
+    p.add_argument(
+        '--oauth-usage-poll-interval',
+        dest='oauth_usage_poll_interval',
+        type=int,
+        default=int(os.environ.get('ANTHROUTER_OAUTH_USAGE_POLL_INTERVAL', 60)),
+        help=f'{_help_from_meta("oauth_usage_poll_interval")} (default: 60 seconds, env: ANTHROUTER_OAUTH_USAGE_POLL_INTERVAL)',
     )
     p.add_argument(
         '--tls-system-trust',

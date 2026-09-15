@@ -17,7 +17,8 @@ ANTHROPIC_HOST = 'api.anthropic.com'
 USAGE_PATH = '/api/oauth/usage'
 USAGE_TIMEOUT_SECONDS = 5
 CACHE_TTL_SECONDS = 60
-FETCH_INTERVAL_SECONDS = 30  # Throttle: single background thread sleeps between fetches
+FETCH_INTERVAL_SECONDS = 60  # Default base interval; overridden by config
+MAX_BACKOFF_SECONDS = 300  # 5 minutes: cap exponential backoff
 
 
 @dataclass
@@ -53,7 +54,7 @@ class OAuthUsageCache:
     spawning that causes quota exhaustion.
     """
 
-    def __init__(self, timezone_name: str | None = None):
+    def __init__(self, timezone_name: str | None = None, poll_interval_seconds: int | None = None):
         self._lock = threading.Lock()
         self._token_hash: str | None = None
         self._usage: OAuthUsage | None = None
@@ -63,6 +64,8 @@ class OAuthUsageCache:
         self._stop_event = threading.Event()
         self._current_token: str | None = None
         self._tz = pace.resolve_timezone(timezone_name)
+        self._base_interval = poll_interval_seconds or FETCH_INTERVAL_SECONDS
+        self._backoff_multiplier = 1.0  # Exponential backoff: 1x, 2x, 4x, … up to MAX_BACKOFF
 
     def get(self, access_token: str) -> OAuthUsage | None:
         """Fetch cached usage or refresh if stale. Never blocks on network."""
@@ -78,8 +81,9 @@ class OAuthUsageCache:
             if token_hash != self._token_hash or now > self._fetch_scheduled_at:
                 self._token_hash = token_hash
                 self._current_token = access_token
-                self._fetch_scheduled_at = now + FETCH_INTERVAL_SECONDS
-                logger.debug('OAuth usage fetch scheduled for token %s...', token_hash[:8])
+                sleep_secs = min(self._base_interval * self._backoff_multiplier, MAX_BACKOFF_SECONDS)
+                self._fetch_scheduled_at = now + sleep_secs
+                logger.debug('OAuth usage fetch scheduled for token %s... (sleep %.1fs)', token_hash[:8], sleep_secs)
 
                 # Start single background thread if not already running
                 if self._fetch_thread is None or not self._fetch_thread.is_alive():
@@ -102,16 +106,23 @@ class OAuthUsageCache:
             return self._usage
 
     def _background_fetch_loop(self) -> None:
-        """Single background thread that fetches OAuth usage at intervals."""
-        while not self._stop_event.wait(timeout=FETCH_INTERVAL_SECONDS):
+        """Single background thread that fetches OAuth usage at intervals with exponential backoff on 429."""
+        while True:
             token = None
             token_hash = None
+            sleep_secs = None
             with self._lock:
                 token = self._current_token
                 token_hash = self._token_hash
+                sleep_secs = min(self._base_interval * self._backoff_multiplier, MAX_BACKOFF_SECONDS)
 
             if token is None:
+                self._stop_event.wait(timeout=self._base_interval)
                 continue
+
+            if self._stop_event.wait(timeout=sleep_secs):
+                # Stop event fired, exit loop
+                break
 
             try:
                 usage = self._fetch_usage(token)
@@ -122,13 +133,15 @@ class OAuthUsageCache:
                     if token_hash == self._token_hash:
                         self._usage = usage
                         self._cached_at = time.time()
+                        self._backoff_multiplier = 1.0  # Reset backoff on success
                 logger.debug('OAuth usage fetched: burn_pct=%s eligible=%s', usage.burn_pct, usage.eligible)
             except Exception as exc:
                 logger.warning('OAuth usage fetch failed: %s', exc)
-                # Mark existing cache as stale on failure
+                # Mark existing cache as stale on failure, and double backoff
                 with self._lock:
                     if self._usage:
                         self._usage.usage_stale = True
+                    self._backoff_multiplier = min(self._backoff_multiplier * 2, MAX_BACKOFF_SECONDS / self._base_interval)
 
     def _fetch_usage(self, access_token: str) -> OAuthUsage:
         """Fetch OAuth usage from Anthropic API."""
@@ -147,10 +160,22 @@ class OAuthUsageCache:
             resp = conn.getresponse()
             body = resp.read()
             status = resp.status
+            headers = {k.lower(): v for k, v in resp.getheaders()}
         finally:
             conn.close()
 
         if status != 200:
+            # Parse Retry-After for 429; apply it to backoff multiplier
+            retry_after_str = headers.get('retry-after')
+            if status == 429 and retry_after_str:
+                try:
+                    retry_after = float(retry_after_str)
+                    # Set multiplier so next sleep = retry_after (capped at MAX_BACKOFF)
+                    with self._lock:
+                        self._backoff_multiplier = min(retry_after / self._base_interval, MAX_BACKOFF_SECONDS / self._base_interval)
+                    logger.info('OAuth usage 429: applying Retry-After header (%.1fs)', retry_after)
+                except (ValueError, ZeroDivisionError):
+                    logger.warning('OAuth usage 429: invalid Retry-After header %r', retry_after_str)
             raise RuntimeError(f'OAuth usage endpoint returned HTTP {status}')
 
         data = json.loads(body)
