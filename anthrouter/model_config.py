@@ -9,9 +9,9 @@ shipped after this table was written still works.
 from .mapper.common import AnthropicRequestError
 
 MODEL_ALIASES: dict[str, str] = {
-    'fable': 'claude-fable-5',
-    'opus': 'claude-opus-5',
-    'sonnet': 'claude-sonnet-4-6',
+    'fable': 'claude-fable-5-1',
+    'opus': 'claude-opus-5-5',
+    'sonnet': 'claude-sonnet-5-5',
     'haiku': 'claude-haiku-4-5-20251001',
 }
 
