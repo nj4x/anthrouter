@@ -237,6 +237,64 @@ def test_per_message_effort_strip_does_not_mutate_the_caller_payload():
         {'role': 'system', 'content': 'x', 'output_config': {'effort': 'low'}}]
 
 
+@pytest.mark.parametrize('model', ['haiku', 'claude-sonnet-5-5', 'claude-opus-5-5', 'claude-future-9'])
+def test_fallbacks_are_never_sent(model):
+    body = _body({'model': model, 'messages': [],
+                  'fallbacks': [{'model': 'claude-sonnet-4-5'}]})
+    assert 'fallbacks' not in body
+
+
+def test_fallbacks_strip_does_not_mutate_the_caller_payload():
+    fallbacks = [{'model': 'claude-sonnet-4-5'}]
+    payload = {'model': 'haiku', 'messages': [], 'fallbacks': fallbacks}
+    build_body(payload)
+    assert payload['fallbacks'] == fallbacks
+
+
+@pytest.mark.parametrize('model, ceiling', [
+    ('claude-fable-5-1', 32768),
+    ('claude-opus-5-5', 128000),
+    ('claude-sonnet-5-5', 128000),
+    ('claude-sonnet-4-6', 128000),
+    ('claude-sonnet-4-5', 128000),
+    ('claude-haiku-4-5-20251001', 64000),
+])
+def test_max_tokens_is_clamped_to_the_resolved_model_ceiling(model, ceiling):
+    body = _body({'model': model, 'messages': [], 'max_tokens': 999_999})
+    assert body['max_tokens'] == ceiling
+
+
+def test_max_tokens_is_clamped_against_the_resolved_alias_not_the_raw_name():
+    body = _body({'model': 'haiku', 'messages': [], 'max_tokens': 128000})
+    assert body['max_tokens'] == 64000
+
+
+@pytest.mark.parametrize('max_tokens', [64000, 1024])
+def test_max_tokens_at_or_below_the_ceiling_is_untouched(max_tokens):
+    body = _body({'model': 'haiku', 'messages': [], 'max_tokens': max_tokens})
+    assert body['max_tokens'] == max_tokens
+
+
+def test_max_tokens_passes_through_for_a_model_outside_the_limits_table():
+    body = _body({'model': 'claude-future-9', 'messages': [], 'max_tokens': 999_999})
+    assert body['max_tokens'] == 999_999
+
+
+def test_absent_max_tokens_is_not_invented():
+    assert 'max_tokens' not in _body({'model': 'haiku', 'messages': []})
+
+
+def test_non_int_max_tokens_crosses_untouched():
+    body = _body({'model': 'haiku', 'messages': [], 'max_tokens': 'lots'})
+    assert body['max_tokens'] == 'lots'
+
+
+def test_max_tokens_clamp_does_not_mutate_the_caller_payload():
+    payload = {'model': 'haiku', 'messages': [], 'max_tokens': 128000}
+    build_body(payload)
+    assert payload['max_tokens'] == 128000
+
+
 def test_per_message_effort_strip_tolerates_non_dict_messages():
     messages = ['not a dict', {'role': 'user', 'content': 'hi', 'output_config': 'bad'}]
     body = _body({'model': 'fable', 'messages': messages})
@@ -373,6 +431,13 @@ def test_long_context_beta_is_dropped_for_a_non_opus_target():
 def test_long_context_beta_survives_for_opus():
     payload = {'model': 'opus', '_anthropic_beta': ['context-1m-2025-08-07']}
     assert merge_betas(payload) == 'context-1m-2025-08-07'
+
+
+@pytest.mark.parametrize('beta', ['server-side-fallback-2026-03-01', 'server-side-fallback'])
+@pytest.mark.parametrize('model', ['haiku', 'opus', 'claude-future-9'])
+def test_fallback_beta_is_dropped_for_every_model(model, beta):
+    payload = {'model': model, '_anthropic_beta': [beta, 'other-beta']}
+    assert merge_betas(payload) == 'other-beta'
 
 
 def test_clear_thinking_beta_is_dropped_when_thinking_is_inactive():

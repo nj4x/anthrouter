@@ -23,6 +23,19 @@ MODEL_PRICING: dict[str, tuple[float, float, float, float]] = {
     'haiku': (1.0, 5.0, 0.10, 1.25),
 }
 
+# Per-model output ceilings (max_tokens), keyed by resolved model ID.  Anthropic
+# rejects max_tokens above the ceiling with HTTP 400, and a request sized for the
+# client's tier can be routed to a smaller one.  Models absent here pass through
+# unclamped (fail open).
+MODEL_OUTPUT_LIMITS: dict[str, int] = {
+    'claude-fable-5-1': 32768,
+    'claude-opus-5-5': 128000,
+    'claude-sonnet-5-5': 128000,
+    'claude-sonnet-4-6': 128000,
+    'claude-sonnet-4-5': 128000,
+    'claude-haiku-4-5-20251001': 64000,
+}
+
 # Context-window variant suffixes stripped before alias lookup: the 1m window is
 # requested via the ``context-1m`` beta, not a distinct upstream model ID.
 CONTEXT_SUFFIXES: tuple[str, ...] = (':1m', '[1m]')
