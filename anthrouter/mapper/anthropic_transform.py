@@ -8,13 +8,15 @@ native Anthropic and holds its own credential.
 What it does do is model-aware sanitization, and only because it *changes the
 model*: a payload valid for the tier the client asked for can be rejected with
 HTTP 400 by the tier the router picked.  Each gate below fails open — a model
-family absent from a list keeps its field and surfaces the 400.
+family absent from a list keeps its field and surfaces the 400.  The one
+exception is ``fallbacks``, which is stripped unconditionally: no tier is
+modeled as accepting a fallback list chosen for a different model (ADR-0013).
 """
 
 import json
 import logging
 
-from ..model_config import resolve_model
+from ..model_config import MODEL_OUTPUT_LIMITS, resolve_model
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +94,11 @@ def _supports_sampling_controls(model_id: str) -> bool:
 # gate survives date-stamp revisions.
 _LONG_CONTEXT_BETA_PREFIX = 'context-1m'
 
+# Server-side fallback beta tokens, stripped alongside the ``fallbacks`` body
+# field in ``build_body`` (see ADR-0013).  Prefix-matched like the long-context
+# beta.
+_FALLBACK_BETA_PREFIX = 'server-side-fallback'
+
 
 def _supports_long_context(model_id: str) -> bool:
     """Only Opus may carry the 1m context beta.
@@ -144,6 +151,9 @@ def merge_betas(payload: dict, aliases: dict[str, str] | None = None) -> str:
         if not long_context_ok and beta.startswith(_LONG_CONTEXT_BETA_PREFIX):
             logger.debug('Dropped long-context beta %s: 1m context not supported for model %s',
                          beta, resolved_model)
+            continue
+        if beta.startswith(_FALLBACK_BETA_PREFIX):
+            logger.debug('Dropped fallback beta %s: fallbacks are never sent', beta)
             continue
         if beta not in seen:
             betas.append(beta)
@@ -224,6 +234,19 @@ def build_body(payload: dict, aliases: dict[str, str] | None = None) -> bytes:
     """
     body = {k: v for k, v in payload.items() if k not in _INTERNAL_KEYS}
     body['model'] = resolve_model(payload.get('model', ''), aliases=aliases)
+
+    # Unconditional, not model-gated: Anthropic validates each fallback target
+    # against the primary model, and routing may have changed that model after
+    # the client chose its targets.  Pairs with the beta strip in merge_betas.
+    if body.pop('fallbacks', None) is not None:
+        logger.debug('Dropped fallbacks for model %s', body['model'])
+
+    ceiling = MODEL_OUTPUT_LIMITS.get(body['model'])
+    max_tokens = body.get('max_tokens')
+    if ceiling is not None and isinstance(max_tokens, int) and max_tokens > ceiling:
+        body['max_tokens'] = ceiling
+        logger.debug('Clamped max_tokens %d to %d for model %s',
+                     max_tokens, ceiling, body['model'])
 
     if not _supports_effort(body['model']):
         oc = body.get('output_config')
