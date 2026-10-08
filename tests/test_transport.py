@@ -174,21 +174,73 @@ def test_output_config_disappears_when_effort_was_its_only_key():
     assert 'output_config' not in body
 
 
-def test_fable_rejects_effort_so_it_is_dropped():
+@pytest.mark.parametrize('effort', ['low', 'medium', 'high', 'xhigh', 'max'])
+def test_fable_accepts_top_level_effort_so_it_is_kept(effort):
     body = _body({'model': 'fable', 'messages': [],
-                  'output_config': {'effort': 'high', 'other': 1}})
-    assert body['output_config'] == {'other': 1}
-
-
-def test_fable_output_config_disappears_when_effort_was_its_only_key():
-    body = _body({'model': 'fable', 'messages': [], 'output_config': {'effort': 'high'}})
-    assert 'output_config' not in body
+                  'output_config': {'effort': effort}})
+    assert body['output_config'] == {'effort': effort}
 
 
 def test_effort_survives_on_a_model_that_accepts_it():
     body = _body({'model': 'claude-opus-5-5', 'messages': [],
                   'output_config': {'effort': 'high'}})
     assert body['output_config'] == {'effort': 'high'}
+
+
+_PER_MESSAGE_EFFORT_BETA = 'mid-conversation-output-config-2026-07-01'
+
+
+def test_fable_drops_per_message_effort_without_the_beta():
+    messages = [
+        {'role': 'user', 'content': 'hi'},
+        {'role': 'system', 'content': 'go fast',
+         'output_config': {'effort': 'low', 'other': 1}},
+    ]
+    body = _body({'model': 'fable', 'messages': messages})
+    assert body['messages'] == [
+        {'role': 'user', 'content': 'hi'},
+        {'role': 'system', 'content': 'go fast', 'output_config': {'other': 1}},
+    ]
+
+
+def test_fable_per_message_output_config_disappears_when_effort_was_its_only_key():
+    messages = [{'role': 'system', 'content': 'x', 'output_config': {'effort': 'low'}}]
+    body = _body({'model': 'fable', 'messages': messages})
+    assert body['messages'] == [{'role': 'system', 'content': 'x'}]
+
+
+def test_fable_keeps_per_message_effort_with_the_beta():
+    messages = [{'role': 'system', 'content': 'x', 'output_config': {'effort': 'low'}}]
+    body = _body({'model': 'fable', 'messages': messages,
+                  '_anthropic_beta': [_PER_MESSAGE_EFFORT_BETA]})
+    assert body['messages'] == messages
+
+
+def test_per_message_effort_strip_matches_dated_beta_revisions():
+    messages = [{'role': 'system', 'content': 'x', 'output_config': {'effort': 'low'}}]
+    body = _body({'model': 'fable', 'messages': messages,
+                  '_anthropic_beta': ['mid-conversation-output-config-2027-01-01']})
+    assert body['messages'] == messages
+
+
+def test_per_message_effort_passes_through_on_other_models_without_the_beta():
+    messages = [{'role': 'system', 'content': 'x', 'output_config': {'effort': 'low'}}]
+    body = _body({'model': 'claude-opus-5-5', 'messages': messages})
+    assert body['messages'] == messages
+
+
+def test_per_message_effort_strip_does_not_mutate_the_caller_payload():
+    messages = [{'role': 'system', 'content': 'x', 'output_config': {'effort': 'low'}}]
+    payload = {'model': 'fable', 'messages': messages}
+    build_body(payload)
+    assert payload['messages'] == [
+        {'role': 'system', 'content': 'x', 'output_config': {'effort': 'low'}}]
+
+
+def test_per_message_effort_strip_tolerates_non_dict_messages():
+    messages = ['not a dict', {'role': 'user', 'content': 'hi', 'output_config': 'bad'}]
+    body = _body({'model': 'fable', 'messages': messages})
+    assert body['messages'] == messages
 
 
 def test_haiku_drops_adaptive_thinking_but_keeps_manual():

@@ -23,13 +23,31 @@ MESSAGES_PATH = '/v1/messages?beta=true'
 COUNT_TOKENS_PATH = '/v1/messages/count_tokens?beta=true'
 
 
-_NO_EFFORT_FAMILIES = ('haiku', 'fable')
-
-
 def _supports_effort(model_id: str) -> bool:
-    """Haiku and Fable reject ``output_config.effort`` with HTTP 400; other tiers accept it."""
-    model = model_id.lower()
-    return not any(family in model for family in _NO_EFFORT_FAMILIES)
+    """Haiku rejects top-level ``output_config.effort`` with HTTP 400; other tiers accept it.
+
+    Fable accepts every top-level effort level.  Its per-message effort is gated
+    separately by ``_supports_per_message_effort``.
+    """
+    return 'haiku' not in model_id.lower()
+
+
+# Beta token enabling per-message ``output_config`` (effort inside ``messages[]``),
+# e.g. 'mid-conversation-output-config-2026-07-01'.  Prefix-matched so the gate
+# survives date-stamp revisions.
+_PER_MESSAGE_EFFORT_BETA_PREFIX = 'mid-conversation-output-config'
+
+
+def _supports_per_message_effort(model_id: str, betas: list[str]) -> bool:
+    """Fable rejects per-message ``output_config.effort`` unless the client sent the beta.
+
+    The 400 reads ``output_config.effort requires a model that supports per-turn
+    effort; this model does not``.  With the beta present Fable accepts it, so
+    the field is kept.
+    """
+    if 'fable' not in model_id.lower():
+        return True
+    return any(beta.startswith(_PER_MESSAGE_EFFORT_BETA_PREFIX) for beta in betas)
 
 
 def _supports_adaptive_thinking(model_id: str) -> bool:
@@ -164,6 +182,36 @@ def _strip_thinking_edits(body: dict) -> None:
                  body.get('model'))
 
 
+def _strip_per_message_effort(body: dict) -> None:
+    """Drop ``output_config.effort`` from each entry of ``messages`` in the shallow copy.
+
+    Rebuilds the affected entries rather than editing them, so the caller's
+    payload is never mutated.  Entries that are not dicts, or whose
+    ``output_config`` is not a dict, cross untouched.
+    """
+    messages = body.get('messages')
+    if not isinstance(messages, list):
+        return
+    rebuilt: list = []
+    dropped = 0
+    for entry in messages:
+        oc = entry.get('output_config') if isinstance(entry, dict) else None
+        if not (isinstance(oc, dict) and 'effort' in oc):
+            rebuilt.append(entry)
+            continue
+        oc = {k: v for k, v in oc.items() if k != 'effort'}
+        entry = {k: v for k, v in entry.items() if k != 'output_config'}
+        if oc:
+            entry['output_config'] = oc
+        rebuilt.append(entry)
+        dropped += 1
+    if not dropped:
+        return
+    body['messages'] = rebuilt
+    logger.debug('Dropped per-message output_config.effort from %d message(s) for model %s',
+                 dropped, body.get('model'))
+
+
 _INTERNAL_KEYS = frozenset({'_anthropic_beta', '_anthproxy_internal_classifier'})
 
 
@@ -187,6 +235,9 @@ def build_body(payload: dict, aliases: dict[str, str] | None = None) -> bytes:
                 body.pop('output_config', None)
             logger.debug('Dropped unsupported output_config.effort for model %s',
                          body['model'])
+
+    if not _supports_per_message_effort(body['model'], payload.get('_anthropic_beta') or []):
+        _strip_per_message_effort(body)
 
     if not _supports_adaptive_thinking(body['model']):
         thinking = body.get('thinking')
