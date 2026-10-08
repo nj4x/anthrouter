@@ -23,9 +23,13 @@ MESSAGES_PATH = '/v1/messages?beta=true'
 COUNT_TOKENS_PATH = '/v1/messages/count_tokens?beta=true'
 
 
+_NO_EFFORT_FAMILIES = ('haiku', 'fable')
+
+
 def _supports_effort(model_id: str) -> bool:
-    """Haiku rejects ``output_config.effort`` with HTTP 400; other tiers accept it."""
-    return 'haiku' not in model_id.lower()
+    """Haiku and Fable reject ``output_config.effort`` with HTTP 400; other tiers accept it."""
+    model = model_id.lower()
+    return not any(family in model for family in _NO_EFFORT_FAMILIES)
 
 
 def _supports_adaptive_thinking(model_id: str) -> bool:
@@ -36,6 +40,20 @@ def _supports_adaptive_thinking(model_id: str) -> bool:
 def _supports_disabled_thinking(model_id: str) -> bool:
     """Fable rejects ``thinking.type='disabled'``; an absent field defaults to adaptive."""
     return 'fable' not in model_id.lower()
+
+
+def _requires_between_tools(model_id: str) -> bool:
+    """Sonnet 5.5 rejects ``thinking.type='disabled'`` and takes ``'between_tools'`` instead.
+
+    Sonnet 5 and earlier still accept ``'disabled'``.  Matched as a substring so
+    dated IDs are covered.
+    """
+    return 'sonnet-5-5' in model_id.lower()
+
+
+# Efforts at which Sonnet 5.5 rejects 'between_tools' as well; there the field
+# is dropped so the model falls back to its adaptive default.
+_BETWEEN_TOOLS_REJECTING_EFFORTS = frozenset({'xhigh', 'max'})
 
 
 _SAMPLING_CONTROL_KEYS = frozenset({'temperature', 'top_p', 'top_k'})
@@ -181,6 +199,23 @@ def build_body(payload: dict, aliases: dict[str, str] | None = None) -> bytes:
         if isinstance(thinking, dict) and thinking.get('type') == 'disabled':
             body.pop('thinking', None)
             logger.debug('Dropped unsupported disabled thinking for model %s', body['model'])
+
+    # Runs after the effort strip so the effort read here is the one the request
+    # will carry.  Disjoint from the haiku/fable gates above — Anthropic model IDs
+    # never embed both 'sonnet-5-5' and ('haiku'|'fable') — so no real payload hits both.
+    if _requires_between_tools(body['model']):
+        thinking = body.get('thinking')
+        if isinstance(thinking, dict) and thinking.get('type') == 'disabled':
+            oc = body.get('output_config')
+            effort = oc.get('effort') if isinstance(oc, dict) else None
+            if effort in _BETWEEN_TOOLS_REJECTING_EFFORTS:
+                body.pop('thinking', None)
+                logger.debug('Dropped disabled thinking for model %s (effort=%s)',
+                             body['model'], effort)
+            else:
+                body['thinking'] = {'type': 'between_tools'}
+                logger.debug('Rewrote disabled thinking to between_tools for model %s (effort=%s)',
+                             body['model'], effort)
 
     # Pairs with the clear_thinking beta strip in merge_betas — both keyed on
     # _thinking_active — so the body strategy can never outlive the thinking it

@@ -174,6 +174,23 @@ def test_output_config_disappears_when_effort_was_its_only_key():
     assert 'output_config' not in body
 
 
+def test_fable_rejects_effort_so_it_is_dropped():
+    body = _body({'model': 'fable', 'messages': [],
+                  'output_config': {'effort': 'high', 'other': 1}})
+    assert body['output_config'] == {'other': 1}
+
+
+def test_fable_output_config_disappears_when_effort_was_its_only_key():
+    body = _body({'model': 'fable', 'messages': [], 'output_config': {'effort': 'high'}})
+    assert 'output_config' not in body
+
+
+def test_effort_survives_on_a_model_that_accepts_it():
+    body = _body({'model': 'claude-opus-5-5', 'messages': [],
+                  'output_config': {'effort': 'high'}})
+    assert body['output_config'] == {'effort': 'high'}
+
+
 def test_haiku_drops_adaptive_thinking_but_keeps_manual():
     assert 'thinking' not in _body(
         {'model': 'haiku', 'messages': [], 'thinking': {'type': 'adaptive'}})
@@ -184,6 +201,65 @@ def test_haiku_drops_adaptive_thinking_but_keeps_manual():
 def test_fable_drops_explicitly_disabled_thinking():
     assert 'thinking' not in _body(
         {'model': 'fable', 'messages': [], 'thinking': {'type': 'disabled'}})
+
+
+def test_sonnet_5_5_rewrites_disabled_thinking_to_between_tools():
+    body = _body({'model': 'claude-sonnet-5-5', 'messages': [],
+                  'thinking': {'type': 'disabled'}})
+    assert body['thinking'] == {'type': 'between_tools'}
+
+
+@pytest.mark.parametrize('effort', ['low', 'medium', 'high'])
+def test_sonnet_5_5_rewrites_disabled_thinking_at_efforts_that_accept_between_tools(effort):
+    body = _body({'model': 'claude-sonnet-5-5', 'messages': [],
+                  'thinking': {'type': 'disabled'},
+                  'output_config': {'effort': effort}})
+    assert body['thinking'] == {'type': 'between_tools'}
+    assert body['output_config'] == {'effort': effort}
+
+
+@pytest.mark.parametrize('effort', ['xhigh', 'max'])
+def test_sonnet_5_5_drops_disabled_thinking_at_efforts_that_reject_between_tools(effort):
+    body = _body({'model': 'claude-sonnet-5-5', 'messages': [],
+                  'thinking': {'type': 'disabled'},
+                  'output_config': {'effort': effort}})
+    assert 'thinking' not in body
+    assert body['output_config'] == {'effort': effort}
+
+
+@pytest.mark.parametrize('thinking', [
+    {'type': 'adaptive'},
+    {'type': 'enabled', 'budget_tokens': 1024},
+])
+def test_sonnet_5_5_leaves_adaptive_and_enabled_thinking_alone(thinking):
+    body = _body({'model': 'claude-sonnet-5-5', 'messages': [], 'thinking': thinking})
+    assert body['thinking'] == thinking
+
+
+def test_between_tools_rewrite_matches_dated_sonnet_5_5_ids():
+    body = _body({'model': 'claude-sonnet-5-5-20260301', 'messages': [],
+                  'thinking': {'type': 'disabled'}})
+    assert body['thinking'] == {'type': 'between_tools'}
+
+
+@pytest.mark.parametrize('model', ['claude-sonnet-4-6', 'claude-opus-5-5', 'haiku'])
+def test_disabled_thinking_crosses_untouched_on_models_that_accept_it(model):
+    body = _body({'model': model, 'messages': [], 'thinking': {'type': 'disabled'}})
+    assert body['thinking'] == {'type': 'disabled'}
+
+
+def test_disabled_thinking_survives_on_unknown_model():
+    body = _body({'model': 'claude-unknown-tier-99', 'messages': [],
+                  'thinking': {'type': 'disabled'}})
+    assert body['thinking'] == {'type': 'disabled'}
+
+
+def test_between_tools_rewrite_does_not_mutate_the_caller_payload():
+    thinking = {'type': 'disabled'}
+    payload = {'model': 'claude-sonnet-5-5', 'messages': [], 'thinking': thinking}
+    build_body(payload)
+    assert payload['thinking'] is thinking
+    assert thinking == {'type': 'disabled'}
 
 
 def test_fixed_sampling_model_drops_sampling_controls():
