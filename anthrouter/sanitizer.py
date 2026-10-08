@@ -19,6 +19,7 @@ import logging
 
 from .mapper.common import (
     VOLATILE_SYSTEM_BLOCK_PREFIXES,
+    is_volatile_system_block,
     strip_volatile_system_blocks,
     system_content_str,
 )
@@ -83,7 +84,6 @@ def sanitize_system_prompt(payload, mode, session_id, tracker=None, log_tag='') 
             return result
 
         result.ran = True
-        result.flagged = (tracker or TRACKER).observe(session_id or '', system)
 
         if mode == 'strip':
             sanitized, stripped = strip_volatile_system_blocks(system)
@@ -103,16 +103,25 @@ def sanitize_system_prompt(payload, mode, session_id, tracker=None, log_tag='') 
                     content.encode('utf-8')
                 ).hexdigest()
 
-        # Reported for every block the allowlist did not cover, in both modes.
+        # Observed after the strip so only blocks actually dispatched can be
+        # flagged (ADR-0014); indices therefore refer to the outbound array.
+        outbound = payload.get('system')
+        result.flagged = (tracker or TRACKER).observe(session_id or '', outbound)
+
         # An unrecognised volatile block is never dropped — silently deleting
         # content the operator cannot see would be undebuggable client-side.
         for block in result.flagged:
+            reason = (
+                'mode is warn'
+                if is_volatile_system_block(outbound[block['index']])
+                else 'no allowlist match'
+            )
             logger.warning(
                 '%s Volatile system block at index %d varies within this session '
                 '(%d distinct values over %d requests, ratio %.2f) and sits inside '
-                'the cached prefix. Not stripped: no allowlist match.',
+                'the cached prefix. Not stripped: %s.',
                 log_tag, block['index'], block['distinct'],
-                block['requests'], block['ratio'],
+                block['requests'], block['ratio'], reason,
             )
     except Exception:
         logger.warning('%s System-prompt sanitization failed', log_tag, exc_info=True)
