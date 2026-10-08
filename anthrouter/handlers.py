@@ -37,6 +37,7 @@ from .model_router import (
     calibrated_ratio,
     route_model,
 )
+from .model_tier import classify_model_tier
 from .request_text import _WRAPPER_TAGS, last_transcript_user_turn, strip_reminders
 from .sanitizer import sanitize_system_prompt
 from .transport import extract_client_credentials
@@ -247,6 +248,17 @@ def context_key(sess_key: str | None, payload: dict) -> str | None:
     if not sess_key:
         return None
     return f'{sess_key}\x00{_conversation_anchor(payload)}'
+
+
+def _requested_tier(baseline_model: str) -> str:
+    """Second half of the tier-cache key: the tier the routing baseline resolves to.
+
+    A non-tier identifier maps to ``'_' + model`` so it matches only itself —
+    the same allow-any-tier-to-a-custom-model fallback ``_cap_cached_tier``
+    applies (ADR-0012).
+    """
+    tier = classify_model_tier(baseline_model)
+    return tier if tier != 'other' else f'_{baseline_model}'
 
 
 # ---------------------------------------------------------------------------
@@ -643,8 +655,20 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         if bool(config.auto_model_routing) != routing_on and sess_key is not None:
             config = replace(config, auto_model_routing=routing_on)
 
+        lock = config.lock_requested_model
+        baseline_model = lock if lock != 'off' else None
+        if baseline_model:
+            logger.info('%s Model lock: forcing routing baseline from %s to %s',
+                        self._log_tag(), payload.get('model'), baseline_model)
+
         ctx_key = context_key(sess_key, payload) if routing_on else None
-        cached_tier = self.sessions.routed_tier(ctx_key) if ctx_key else None
+        # The tier slot is scoped by the same baseline route_model decides
+        # against, so a locked turn and an unlocked turn never share one.
+        tier_key = (
+            (ctx_key, _requested_tier(baseline_model or payload.get('model') or ''))
+            if ctx_key else None
+        )
+        cached_tier = self.sessions.routed_tier(tier_key) if tier_key else None
         floor_active = (
             ctx_key is not None
             and config.auto_model_routing_long_context_threshold > 0
@@ -653,19 +677,13 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
             self.sessions.context(ctx_key) if floor_active else (0, 1.0)
         )
 
-        lock = config.lock_requested_model
-        baseline_model = lock if lock != 'off' else None
-        if baseline_model:
-            logger.info('%s Model lock: forcing routing baseline from %s to %s',
-                        self._log_tag(), payload.get('model'), baseline_model)
-
         target = RoutingTarget(config=config, backend=self.transport)
         routing = route_model(
             payload, target, credentials, cached_tier, session_floor, session_ratio,
             log_tag=self._log_tag(), ctx_key=ctx_key, baseline_model=baseline_model,
         )
 
-        routing = self._apply_tier_cache(routing, payload, ctx_key, config)
+        routing = self._apply_tier_cache(routing, payload, tier_key, config)
 
         self._routing = routing
         self._ctx_key = ctx_key if floor_active else None
@@ -717,14 +735,16 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
             for block in sanitized.flagged
         ]
 
-    def _apply_tier_cache(self, routing, payload: dict, ctx_key: str | None, config):
+    def _apply_tier_cache(
+        self, routing, payload: dict, tier_key: tuple[str, str] | None, config,
+    ):
         """Persist a fresh classification, or replay the cached tier for a text-less turn.
 
         The cached tier is a last-resort fallback: it is read only when this turn
         yielded no user text at all, and it is capped so a replay can never route
         above what the client asked for.
         """
-        if ctx_key is None:
+        if tier_key is None:
             return routing
         if routing.classification is not None:
             tier = (
@@ -732,11 +752,11 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
                 if routing.reason_code == 'affirmation_classified'
                 else routing.routed_model
             )
-            self.sessions.set_routed_tier(ctx_key, tier)
+            self.sessions.set_routed_tier(tier_key, tier)
             return routing
         if routing.reason_code != 'missing_final_user_text':
             return routing
-        cached = self.sessions.routed_tier(ctx_key)
+        cached = self.sessions.routed_tier(tier_key)
         if cached is None:
             return routing
         capped = _cap_cached_tier(

@@ -13,6 +13,7 @@ from anthrouter.handlers import (
     _extract_sse_stats,
     _extract_sse_text,
     _has_happy_new_year_system_prompt,
+    _requested_tier,
     _rewrite_message_start_model,
     context_key,
     parse_local_command,
@@ -406,9 +407,71 @@ def test_context_observations_replace_rather_than_accumulate():
 def test_state_maps_evict_oldest_first():
     state = SessionState()
     for i in range(MAX_ENTRIES + 5):
-        state.set_routed_tier(f'k{i}', 'haiku')
-    assert state.routed_tier('k0') is None
-    assert state.routed_tier(f'k{MAX_ENTRIES + 4}') == 'haiku'
+        state.set_routed_tier((f'k{i}', 'sonnet'), 'haiku')
+    assert state.routed_tier(('k0', 'sonnet')) is None
+    assert state.routed_tier((f'k{MAX_ENTRIES + 4}', 'sonnet')) == 'haiku'
+
+
+def test_routed_tier_slots_are_per_requested_tier():
+    state = SessionState()
+    state.set_routed_tier(('k', 'haiku'), 'haiku')
+    assert state.routed_tier(('k', 'haiku')) == 'haiku'
+    assert state.routed_tier(('k', 'sonnet')) is None
+
+
+# ---------------------------------------------------------------------------
+# Tier-cache key scoped by requested tier (ADR-0012)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize('model, expected', [
+    ('haiku', 'haiku'),
+    ('claude-sonnet-5-5', 'sonnet'),
+    ('Claude-Opus-5-5', 'opus'),
+    ('claude-fable-5-1', 'fable'),
+    ('gpt-4-turbo', '_gpt-4-turbo'),
+])
+def test_requested_tier_maps_tier_models_and_isolates_others(model, expected):
+    assert _requested_tier(model) == expected
+
+
+def _continuation(model):
+    """A turn whose final message is not from the user: no text to classify."""
+    return {
+        'model': model, 'metadata': {'user_id': SESSION},
+        'messages': [{'role': 'user', 'content': 'hi'},
+                     {'role': 'assistant', 'content': 'hello'}],
+    }
+
+
+def test_cached_tier_is_not_replayed_into_a_different_requested_tier(proxy):
+    server = proxy(auto_model_routing=True, auto_model_routing_mode='rules')
+    post(server, '/v1/messages', {
+        'model': 'sonnet', 'metadata': {'user_id': SESSION},
+        'messages': [{'role': 'user', 'content': 'hi'}]})
+    assert _FakeUpstream.received[-1]['payload']['model'] == resolve_model('haiku')
+
+    post(server, '/v1/messages', _continuation('sonnet'))
+    assert _FakeUpstream.received[-1]['payload']['model'] == resolve_model('haiku')
+    assert db_rows(server)[0]['reason_code'] == 'session_cached_tier'
+
+    post(server, '/v1/messages', _continuation('opus'))
+    assert _FakeUpstream.received[-1]['payload']['model'] == resolve_model('opus')
+    assert db_rows(server)[0]['reason_code'] == 'missing_final_user_text'
+
+
+def test_locked_baseline_scopes_the_tier_slot_by_the_lock(proxy):
+    server = proxy(auto_model_routing=True, auto_model_routing_mode='rules',
+                   lock_requested_model='sonnet')
+    post(server, '/v1/messages', {
+        'model': 'opus', 'metadata': {'user_id': SESSION},
+        'messages': [{'role': 'user', 'content': 'hi'}]})
+    assert _FakeUpstream.received[-1]['payload']['model'] == resolve_model('haiku')
+
+    # The lock is the routing baseline, so a client-side model change does not
+    # move the request to a different cache slot.
+    post(server, '/v1/messages', _continuation('opus'))
+    assert _FakeUpstream.received[-1]['payload']['model'] == resolve_model('haiku')
+    assert db_rows(server)[0]['reason_code'] == 'session_cached_tier'
 
 
 # ---------------------------------------------------------------------------
