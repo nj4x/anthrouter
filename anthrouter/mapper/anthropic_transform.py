@@ -25,13 +25,23 @@ MESSAGES_PATH = '/v1/messages?beta=true'
 COUNT_TOKENS_PATH = '/v1/messages/count_tokens?beta=true'
 
 
-def _supports_effort(model_id: str) -> bool:
-    """Haiku rejects top-level ``output_config.effort`` with HTTP 400; other tiers accept it.
+def _is_pre_5_5_haiku(model_id: str) -> bool:
+    """Haiku 4.x and earlier, which predate effort and adaptive thinking.
 
-    Fable accepts every top-level effort level.  Its per-message effort is gated
-    separately by ``_supports_per_message_effort``.
+    Haiku 5.5 is excluded by name: its docs speak for that ID only, so an unknown
+    future Haiku keeps the conservative pre-5.5 treatment.
     """
-    return 'haiku' not in model_id.lower()
+    model = model_id.lower()
+    return 'haiku' in model and 'haiku-5-5' not in model
+
+
+def _supports_effort(model_id: str) -> bool:
+    """Haiku 4.x rejects top-level ``output_config.effort`` with HTTP 400; other tiers accept it.
+
+    Haiku 5.5 and Fable accept every top-level effort level.  Fable's per-message
+    effort is gated separately by ``_supports_per_message_effort``.
+    """
+    return not _is_pre_5_5_haiku(model_id)
 
 
 # Beta token enabling per-message ``output_config`` (effort inside ``messages[]``),
@@ -53,8 +63,12 @@ def _supports_per_message_effort(model_id: str, betas: list[str]) -> bool:
 
 
 def _supports_adaptive_thinking(model_id: str) -> bool:
-    """Haiku rejects ``thinking.type='adaptive'`` but accepts manual ``'enabled'``."""
-    return 'haiku' not in model_id.lower()
+    """Haiku 4.x rejects ``thinking.type='adaptive'`` but accepts manual ``'enabled'``.
+
+    Haiku 5.5 is the reverse: adaptive is its default and manual ``'enabled'``
+    returns HTTP 400 (not gated here; a client sending it surfaces the 400).
+    """
+    return not _is_pre_5_5_haiku(model_id)
 
 
 def _supports_disabled_thinking(model_id: str) -> bool:
@@ -72,8 +86,14 @@ def _requires_between_tools(model_id: str) -> bool:
 
 
 # Efforts at which Sonnet 5.5 rejects 'between_tools' as well; there the field
-# is dropped so the model falls back to its adaptive default.
+# is dropped so the model falls back to its adaptive default.  Haiku 5.5 rejects
+# 'disabled' at the same efforts.
 _BETWEEN_TOOLS_REJECTING_EFFORTS = frozenset({'xhigh', 'max'})
+
+
+def _rejects_disabled_thinking_at_high_effort(model_id: str) -> bool:
+    """Haiku 5.5 accepts ``thinking.type='disabled'`` only at ``high`` effort or below."""
+    return 'haiku-5-5' in model_id.lower()
 
 
 _SAMPLING_CONTROL_KEYS = frozenset({'temperature', 'top_p', 'top_k'})
@@ -81,8 +101,11 @@ _SAMPLING_CONTROL_KEYS = frozenset({'temperature', 'top_p', 'top_k'})
 # Families using fixed sampling, which reject any non-default
 # temperature/top_p/top_k.  Matched as substrings of the resolved ID so dated
 # variants are covered.  Keep specific: bare 'sonnet' would wrongly strip from
-# Sonnet 4.5, which still accepts them.
-_FIXED_SAMPLING_FAMILIES = ('opus-4-7', 'opus-4-8', 'opus-5', 'sonnet-4-6', 'fable')
+# Sonnet 4.5, which still accepts them.  'haiku-5-5' is deliberately not
+# 'haiku-5': no Haiku 5 shipped and the docs speak only for 5.5.
+_FIXED_SAMPLING_FAMILIES = (
+    'opus-4-7', 'opus-4-8', 'opus-5', 'sonnet-4-6', 'haiku-5-5', 'fable',
+)
 
 
 def _supports_sampling_controls(model_id: str) -> bool:
@@ -408,6 +431,16 @@ def build_body(payload: dict, aliases: dict[str, str] | None = None, *,
             else:
                 body['thinking'] = {'type': 'between_tools'}
                 logger.debug('Rewrote disabled thinking to between_tools for model %s (effort=%s)',
+                             body['model'], effort)
+
+    if _rejects_disabled_thinking_at_high_effort(body['model']):
+        thinking = body.get('thinking')
+        if isinstance(thinking, dict) and thinking.get('type') == 'disabled':
+            oc = body.get('output_config')
+            effort = oc.get('effort') if isinstance(oc, dict) else None
+            if effort in _BETWEEN_TOOLS_REJECTING_EFFORTS:
+                body.pop('thinking', None)
+                logger.debug('Dropped disabled thinking for model %s (effort=%s)',
                              body['model'], effort)
 
     # Pairs with the clear_thinking beta strip in merge_betas — both keyed on

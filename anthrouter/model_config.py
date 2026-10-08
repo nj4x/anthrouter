@@ -34,6 +34,7 @@ MODEL_OUTPUT_LIMITS: dict[str, int] = {
     'claude-sonnet-4-6': 128000,
     'claude-sonnet-4-5': 128000,
     'claude-haiku-4-5-20251001': 64000,
+    'claude-haiku-5-5': 128000,
 }
 
 # Context-window variant suffixes stripped before alias lookup: the 1m window is
