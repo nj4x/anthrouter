@@ -4,11 +4,13 @@ anthproxy kept this on ``BackendRegistry``; with one backend there is no
 registry, so the state that routing actually reads lives here on its own.  Every
 map is bounded and evicted oldest-first, and nothing survives a restart.
 
-Two key shapes are stored side by side and must not be confused: the routing
-override is keyed by the bare session key (``metadata.user_id``), while the tier
-cache and context observations are keyed by the *context key* — session key plus
-a first-user-message hash — so a Claude Code Task sub-agent does not inherit and
-clobber its parent's slot.
+Three key shapes are stored side by side and must not be confused: the routing
+override is keyed by the bare session key (``metadata.user_id``); context
+observations are keyed by the *context key* — session key plus a
+first-user-message hash — so a Claude Code Task sub-agent does not inherit and
+clobber its parent's slot; and the tier cache is keyed by ``(context key,
+requested tier)`` so a tier cached on a haiku-requested turn is never replayed
+into a sonnet-requested turn of the same conversation (ADR-0012).
 """
 
 from __future__ import annotations
@@ -29,11 +31,11 @@ class SessionState:
         self._lock = threading.Lock()
         self._global_routing = bool(auto_model_routing)
         self._routing_overrides: OrderedDict[str, bool] = OrderedDict()
-        self._routed_tier: OrderedDict[str, str] = OrderedDict()
+        self._routed_tier: OrderedDict[tuple[str, str], str] = OrderedDict()
         self._context_obs: OrderedDict[str, tuple[int, float]] = OrderedDict()
         self._last_ratelimit: dict = {}
 
-    def _put(self, store: OrderedDict, key: str, value) -> None:
+    def _put(self, store: OrderedDict, key, value) -> None:
         if key not in store and len(store) >= MAX_ENTRIES:
             store.popitem(last=False)
         store[key] = value
@@ -73,13 +75,14 @@ class SessionState:
 
     # -- routed-tier cache ----------------------------------------------------
 
-    def set_routed_tier(self, ctx_key: str, tier: str) -> None:
+    def set_routed_tier(self, key: tuple[str, str], tier: str) -> None:
+        """``key`` is ``(ctx_key, requested_tier)``; see ``handlers._requested_tier``."""
         with self._lock:
-            self._put(self._routed_tier, ctx_key, tier)
+            self._put(self._routed_tier, key, tier)
 
-    def routed_tier(self, ctx_key: str) -> str | None:
+    def routed_tier(self, key: tuple[str, str]) -> str | None:
         with self._lock:
-            return self._routed_tier.get(ctx_key)
+            return self._routed_tier.get(key)
 
     # -- context observations -------------------------------------------------
 
