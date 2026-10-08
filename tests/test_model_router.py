@@ -27,6 +27,7 @@ import pytest
 
 from anthrouter.model_router import (
     _CLASSIFIER_SYSTEM,
+    _TRAILING_SCAN_LIMIT,
     RoutingSummary,
     RoutingTarget,
     _classify_system_prompt,
@@ -1151,6 +1152,137 @@ class TestBuildRoutingSummary:
         assert 'fix the bug' in s.final_user_text
         assert s.final_non_text_blocks == 2  # the two tool_result blocks
         assert s.has_images is False
+
+
+# ---------------------------------------------------------------------------
+# 6a. Trailing non-user walk-back (ADR 0011)
+# ---------------------------------------------------------------------------
+
+class TestTrailingScan:
+    """``build_routing_summary`` scans back over trailing non-user entries."""
+
+    def test_trailing_system_message_is_walked_over(self):
+        messages = [
+            _msg('refactor the parser'),
+            _msg('tool loop done', role='system'),
+        ]
+        s = build_routing_summary({'model': 'sonnet', 'messages': messages})
+        assert s is not None
+        assert s.final_user_text == 'refactor the parser'
+        assert s.trailing_skipped == 1
+        assert s.recovered_via_walkback is False
+
+    def test_multiple_trailing_non_user_entries_counted(self):
+        messages = [
+            _msg('write tests'),
+            _msg('ok', role='assistant'),
+            _msg('terminator', role='system'),
+            _msg('terminator', role='system'),
+        ]
+        s = build_routing_summary({'model': 'sonnet', 'messages': messages})
+        assert s is not None
+        assert s.final_user_text == 'write tests'
+        assert s.trailing_skipped == 3
+        # Trailing assistant/system entries contribute to prior counts and tool counts
+        # but the final user turn is not counted as prior (is_last gate).
+        assert s.prior_assistant_messages == 1
+        assert s.total_messages == 4
+
+    def test_final_user_message_leaves_trailing_skipped_zero(self):
+        s = build_routing_summary(_payload(content='hello'))
+        assert s is not None
+        assert s.trailing_skipped == 0
+
+    def test_user_at_scan_boundary_is_found(self):
+        # 7 trailing non-user entries: the user turn sits at the 8th slot from
+        # the end, inside _TRAILING_SCAN_LIMIT.
+        messages = [_msg('deep task')] + [_msg('x', role='system')] * (_TRAILING_SCAN_LIMIT - 1)
+        s = build_routing_summary({'model': 'sonnet', 'messages': messages})
+        assert s is not None
+        assert s.final_user_text == 'deep task'
+        assert s.trailing_skipped == _TRAILING_SCAN_LIMIT - 1
+
+    def test_user_beyond_scan_limit_returns_none(self):
+        messages = [_msg('deep task')] + [_msg('x', role='system')] * _TRAILING_SCAN_LIMIT
+        assert build_routing_summary({'model': 'sonnet', 'messages': messages}) is None
+
+    def test_no_user_within_limit_returns_none(self):
+        messages = [_msg('x', role='assistant'), _msg('y', role='system')]
+        assert build_routing_summary({'model': 'sonnet', 'messages': messages}) is None
+
+    def test_entry_without_role_key_is_skipped(self):
+        messages = [_msg('hello'), {'content': 'no role'}]
+        s = build_routing_summary({'model': 'sonnet', 'messages': messages})
+        assert s is not None
+        assert s.final_user_text == 'hello'
+        assert s.trailing_skipped == 1
+
+    def test_found_user_turn_not_counted_as_prior(self):
+        messages = [
+            _msg('first'),
+            _msg('reply', role='assistant'),
+            _msg('second'),
+            _msg('end', role='system'),
+        ]
+        s = build_routing_summary({'model': 'sonnet', 'messages': messages})
+        assert s is not None
+        assert s.prior_user_messages == 1
+        assert s.prior_assistant_messages == 1
+        assert s.total_messages == 4
+
+    def test_tool_result_only_detection_uses_found_turn(self):
+        messages = [
+            _msg('run it'),
+            {'role': 'assistant', 'content': [
+                {'type': 'tool_use', 'id': 'tu1', 'name': 'bash', 'input': {}},
+            ]},
+            {'role': 'user', 'content': [
+                {'type': 'tool_result', 'tool_use_id': 'tu1', 'content': 'done'},
+            ]},
+            _msg('end', role='system'),
+        ]
+        s = build_routing_summary({'model': 'sonnet', 'messages': messages})
+        assert s is not None
+        assert s.final_is_tool_result_only is True
+        assert s.recovered_via_walkback is True
+        assert s.final_user_text == 'run it'
+        assert s.trailing_skipped == 1
+
+    def test_affirmation_detected_on_found_turn(self):
+        messages = [
+            _msg('plan the migration'),
+            _msg('here is the plan', role='assistant'),
+            _msg('yes'),
+            _msg('end', role='system'),
+        ]
+        s = build_routing_summary({'model': 'sonnet', 'messages': messages})
+        assert s is not None
+        assert s.is_short_affirmation is True
+
+    def test_trailing_skipped_excluded_from_classifier_json(self):
+        messages = [_msg('hello'), _msg('end', role='system')]
+        s = build_routing_summary({'model': 'sonnet', 'messages': messages})
+        assert s is not None
+        assert s.trailing_skipped == 1
+        assert 'trailing_skipped' not in json.loads(s.to_classifier_json())
+
+    def test_route_model_classifies_with_trailing_system(self):
+        messages = [_msg('implement the feature'), _msg('end', role='system')]
+        payload = {'model': 'sonnet', 'messages': messages}
+        backend = MagicMock()
+        backend.send_classifier_message.return_value = _score_response('standard')
+        target = _target(routing=True, backend=backend)
+        decision = route_model(payload, target, {})
+        assert decision.reason_code != 'missing_final_user_text'
+        assert decision.classification is not None
+
+    def test_sentinel_still_short_circuits_before_scan(self):
+        messages = [_msg('hello'), _msg('end', role='system')]
+        payload = {'model': 'sonnet', 'messages': messages, '_anthproxy_internal_classifier': True}
+        target = _target(routing=True)
+        decision = route_model(payload, target, {})
+        assert decision.reason_code == 'disabled'
+        target.backend.send_message.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

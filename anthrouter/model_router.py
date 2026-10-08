@@ -164,6 +164,11 @@ _TRUNCATION_MARKER = '\n...[truncated]...\n'
 # tier.  Shared with the transcript fallback's bound in request_text.py.
 _WALKBACK_TAIL_LIMIT = _TRANSCRIPT_FALLBACK_LIMIT
 
+# Message-count bound on the backward scan for the final user turn
+# (ADR 0011).  5.x clients end tool loops with trailing ``role:'system'``
+# entries; the scan skips over them so those turns are still classified.
+_TRAILING_SCAN_LIMIT = 8
+
 # Maximum final-user text length echoed into the INFO classification log line.
 _LOG_PROMPT_LIMIT = 200
 
@@ -469,6 +474,9 @@ class RoutingSummary:
     # content field — just a stable hash for cache lookup and audit queries.
     # Excluded from to_classifier_json() (never sent to the user-prompt classifier).
     system_prompt_sha256: str | None = None
+    # Number of trailing non-user entries skipped to reach the final user turn
+    # (ADR 0011); routing-internal, excluded from to_classifier_json().
+    trailing_skipped: int = 0
 
     def to_classifier_json(self, prior_response_summary: str | None = None) -> str:
         d: dict = {
@@ -595,6 +603,12 @@ def build_routing_summary(payload: dict) -> RoutingSummary | None:
     usable user text can be recovered.  Any of those conditions causes the
     caller to fail-closed and keep the original requested model.
 
+    The final user turn is the last ``role=='user'`` entry within the trailing
+    ``_TRAILING_SCAN_LIMIT`` messages (ADR 0011); trailing non-user entries
+    such as the ``role:'system'`` tool-loop terminators 5.x clients append are
+    skipped and counted in ``trailing_skipped``.  No user entry within the
+    limit returns None.
+
     Text source order (first non-empty wins): the final user message's text →
     the final message's embedded ``<transcript>`` last user turn → a walk-back
     over prior ``messages`` to the most recent ``role=='user'`` turn with usable
@@ -615,8 +629,21 @@ def build_routing_summary(payload: dict) -> RoutingSummary | None:
     if not isinstance(messages, list) or not messages:
         return None
 
-    # Walk all messages to accumulate counts
     total_messages = len(messages)
+
+    # Locate the final user turn: scan backward over at most
+    # _TRAILING_SCAN_LIMIT entries, skipping non-dicts and non-user roles.
+    final_idx = -1
+    for i in range(total_messages - 1, max(total_messages - _TRAILING_SCAN_LIMIT, 0) - 1, -1):
+        candidate = messages[i]
+        if isinstance(candidate, dict) and candidate.get('role') == 'user':
+            final_idx = i
+            break
+    if final_idx < 0:
+        return None
+    trailing_skipped = total_messages - 1 - final_idx
+
+    # Walk all messages to accumulate counts
     prior_user = 0
     prior_assistant = 0
     tool_use_count = 0
@@ -626,7 +653,7 @@ def build_routing_summary(payload: dict) -> RoutingSummary | None:
         if not isinstance(msg, dict):
             return None
         role = msg.get('role')
-        is_last = (i == total_messages - 1)
+        is_last = (i == final_idx)
 
         if not is_last:
             if role == 'user':
@@ -645,10 +672,7 @@ def build_routing_summary(payload: dict) -> RoutingSummary | None:
                 elif btype == 'tool_result':
                     tool_result_count += 1
 
-    # Inspect the final message — must be a user message
-    final_msg = messages[-1]
-    if not isinstance(final_msg, dict) or final_msg.get('role') != 'user':
-        return None
+    final_msg = messages[final_idx]
 
     # final_non_text / has_images describe the FINAL message only — never the
     # walk-back source — since they characterise THIS turn's request shape.
@@ -693,7 +717,7 @@ def build_routing_summary(payload: dict) -> RoutingSummary | None:
         # recovered text so the recovered intent (not boilerplate) is visible
         # to the classifier. Prompts/instructions put their imperative at the
         # head and boilerplate at the tail; taking the head recovers intent.
-        for prior in reversed(messages[:-1]):
+        for prior in reversed(messages[:final_idx]):
             if not isinstance(prior, dict) or prior.get('role') != 'user':
                 continue
             prior_extracted = _extract_user_text(prior.get('content'))
@@ -755,6 +779,7 @@ def build_routing_summary(payload: dict) -> RoutingSummary | None:
             text_from_final_message_directly and is_short_affirmation(final_user_text)
         ),
         system_prompt_sha256=system_prompt_sha256,
+        trailing_skipped=trailing_skipped,
     )
 
 
@@ -1647,6 +1672,12 @@ def route_model(
             applied=(fallback != requested),
             reason_code='missing_final_user_text',
             estimated_input_tokens=est_tokens,
+        )
+    if summary.trailing_skipped > 0:
+        logger.debug(
+            '%s Model router: skipped %d trailing non-user message(s) '
+            'to reach the final user turn',
+            log_tag, summary.trailing_skipped,
         )
 
     # --- Cache-first path: if this is a text-less continuation turn (walk-back
