@@ -5,7 +5,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import pytest
 
 from anthrouter.http_util import UpstreamTarget
-from anthrouter.mapper.anthropic_transform import build_body, merge_betas
+from anthrouter.mapper.anthropic_transform import (
+    _rejects_system_role_in_messages,
+    _rewrite_inline_system,
+    build_body,
+    merge_betas,
+)
 from anthrouter.mapper.common import AnthropicRequestError
 from anthrouter.transport import (
     AnthropicTransport,
@@ -411,6 +416,181 @@ def test_build_body_does_not_mutate_the_caller_payload():
 
 
 # ---------------------------------------------------------------------------
+# Inline role:'system' rewrite (ADR-0010)
+# ---------------------------------------------------------------------------
+
+_EPHEMERAL = {'type': 'ephemeral'}
+
+
+def _system_msg(text, cache_control=None, **extra):
+    block = {'type': 'text', 'text': text}
+    if cache_control is not None:
+        block['cache_control'] = cache_control
+    return {'role': 'system', 'content': [block], **extra}
+
+
+def _reminder(text, cache_control=None):
+    block = {'type': 'text', 'text': f'<system-reminder>\n{text}\n</system-reminder>'}
+    if cache_control is not None:
+        block['cache_control'] = cache_control
+    return block
+
+
+@pytest.mark.parametrize('model', [
+    'claude-sonnet-4-6', 'claude-haiku-4-5-20251001', 'claude-4-5-sonnet-20250929',
+    'haiku', 'CLAUDE-SONNET-4-6',
+])
+def test_rejecting_families_are_matched_as_substrings(model):
+    assert _rejects_system_role_in_messages(model) is True
+
+
+@pytest.mark.parametrize('model', [
+    'claude-sonnet-5-5', 'claude-opus-5-5', 'claude-opus-5', 'claude-fable-5-1',
+    'claude-unknown-tier-99',
+])
+def test_accepting_models_are_outside_the_gate(model):
+    assert _rejects_system_role_in_messages(model) is False
+
+
+def test_system_after_user_is_appended_as_reminder_block_with_its_cache_control():
+    body = _body({'model': 'haiku', 'messages': [
+        {'role': 'user', 'content': [{'type': 'text', 'text': 'hi'}]},
+        _system_msg('tool loop ended', cache_control=_EPHEMERAL),
+    ]})
+    assert body['messages'] == [
+        {'role': 'user', 'content': [
+            {'type': 'text', 'text': 'hi'},
+            _reminder('tool loop ended', cache_control=_EPHEMERAL),
+        ]},
+    ]
+
+
+def test_string_user_content_becomes_a_block_list_before_the_append():
+    body = _body({'model': 'haiku', 'messages': [
+        {'role': 'user', 'content': 'hi'},
+        _system_msg('note'),
+    ]})
+    assert body['messages'] == [
+        {'role': 'user', 'content': [{'type': 'text', 'text': 'hi'}, _reminder('note')]},
+    ]
+
+
+def test_leading_system_message_becomes_a_standalone_user_turn():
+    body = _body({'model': 'haiku', 'messages': [
+        _system_msg('first'),
+        {'role': 'user', 'content': 'hi'},
+    ]})
+    assert body['messages'] == [
+        {'role': 'user', 'content': [_reminder('first')]},
+        {'role': 'user', 'content': 'hi'},
+    ]
+
+
+def test_system_after_assistant_text_turn_becomes_a_standalone_user_turn():
+    body = _body({'model': 'haiku', 'messages': [
+        {'role': 'user', 'content': 'hi'},
+        {'role': 'assistant', 'content': [{'type': 'text', 'text': 'hello'}]},
+        _system_msg('note', cache_control=_EPHEMERAL),
+    ]})
+    assert body['messages'][2] == {'role': 'user',
+                                   'content': [_reminder('note', cache_control=_EPHEMERAL)]}
+
+
+def test_system_after_assistant_tool_use_is_dropped_with_a_warning(caplog):
+    tool_use = {'role': 'assistant', 'content': [
+        {'type': 'tool_use', 'id': 't1', 'name': 'read', 'input': {}}]}
+    with caplog.at_level('WARNING', logger='anthrouter.mapper.anthropic_transform'):
+        body = _body({'model': 'haiku', 'messages': [
+            {'role': 'user', 'content': 'hi'},
+            tool_use,
+            _system_msg('note'),
+            {'role': 'user', 'content': [
+                {'type': 'tool_result', 'tool_use_id': 't1', 'content': 'ok'}]},
+        ]})
+    assert body['messages'][1] == tool_use
+    assert body['messages'][2]['content'][0]['type'] == 'tool_result'
+    assert len(body['messages']) == 3
+    assert 'after an assistant tool_use turn' in caplog.text
+    assert 'claude-haiku-4-5-20251001' in caplog.text
+
+
+def test_string_system_content_is_wrapped_and_message_level_cache_control_is_kept():
+    body = _body({'model': 'haiku', 'messages': [
+        {'role': 'user', 'content': 'hi'},
+        {'role': 'system', 'content': 'plain', 'cache_control': _EPHEMERAL},
+    ]})
+    assert body['messages'][0]['content'][1] == _reminder('plain', cache_control=_EPHEMERAL)
+
+
+def test_block_level_cache_control_wins_over_message_level():
+    body = _body({'model': 'haiku', 'messages': [
+        {'role': 'user', 'content': 'hi'},
+        {'role': 'system', 'cache_control': {'type': 'ephemeral', 'ttl': '5m'},
+         'content': [{'type': 'text', 'text': 'a'},
+                     {'type': 'text', 'text': 'b', 'cache_control': _EPHEMERAL}]},
+    ]})
+    assert body['messages'][0]['content'][1] == _reminder('a\nb', cache_control=_EPHEMERAL)
+
+
+def test_message_level_output_config_on_system_entry_is_discarded():
+    body = _body({'model': 'haiku', 'messages': [
+        {'role': 'user', 'content': 'hi'},
+        _system_msg('note', output_config={'effort': 'low'}),
+    ]})
+    assert body['messages'] == [
+        {'role': 'user', 'content': [{'type': 'text', 'text': 'hi'}, _reminder('note')]},
+    ]
+    assert json.dumps(body).count('output_config') == 0
+
+
+def test_empty_system_message_vanishes():
+    body = _body({'model': 'haiku', 'messages': [
+        {'role': 'user', 'content': 'hi'},
+        {'role': 'system', 'content': []},
+    ]})
+    assert body['messages'] == [{'role': 'user', 'content': 'hi'}]
+
+
+def test_accepting_model_keeps_inline_system_and_its_cache_control():
+    messages = [
+        {'role': 'user', 'content': 'hi'},
+        _system_msg('note', cache_control=_EPHEMERAL),
+    ]
+    body = _body({'model': 'claude-sonnet-5-5', 'messages': messages})
+    assert body['messages'] == messages
+
+
+def test_force_rewrite_applies_the_rewrite_to_an_accepting_model():
+    body = json.loads(build_body(
+        {'model': 'claude-sonnet-5-5', 'messages': [
+            {'role': 'user', 'content': 'hi'},
+            _system_msg('note'),
+        ]},
+        force_rewrite=True,
+    ))
+    assert body['messages'] == [
+        {'role': 'user', 'content': [{'type': 'text', 'text': 'hi'}, _reminder('note')]},
+    ]
+
+
+def test_inline_system_rewrite_does_not_mutate_the_caller_payload():
+    user = {'role': 'user', 'content': 'hi'}
+    system = _system_msg('note', cache_control=_EPHEMERAL)
+    messages = [user, system]
+    payload = {'model': 'haiku', 'messages': messages}
+    build_body(payload)
+    assert payload['messages'] is messages
+    assert messages == [{'role': 'user', 'content': 'hi'},
+                        _system_msg('note', cache_control=_EPHEMERAL)]
+    assert user == {'role': 'user', 'content': 'hi'}
+
+
+def test_rewrite_returns_the_same_list_when_nothing_changes():
+    messages = [{'role': 'user', 'content': 'hi'}]
+    assert _rewrite_inline_system(messages, 'claude-haiku-4-5-20251001') is messages
+
+
+# ---------------------------------------------------------------------------
 # Beta merging
 # ---------------------------------------------------------------------------
 
@@ -602,6 +782,129 @@ def test_thinking_signature_400_recovers_by_stripping_history_once():
     assert len(stub.requests) == 2
     retried = stub.requests[1]['body']['messages'][0]['content']
     assert retried == [{'type': 'text', 'text': 'hello'}]
+
+
+def _rejects_system_role(_n, _body):
+    payload = json.dumps({'error': {
+        'type': 'invalid_request_error',
+        'message': 'messages: Unexpected role "system". The Messages API accepts '
+                   'a top-level `system` parameter, not "system" as an input message role.',
+    }}).encode()
+    return 400, {'content-type': 'application/json'}, payload
+
+
+_INLINE_SYSTEM_PAYLOAD = {
+    'model': 'opus',
+    'messages': [
+        {'role': 'user', 'content': 'hi'},
+        {'role': 'system', 'content': [
+            {'type': 'text', 'text': 'tool loop ended', 'cache_control': _EPHEMERAL}]},
+    ],
+}
+
+
+def test_system_role_400_on_an_accepting_model_recovers_by_rewriting_once(caplog):
+    def picky(n, body):
+        if n == 1:
+            return _rejects_system_role(n, body)
+        return _ok(n, body)
+
+    with _StubUpstream(picky) as stub, \
+            caplog.at_level('WARNING', logger='anthrouter.transport'):
+        result = AnthropicTransport(stub.base_url).send_message(_INLINE_SYSTEM_PAYLOAD, CREDS)
+
+    assert result['stop_reason'] == 'end_turn'
+    assert len(stub.requests) == 2
+    first = stub.requests[0]['body']['messages']
+    assert first[1]['role'] == 'system'
+    retried = stub.requests[1]['body']['messages']
+    assert retried == [{'role': 'user', 'content': [
+        {'type': 'text', 'text': 'hi'},
+        _reminder('tool loop ended', cache_control=_EPHEMERAL),
+    ]}]
+    assert 'rejected role:system' in caplog.text
+    assert '_SYSTEM_ROLE_REJECTING_FAMILIES' in caplog.text
+
+
+def test_second_system_role_400_propagates_unchanged():
+    with _StubUpstream(_rejects_system_role) as stub:
+        with pytest.raises(AnthropicRequestError) as exc:
+            AnthropicTransport(stub.base_url).send_message(_INLINE_SYSTEM_PAYLOAD, CREDS)
+
+    assert exc.value.status_code == 400
+    assert len(stub.requests) == 2
+
+
+def test_system_role_400_is_not_retried_when_the_payload_has_no_system_entry():
+    with _StubUpstream(_rejects_system_role) as stub:
+        with pytest.raises(AnthropicRequestError) as exc:
+            AnthropicTransport(stub.base_url).send_message(
+                {'model': 'opus', 'messages': [{'role': 'user', 'content': 'hi'}]}, CREDS)
+
+    assert exc.value.status_code == 400
+    assert len(stub.requests) == 1
+
+
+def test_system_role_400_is_not_retried_for_a_model_already_in_the_tuple():
+    with _StubUpstream(_rejects_system_role) as stub:
+        with pytest.raises(AnthropicRequestError) as exc:
+            AnthropicTransport(stub.base_url).send_message(
+                {**_INLINE_SYSTEM_PAYLOAD, 'model': 'haiku'}, CREDS)
+
+    assert exc.value.status_code == 400
+    assert len(stub.requests) == 1
+    assert stub.requests[0]['body']['messages'][0]['content'][1]['text'].startswith(
+        '<system-reminder>')
+
+
+def test_system_role_rewrite_retry_covers_the_streaming_path():
+    def picky(n, body):
+        if n == 1:
+            return _rejects_system_role(n, body)
+        return 200, {'content-type': 'text/event-stream'}, \
+            b'event: message_stop\ndata: {"type":"message_stop"}\n\n'
+
+    with _StubUpstream(picky) as stub:
+        events = list(AnthropicTransport(stub.base_url).send_message_stream(
+            {**_INLINE_SYSTEM_PAYLOAD, 'stream': True}, CREDS))
+
+    assert len(events) == 1
+    assert len(stub.requests) == 2
+    assert stub.requests[1]['body']['messages'][0]['content'][1]['text'].startswith(
+        '<system-reminder>')
+
+
+def test_thinking_retry_keeps_a_prior_forced_rewrite():
+    def picky(n, body):
+        if n == 1:
+            return _rejects_system_role(n, body)
+        if n == 2:
+            payload = json.dumps({'error': {
+                'type': 'invalid_request_error',
+                'message': 'Invalid `signature` in `thinking` block',
+            }}).encode()
+            return 400, {'content-type': 'application/json'}, payload
+        return _ok(n, body)
+
+    payload = {
+        'model': 'opus',
+        'messages': [
+            {'role': 'user', 'content': 'hi'},
+            {'role': 'assistant', 'content': [
+                {'type': 'thinking', 'thinking': 'hm', 'signature': 'sonnet-minted'},
+                {'type': 'text', 'text': 'hello'},
+            ]},
+            {'role': 'system', 'content': 'note'},
+        ],
+    }
+    with _StubUpstream(picky) as stub:
+        result = AnthropicTransport(stub.base_url).send_message(payload, CREDS)
+
+    assert result['stop_reason'] == 'end_turn'
+    assert len(stub.requests) == 3
+    third = stub.requests[2]['body']['messages']
+    assert third[1]['content'] == [{'type': 'text', 'text': 'hello'}]
+    assert third[2] == {'role': 'user', 'content': [_reminder('note')]}
 
 
 def test_connection_failure_is_flagged_as_a_transport_error(monkeypatch):
