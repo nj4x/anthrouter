@@ -263,6 +263,7 @@ def test_fallbacks_strip_does_not_mutate_the_caller_payload():
     ('claude-sonnet-4-6', 128000),
     ('claude-sonnet-4-5', 128000),
     ('claude-haiku-4-5-20251001', 64000),
+    ('claude-haiku-5-5', 128000),
 ])
 def test_max_tokens_is_clamped_to_the_resolved_model_ceiling(model, ceiling):
     body = _body({'model': model, 'messages': [], 'max_tokens': 999_999})
@@ -385,6 +386,48 @@ def test_fixed_sampling_model_drops_sampling_controls():
 def test_sampling_controls_survive_on_a_model_that_accepts_them():
     body = _body({'model': 'haiku', 'messages': [], 'temperature': 0.7})
     assert body['temperature'] == 0.7
+
+
+def test_haiku_5_5_drops_sampling_controls_including_zero_temperature():
+    body = _body({'model': 'claude-haiku-5-5', 'messages': [],
+                  'temperature': 0, 'top_p': 0.9, 'top_k': 5})
+    assert not {'temperature', 'top_p', 'top_k'} & body.keys()
+
+
+@pytest.mark.parametrize('effort', ['low', 'medium', 'high', 'xhigh', 'max'])
+def test_haiku_5_5_accepts_top_level_effort_so_it_is_kept(effort):
+    body = _body({'model': 'claude-haiku-5-5', 'messages': [],
+                  'output_config': {'effort': effort}})
+    assert body['output_config'] == {'effort': effort}
+
+
+def test_haiku_5_5_keeps_adaptive_thinking():
+    body = _body({'model': 'claude-haiku-5-5', 'messages': [],
+                  'thinking': {'type': 'adaptive'}})
+    assert body['thinking'] == {'type': 'adaptive'}
+
+
+def test_haiku_4_5_still_drops_effort_and_adaptive_thinking():
+    body = _body({'model': 'claude-haiku-4-5-20251001', 'messages': [],
+                  'thinking': {'type': 'adaptive'}, 'output_config': {'effort': 'high'}})
+    assert 'thinking' not in body and 'output_config' not in body
+
+
+@pytest.mark.parametrize('effort', ['xhigh', 'max'])
+def test_haiku_5_5_drops_disabled_thinking_at_efforts_that_reject_it(effort):
+    body = _body({'model': 'claude-haiku-5-5', 'messages': [],
+                  'thinking': {'type': 'disabled'},
+                  'output_config': {'effort': effort}})
+    assert 'thinking' not in body
+    assert body['output_config'] == {'effort': effort}
+
+
+@pytest.mark.parametrize('effort', [None, 'low', 'medium', 'high'])
+def test_haiku_5_5_keeps_disabled_thinking_at_efforts_that_accept_it(effort):
+    payload = {'model': 'claude-haiku-5-5', 'messages': [], 'thinking': {'type': 'disabled'}}
+    if effort:
+        payload['output_config'] = {'effort': effort}
+    assert _body(payload)['thinking'] == {'type': 'disabled'}
 
 
 def test_clear_thinking_edit_is_dropped_when_thinking_is_inactive():
