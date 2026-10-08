@@ -184,13 +184,14 @@ def strip_volatile_system_blocks(system):
     """
     if not system or not isinstance(system, list):
         return system, False
-    kept = [b for b in system if not _is_volatile_system_block(b)]
+    kept = [b for b in system if not is_volatile_system_block(b)]
     if len(kept) == len(system):
         return system, False
     return kept, True
 
 
-def _is_volatile_system_block(block):
+def is_volatile_system_block(block):
+    """True when ``block`` is an allowlisted cache-hostile telemetry block."""
     if not isinstance(block, dict):
         return False
     text = block.get('text')

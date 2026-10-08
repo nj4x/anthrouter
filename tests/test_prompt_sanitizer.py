@@ -402,3 +402,67 @@ def test_unrecognised_volatile_block_is_flagged_not_stripped():
     assert payload['system'] == system
     assert result.dropped == 0
     assert [f['index'] for f in result.flagged] == [0]
+
+
+# ---------------------------------------------------------------------------
+# Observe-after-strip (ADR-0014)
+# ---------------------------------------------------------------------------
+
+def _billing(i):
+    return f'x-anthropic-billing-header: cc_version=2.1.245.fe7; cc_prompt_id=id-{i};'
+
+
+def _cached_system(first_text):
+    return [_block(first_text), _block(CC_PREFIX, cache_control={'type': 'ephemeral'})]
+
+
+def test_strip_mode_does_not_flag_stripped_allowlisted_block(caplog):
+    tracker = PromptVolatilityTracker(min_samples=2)
+    with caplog.at_level('WARNING', logger='anthrouter.sanitizer'):
+        for i in range(4):
+            result = sanitize_system_prompt(
+                {'system': _cached_system(_billing(i))}, 'strip', 'post-strip',
+                tracker=tracker,
+            )
+            assert result.flagged == []
+    assert 'Not stripped' not in caplog.text
+
+
+def test_warn_mode_flags_allowlisted_block_as_mode_warn(caplog):
+    tracker = PromptVolatilityTracker(min_samples=2)
+    with caplog.at_level('WARNING', logger='anthrouter.sanitizer'):
+        for i in range(4):
+            result = sanitize_system_prompt(
+                {'system': _cached_system(_billing(i))}, 'warn', 'post-warn',
+                tracker=tracker,
+            )
+    assert [f['index'] for f in result.flagged] == [0]
+    assert 'Not stripped: mode is warn.' in caplog.text
+    assert 'no allowlist match' not in caplog.text
+
+
+def test_strip_mode_flags_unlisted_block_as_no_allowlist_match(caplog):
+    tracker = PromptVolatilityTracker(min_samples=2)
+    with caplog.at_level('WARNING', logger='anthrouter.sanitizer'):
+        for i in range(4):
+            result = sanitize_system_prompt(
+                {'system': _cached_system(f'unrecognised volatile {i}')}, 'strip',
+                'post-unlisted', tracker=tracker,
+            )
+    assert [f['index'] for f in result.flagged] == [0]
+    assert 'Not stripped: no allowlist match.' in caplog.text
+    assert 'mode is warn' not in caplog.text
+
+
+def test_flagged_index_refers_to_outbound_array():
+    tracker = PromptVolatilityTracker(min_samples=2)
+    for i in range(4):
+        result = sanitize_system_prompt(
+            {'system': [
+                _block(_billing(i)),
+                _block(f'unrecognised volatile {i}'),
+                _block(CC_PREFIX, cache_control={'type': 'ephemeral'}),
+            ]},
+            'strip', 'post-index', tracker=tracker,
+        )
+    assert [f['index'] for f in result.flagged] == [0]
