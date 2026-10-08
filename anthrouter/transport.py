@@ -28,6 +28,7 @@ from .mapper.anthropic_transform import (
     ANTHROPIC_VERSION,
     COUNT_TOKENS_PATH,
     MESSAGES_PATH,
+    _rejects_system_role_in_messages,
     build_body,
     merge_betas,
 )
@@ -117,6 +118,7 @@ class AnthropicTransport:
         headers = _request_headers(credentials, betas, stream)
         url_path = self.target.path(path)
         thinking_stripped = False
+        rewrite_forced = False
 
         for attempt in range(MAX_RETRIES + 1):
             conn = self.target.connect()
@@ -168,12 +170,36 @@ class AnthropicTransport:
                 if isinstance(messages, list):
                     stripped_msgs = strip_all_thinking_blocks(messages)
                     if stripped_msgs is not messages:
-                        body_bytes = build_body({**payload, 'messages': stripped_msgs})
+                        payload = {**payload, 'messages': stripped_msgs}
+                        body_bytes = build_body(payload, aliases=aliases,
+                                                force_rewrite=rewrite_forced)
                         thinking_stripped = True
                         logger.warning(
                             'Retrying after thinking-block 400 with all thinking/'
                             'redacted_thinking blocks stripped from history')
                         continue
+
+            # A model outside _SYSTEM_ROLE_REJECTING_FAMILIES received
+            # role:'system' inline.  If it rejects that, rewrite once and retry;
+            # the WARN names the resolved model so the family can be added to
+            # the tuple (ADR-0010).  Runs before HTTP 200 is committed, so it
+            # covers both the streaming and the non-streaming path.
+            if (not rewrite_forced and resp.status == 400
+                    and b'system' in resp_body and b'role' in resp_body):
+                model = resolve_model(payload.get('model', ''), aliases=aliases)
+                messages = payload.get('messages')
+                if (not _rejects_system_role_in_messages(model)
+                        and isinstance(messages, list)
+                        and any(isinstance(m, dict) and m.get('role') == 'system'
+                                for m in messages)):
+                    body_bytes = build_body(payload, aliases=aliases, force_rewrite=True)
+                    rewrite_forced = True
+                    logger.warning(
+                        'Model %s rejected role:system in messages; retried with the '
+                        'inline-system rewrite applied — add it to '
+                        '_SYSTEM_ROLE_REJECTING_FAMILIES in anthropic_transform.py', model,
+                    )
+                    continue
 
             handle_error_response(resp.status, resp_body)
 

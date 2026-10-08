@@ -88,6 +88,27 @@ def _supports_sampling_controls(model_id: str) -> bool:
     return not any(family in model for family in _FIXED_SAMPLING_FAMILIES)
 
 
+# Families that answer HTTP 400 to role:'system' entries in messages[], matched
+# as substrings of the resolved ID.  Members get their inline system turns
+# rewritten into user turns by ``_rewrite_inline_system`` (ADR-0010).  Fails
+# open: a family absent here keeps its inline system turns, cache_control
+# included; the transport's one-shot forced-rewrite retry recovers a rejection
+# and warns so the family can be added.
+_SYSTEM_ROLE_REJECTING_FAMILIES = (
+    'sonnet-4-6', 'claude-4-5-sonnet', 'claude-sonnet-4-6', 'claude-haiku-4-5-20251001', 'haiku',
+)
+
+
+def _rejects_system_role_in_messages(model_id: str) -> bool:
+    """Return True iff the resolved model rejects role:'system' in messages[].
+
+    Sonnet 5.5 and Opus 5.5 accept inline system turns natively and receive
+    them unchanged.
+    """
+    model = model_id.lower()
+    return any(family in model for family in _SYSTEM_ROLE_REJECTING_FAMILIES)
+
+
 # Long-context beta tokens, e.g. 'context-1m-2025-08-07'.  Prefix-matched so the
 # gate survives date-stamp revisions.
 _LONG_CONTEXT_BETA_PREFIX = 'context-1m'
@@ -212,15 +233,113 @@ def _strip_per_message_effort(body: dict) -> None:
                  dropped, body.get('model'))
 
 
+def _stringify_content(content) -> str:
+    """Flatten an Anthropic message ``content`` to plain text.
+
+    A string is returned as-is; a list of blocks is reduced to its ``type=='text'``
+    block texts joined by newlines.  Used to rewrite inline ``role:'system'``
+    turns into user-turn reminder blocks.
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = [
+            blk['text'] for blk in content
+            if isinstance(blk, dict) and blk.get('type') == 'text'
+            and isinstance(blk.get('text'), str)
+        ]
+        return '\n'.join(parts)
+    return ''
+
+
+def _system_message_cache_control(message: dict):
+    """Return the last ``cache_control`` on an inline system message, or None.
+
+    Checked at message level first, then on each text block, so a block-level
+    breakpoint (the shape Claude Code 5.x sends) wins.
+    """
+    found = message.get('cache_control')
+    content = message.get('content')
+    if isinstance(content, list):
+        for blk in content:
+            if isinstance(blk, dict) and blk.get('type') == 'text' and 'cache_control' in blk:
+                found = blk['cache_control']
+    return found
+
+
+def _has_tool_use(message: dict) -> bool:
+    content = message.get('content')
+    return isinstance(content, list) and any(
+        isinstance(blk, dict) and blk.get('type') == 'tool_use' for blk in content
+    )
+
+
+def _rewrite_inline_system(messages: list, model: str) -> list:
+    """Rewrite inline role:'system' messages as user-turn reminder blocks (ADR-0010).
+
+    Each system message becomes one ``<system-reminder>``-wrapped text block
+    carrying the message's ``cache_control``.  The block is appended to the user
+    message directly before it; after an assistant ``tool_use`` turn it is
+    dropped, because a user turn there would separate the tool call from its
+    result; anywhere else it becomes a standalone user message.  The
+    message-level ``output_config`` is never copied.  Returns the input list
+    itself when it holds no system message, otherwise a new list; the caller's
+    messages are never mutated.
+    """
+    if not any(isinstance(m, dict) and m.get('role') == 'system' for m in messages):
+        return messages
+    out: list = []
+    for msg in messages:
+        if not (isinstance(msg, dict) and msg.get('role') == 'system'):
+            out.append(msg)
+            continue
+        if 'output_config' in msg:
+            logger.debug(
+                'Dropped message-level output_config from inline system message for model %s',
+                model,
+            )
+        text = _stringify_content(msg.get('content'))
+        if not text:
+            continue
+        block = {'type': 'text', 'text': f'<system-reminder>\n{text}\n</system-reminder>'}
+        cache_control = _system_message_cache_control(msg)
+        if cache_control is not None:
+            block['cache_control'] = cache_control
+
+        prev = out[-1] if out else None
+        if isinstance(prev, dict) and prev.get('role') == 'user':
+            content = prev.get('content')
+            if isinstance(content, str):
+                content = [{'type': 'text', 'text': content}] if content else []
+            elif not isinstance(content, list):
+                content = []
+            out[-1] = {**prev, 'content': [*content, block]}
+        elif isinstance(prev, dict) and prev.get('role') == 'assistant' and _has_tool_use(prev):
+            logger.warning(
+                'Dropped inline system message after an assistant tool_use turn for model %s '
+                '(cache_control=%s); a user turn there would split the tool call from its result',
+                model, cache_control is not None,
+            )
+        else:
+            out.append({'role': 'user', 'content': [block]})
+    return out
+
+
 _INTERNAL_KEYS = frozenset({'_anthropic_beta', '_anthproxy_internal_classifier'})
 
 
-def build_body(payload: dict, aliases: dict[str, str] | None = None) -> bytes:
+def build_body(payload: dict, aliases: dict[str, str] | None = None, *,
+               force_rewrite: bool = False) -> bytes:
     """Serialize the outbound request body.
 
     Internal keys are removed, the model is resolved, and fields the resolved
     model would reject are dropped.  Everything else crosses as the client sent
     it.
+
+    Args:
+        force_rewrite: rewrite inline role:'system' messages regardless of
+            ``_rejects_system_role_in_messages``; set by the transport when a
+            model outside ``_SYSTEM_ROLE_REJECTING_FAMILIES`` rejected them.
     """
     body = {k: v for k, v in payload.items() if k not in _INTERNAL_KEYS}
     body['model'] = resolve_model(payload.get('model', ''), aliases=aliases)
@@ -281,5 +400,15 @@ def build_body(payload: dict, aliases: dict[str, str] | None = None) -> bytes:
         if dropped:
             logger.debug('Dropped unsupported sampling controls for model %s: %s',
                          body['model'], ','.join(sorted(dropped)))
+
+    # Last because it is the only gate that touches messages[]; the gates above
+    # touch only top-level fields, so the two never interact.  Never folded into
+    # top-level system: that grows system[] one block per turn and defeats the
+    # prompt cache.  The rewrite keeps each message's position and breakpoint,
+    # so the cached prefix stays append-only (ADR-0010).
+    messages = body.get('messages')
+    if (force_rewrite or _rejects_system_role_in_messages(body['model'])) \
+            and isinstance(messages, list):
+        body['messages'] = _rewrite_inline_system(messages, body['model'])
 
     return json.dumps(body).encode('utf-8')
