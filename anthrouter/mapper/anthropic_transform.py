@@ -358,7 +358,8 @@ def _rewrite_inline_system(messages: list, model: str) -> list:
     return out
 
 
-_INTERNAL_KEYS = frozenset({'_anthropic_beta', '_anthproxy_internal_classifier'})
+_CLASSIFIER_SENTINEL_KEY = '_anthproxy_internal_classifier'
+_INTERNAL_KEYS = frozenset({'_anthropic_beta', _CLASSIFIER_SENTINEL_KEY})
 
 
 def build_body(payload: dict, aliases: dict[str, str] | None = None, *,
@@ -400,6 +401,16 @@ def build_body(payload: dict, aliases: dict[str, str] | None = None, *,
                 body.pop('output_config', None)
             logger.debug('Dropped unsupported output_config.effort for model %s',
                          body['model'])
+
+    # Haiku 5.5 thinks by default and thinking tokens count against max_tokens, so
+    # the classifier asks for low effort.  Keyed on the inbound sentinel, read before
+    # _INTERNAL_KEYS is stripped from body; client payloads never take this path.
+    if payload.get(_CLASSIFIER_SENTINEL_KEY) and 'haiku-5-5' in body['model']:
+        oc = body.get('output_config')
+        oc = dict(oc) if isinstance(oc, dict) else {}
+        if oc.get('effort') is None:
+            oc['effort'] = 'low'
+        body['output_config'] = oc
 
     if not _supports_per_message_effort(body['model'], payload.get('_anthropic_beta') or []):
         _strip_per_message_effort(body)

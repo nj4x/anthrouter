@@ -238,8 +238,10 @@ def _prompt_log_preview(text: str) -> str:
         return preview[:_LOG_PROMPT_LIMIT] + '…'
     return preview
 
-# Classifier response constraints
-_CLASSIFIER_MAX_TOKENS = 8
+# Classifier response constraints.  A ceiling sized for a model that thinks
+# before answering (Haiku 5.5): thinking tokens count against max_tokens, and
+# unused budget costs nothing.
+_CLASSIFIER_MAX_TOKENS = 256
 _CLASSIFIER_TEMPERATURE = 0.0
 
 _CLASSIFIER_SYSTEM = (
@@ -328,9 +330,9 @@ _CLASSIFIER_SYSTEM_JSON = (
     'Reply with ONLY the JSON object. No other text.'
 )
 
-# Larger token budget for the JSON-format response.  The JSON payload
-# {"score":42} is ~5 tokens; 40 gives ample headroom.
-_CLASSIFIER_MAX_TOKENS_JSON = 40
+# Ceiling for the JSON-format response.  The JSON payload {"score":42} is ~5
+# tokens; the rest is headroom for thinking tokens, which count against max_tokens.
+_CLASSIFIER_MAX_TOKENS_JSON = 256
 
 # Appended to _CLASSIFIER_SYSTEM_JSON when the classifier payload includes
 # prior_response_summary so the classifier knows to weight that context.
@@ -1025,8 +1027,8 @@ def build_classifier_payload(
 
     When ``config.auto_model_routing_confidence_bump`` is True, uses the JSON
     system prompt (``_CLASSIFIER_SYSTEM_JSON``) and a larger ``max_tokens``
-    budget to accommodate the structured response.  The existing one-word prompt
-    and four-token budget are untouched when confidence bump is off.
+    budget to accommodate the structured response.  The one-word prompt and its
+    max_tokens ceiling are untouched when confidence bump is off.
 
     When ``prior_response_summary`` is provided it is injected into the routing
     summary JSON and the system prompt is extended with the prior-context suffix.
