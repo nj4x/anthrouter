@@ -10,7 +10,7 @@ Coverage:
 - Non-text final-user blocks counted but not serialized
 - Compact classifier JSON excludes system, tool schemas, metadata, history text
 - No hard overrides: thinking and effort are classifier signals, not bypasses
-- Classifier payload: correct model, max_tokens=4, temperature=0, no tools/thinking
+- Classifier payload: correct model, max_tokens=256, temperature=0, no tools/thinking
 - Parser: only trivial/standard/deep accepted; everything else → None
 - Routing decisions: trivial→haiku, standard→sonnet, deep→opus
 - Classifier failure / invalid output keeps the original requested model
@@ -1323,9 +1323,14 @@ class TestBuildClassifierPayload:
         cp = build_classifier_payload(self._make_summary(), cfg)
         assert cp['model'] == 'haiku'
 
-    def test_max_tokens_is_tiny(self):
+    def test_max_tokens_leaves_room_for_thinking(self):
         cp = build_classifier_payload(self._make_summary(), _config())
-        assert cp['max_tokens'] == 8
+        assert cp['max_tokens'] == 256
+
+    def test_max_tokens_leaves_room_for_thinking_in_json_format(self):
+        cp = build_classifier_payload(
+            self._make_summary(), _config(confidence_bump=True))
+        assert cp['max_tokens'] == 256
 
     def test_temperature_is_zero(self):
         cp = build_classifier_payload(self._make_summary(), _config())
