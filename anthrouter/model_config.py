@@ -12,7 +12,7 @@ MODEL_ALIASES: dict[str, str] = {
     'fable': 'claude-fable-5-1',
     'opus': 'claude-opus-5-5',
     'sonnet': 'claude-sonnet-5-5',
-    'haiku': 'claude-haiku-4-5-20251001',
+    'haiku': 'claude-haiku-5-5',
 }
 
 # Tier -> (input, output, cache_read, cache_write) USD per million tokens.
@@ -44,7 +44,7 @@ CONTEXT_SUFFIXES: tuple[str, ...] = (':1m', '[1m]')
 
 def resolve_model(model: str, aliases: dict[str, str] | None = None) -> str:
     """Resolve an alias or full model ID to the upstream Anthropic model ID.
-    
+
     Args:
         model: The model alias or full model ID to resolve.
         aliases: Optional dict of alias -> model mappings that overlay on top of
@@ -52,12 +52,12 @@ def resolve_model(model: str, aliases: dict[str, str] | None = None) -> str:
     """
     if not model:
         raise AnthropicRequestError('model is required', status_code=400)
-    
+
     # Merge aliases: start with defaults, overlay caller-supplied entries
     effective_aliases = MODEL_ALIASES
     if aliases:
         effective_aliases = {**MODEL_ALIASES, **aliases}
-    
+
     if model in effective_aliases:
         return effective_aliases[model]
     for suffix in CONTEXT_SUFFIXES:
