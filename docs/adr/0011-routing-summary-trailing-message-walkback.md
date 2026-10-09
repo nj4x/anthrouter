@@ -3,6 +3,8 @@ artifact-type: adr
 lineage-rules: root
 ---
 
+**Status**: Approved
+
 # Routing summary walks back over trailing non-user messages
 
 `build_routing_summary` returned `None` when the last entry in `messages[]` was not `role:'user'`, triggering `reason_code='missing_final_user_text'` and bypassing classification. Modern Claude models (Sonnet 5.5, Opus 5.5) append `role:'system'` messages at the end of tool-call loops, so nearly every turn failed the guard and fell back to the tier cache. This degraded routing decisions to the cache alone, even for turns where the client sent fresh user text in an earlier message.

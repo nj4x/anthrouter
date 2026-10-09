@@ -3,6 +3,8 @@ artifact-type: adr
 lineage-rules: root
 ---
 
+**Status**: Approved
+
 # Tier-cache key includes the requested model's tier
 
 The tier-cache key was `(session_key, first-user-message-hash)` — the same `ctx_key` used for context-floor tracking. A tier written when the client requested a Haiku-tier model was stored under the same key and replayed when the client later requested a Sonnet-tier model. `_cap_cached_tier` prevented the cached entry from *upgrading* the requested model, but it intentionally allowed downgrades: a cached `'haiku'` tier was kept when the requested tier was `'sonnet'`, routing the request to Haiku.

@@ -3,6 +3,8 @@ artifact-type: adr
 lineage-rules: root
 ---
 
+**Status**: Approved
+
 # Workday-aware pace baseline for the OAuth usage meter
 
 The OAuth usage meter's pace baseline (`month_elapsed_pct`) was computed as a fraction of the calendar UTC month elapsed, treating all days uniformly. Because actual spend is concentrated on workdays, this overstated overuse by roughly 2.7× early in the month. We replaced it with a workday-aware proration (Mon–Fri in the configured local timezone) as the default, keeping calendar-day proration as an opt-in second mode.

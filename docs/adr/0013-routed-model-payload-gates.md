@@ -3,6 +3,8 @@ artifact-type: adr
 lineage-rules: root
 ---
 
+**Status**: Approved
+
 # Routed-model payload gates strip fields invalid for downtiered models
 
 Model-tier routing changes the requested model to a cheaper tier (haiku, sonnet) or vice versa. Four payload fields valid for the client's requested tier can be rejected by the routed tier with HTTP 400:

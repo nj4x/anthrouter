@@ -3,6 +3,8 @@ artifact-type: adr
 lineage-rules: root
 ---
 
+**Status**: Approved
+
 # ADR-0004: Admin request-detail panel exposes full prompt/tools content unconditionally
 
 ## Context

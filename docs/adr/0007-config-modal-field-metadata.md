@@ -3,6 +3,8 @@ artifact-type: adr
 lineage-rules: root
 ---
 
+**Status**: Approved
+
 # ADR-0007: Config modal field metadata (hints, typed inputs, server-side enum enforcement)
 
 ## Status

@@ -3,6 +3,8 @@ artifact-type: adr
 lineage-rules: root
 ---
 
+**Status**: Approved
+
 # Volatility tracker observes the post-strip system prompt
 
 The volatility tracker (`prompt_volatility.py`) observes system blocks and flags those whose values change on every request within a session, indicating cache-hostile variation. When the sanitizer is enabled and strips allowlisted blocks from `payload['system']`, the tracker must observe the *post-strip* system to avoid false positives.

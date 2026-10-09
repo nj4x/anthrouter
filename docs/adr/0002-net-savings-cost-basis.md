@@ -3,6 +3,8 @@ artifact-type: adr
 lineage-rules: root
 ---
 
+**Status**: Approved
+
 # ADR-0002: Net savings is a per-request cost delta, not a fixed baseline
 
 ## Context

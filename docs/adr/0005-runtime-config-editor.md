@@ -3,6 +3,8 @@ artifact-type: adr
 lineage-rules: root
 ---
 
+**Status**: Approved
+
 # ADR-0005: Runtime configuration editor (admin UI)
 
 ## Status

@@ -3,6 +3,8 @@ artifact-type: adr
 lineage-rules: root
 ---
 
+**Status**: Approved
+
 # ADR-0001: Installer config-mutation policy and chain topology
 
 ## Status

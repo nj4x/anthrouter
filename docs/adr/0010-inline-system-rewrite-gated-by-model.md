@@ -3,6 +3,8 @@ artifact-type: adr
 lineage-rules: root
 ---
 
+**Status**: Approved
+
 # Inline role:'system' messages are rewritten as user-turn blocks, gated by model
 
 anthrouter never had the unconditional system-role fold that anthproxy inherited from Sonnet 4.6's rejection of inline `role:'system'` messages. This decision adds two related pieces: a per-model gate that identifies rejecting models, and an inline rewrite for those models that preserves `cache_control` breakpoints by embedding system text into adjacent user messages instead of folding it into top-level `system[]`.

@@ -3,6 +3,8 @@ artifact-type: adr
 status: accepted
 ---
 
+**Status**: Approved
+
 # In-place update mechanism (update.sh)
 
 anthrouter installs as a pip snapshot into `~/.anthrouter/venv` — not a live git checkout — so the `git pull + unpatch/repatch` update pattern used by caveman-kit (ADR 0007 there) and peer-agent-kit (ADRs 0080–0084 there) does not transfer. Unlike those kits, anthrouter's config surfaces (`settings.json` / `caveman.yaml` wiring, shell-profile allowlist) are version-independent: they point at `127.0.0.1:8083` regardless of which version runs, so an update never needs an unpatch/repatch cycle. What *does* change across versions is the venv contents and, potentially, the DB schema (which the server already migrates itself via `PRAGMA user_version` on startup).

@@ -3,6 +3,8 @@ artifact-type: adr
 lineage-rules: root
 ---
 
+**Status**: Approved
+
 # TLS verification delegates to the OS trust store by default
 
 `--tls-system-trust` shipped as an opt-in flag with `truststore` as an optional extra. Every fresh install on a TLS-intercepting corporate network failed all upstream calls until the user discovered the flag. We flip the default to on and make `truststore` a hard dependency.

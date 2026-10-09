@@ -3,6 +3,8 @@ artifact-type: adr
 lineage-rules: root
 ---
 
+**Status**: Approved
+
 # ADR-0003: Reason code reflects the post-blend routing outcome, not the raw classifier score
 
 ## Context
