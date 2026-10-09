@@ -48,6 +48,7 @@ class _Decision:
             'classifier_summary_json': '{"task":"trivial"}',
             'classifier_raw_response': 'trivial',
             'classifier_format': 'label',
+            'classifier_stop_reason': None,
         }
         self.__dict__.update({**defaults, **kwargs})
 

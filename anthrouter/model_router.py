@@ -427,6 +427,7 @@ class ModelRoutingDecision:
     classifier_summary_json: str | None = None # bounded JSON sent to the classifier
     classifier_raw_response: str | None = None # full concatenated text from classifier response blocks
     classifier_format: str | None = None       # 'standard' or 'json' response format
+    classifier_stop_reason: str | None = None  # stop_reason of the classifier response; None until populated
     # Uncapped resolved tier for the affirmation_classified path only.
     # The handler writes this (not routed_model) to the tier cache so subsequent
     # turns can apply their own cap.  None on all other paths.

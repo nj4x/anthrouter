@@ -1,7 +1,7 @@
 """SQLite persistence for the anthrouter observability UI.
 
-Schema version: 1 (single migration; this schema is not ported from anthproxy's
-13-migration history).  Three tables:
+Schema version: 4 (migrations 0-3, tracked via ``PRAGMA user_version``; this
+schema is not ported from anthproxy's 13-migration history).  Three tables:
 
 ``requests``
     One row per dispatched request, with the routing decision folded in.
@@ -31,7 +31,7 @@ from .model_tier import classify_model_tier
 
 logger = logging.getLogger(__name__)
 
-_SCHEMA_VERSION = 3
+_SCHEMA_VERSION = 4
 
 _RETENTION_INTERVAL_SECS = 24 * 3600
 _RETENTION_CHUNK = 1000
@@ -162,7 +162,26 @@ def _apply_migration_2(conn: sqlite3.Connection) -> None:
     conn.execute('ALTER TABLE requests ADD COLUMN routing_weighted_score REAL')
 
 
-_MIGRATIONS = {0: _apply_migration_0, 1: _apply_migration_1, 2: _apply_migration_2}
+def _apply_migration_3(conn: sqlite3.Connection) -> None:
+    """Add the classifier response stop_reason diagnostic column.
+
+    The column-exists guard is load-bearing: Python's default sqlite3 isolation
+    autocommits DDL outside the ``with conn:`` transaction, so the ALTER and the
+    ``user_version`` bump in ``ensure_schema`` are not atomic.  An interrupted
+    start can leave the column present at version 3, and an unguarded re-run
+    would fail with "duplicate column name".
+    """
+    columns = {row[1] for row in conn.execute('PRAGMA table_info(requests)')}
+    if 'classifier_stop_reason' not in columns:
+        conn.execute('ALTER TABLE requests ADD COLUMN classifier_stop_reason TEXT')
+
+
+_MIGRATIONS = {
+    0: _apply_migration_0,
+    1: _apply_migration_1,
+    2: _apply_migration_2,
+    3: _apply_migration_3,
+}
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
@@ -309,10 +328,11 @@ class RequestDB:
                     response_text, ratelimit_requests_remaining,
                     ratelimit_tokens_remaining, ratelimit_input_tokens_remaining,
                     ratelimit_output_tokens_remaining, ratelimit_reset_at,
-                    system_prompt_score, user_prompt_score, routing_weighted_score
+                    system_prompt_score, user_prompt_score, routing_weighted_score,
+                    classifier_stop_reason
                 ) VALUES (
                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                 )
                 """,
                 (
@@ -353,6 +373,7 @@ class RequestDB:
                     getattr(routing_decision, 'system_prompt_score', None),
                     getattr(routing_decision, 'user_prompt_score', None),
                     getattr(routing_decision, 'routing_weighted_score', None),
+                    routing_decision.classifier_stop_reason,
                 ),
             )
             request_id: int = cur.lastrowid
