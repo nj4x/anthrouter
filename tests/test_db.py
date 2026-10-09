@@ -1,6 +1,7 @@
 """Trimmed SQLite layer: schema, recording, FTS search, ref-counting, retention."""
 
 import dataclasses
+import sqlite3
 
 import pytest
 
@@ -19,6 +20,7 @@ class FakeDecision:
     classifier_summary_json: str | None = '{"user":"fix a typo"}'
     classifier_raw_response: str | None = 'trivial'
     classifier_format: str | None = 'standard'
+    classifier_stop_reason: str | None = None
     system_prompt_score: float | None = None
     user_prompt_score: float | None = None
     routing_weighted_score: float | None = None
@@ -55,8 +57,47 @@ def _record(store, **kwargs):
 # Schema
 # ---------------------------------------------------------------------------
 
-def test_schema_version_is_three(db):
-    assert db._conn.execute('PRAGMA user_version').fetchone()[0] == 3
+def test_schema_version_is_four(db):
+    assert db._conn.execute('PRAGMA user_version').fetchone()[0] == 4
+
+
+def _requests_columns(conn):
+    return {r[1] for r in conn.execute('PRAGMA table_info(requests)').fetchall()}
+
+
+def _make_version_3_db(path, *, keep_column=False):
+    store = RequestDB(path)
+    if not keep_column:
+        store._conn.execute('ALTER TABLE requests DROP COLUMN classifier_stop_reason')
+    store._conn.execute('PRAGMA user_version = 3')
+    store.close()
+
+
+def test_version_3_db_gains_stop_reason_column_on_open(tmp_path):
+    path = str(tmp_path / 'v3.db')
+    _make_version_3_db(path)
+    raw = sqlite3.connect(path)
+    assert 'classifier_stop_reason' not in _requests_columns(raw)
+    raw.close()
+
+    store = RequestDB(path)
+    assert 'classifier_stop_reason' in _requests_columns(store._conn)
+    assert store._conn.execute('PRAGMA user_version').fetchone()[0] == 4
+    store.close()
+
+
+def test_fresh_db_has_stop_reason_column(db):
+    assert 'classifier_stop_reason' in _requests_columns(db._conn)
+
+
+def test_migration_survives_column_already_present_at_version_3(tmp_path):
+    path = str(tmp_path / 'interrupted.db')
+    _make_version_3_db(path, keep_column=True)
+
+    store = RequestDB(path)
+    assert store._conn.execute('PRAGMA user_version').fetchone()[0] == 4
+    assert 'classifier_stop_reason' in _requests_columns(store._conn)
+    store.close()
 
 
 def test_only_the_three_tables_exist(db):
@@ -96,6 +137,16 @@ def test_record_returns_rowid_and_stores_decision(db):
     assert row['model_tier'] == 'haiku'
     assert row['applied'] == 1
     assert row['classifier_summary_json'] == '{"user":"fix a typo"}'
+
+
+def test_classifier_stop_reason_round_trips(db):
+    request_id = _record(db, routing_decision=FakeDecision(classifier_stop_reason='max_tokens'))
+    assert db.get_request(request_id)['classifier_stop_reason'] == 'max_tokens'
+
+
+def test_absent_classifier_stop_reason_is_null(db):
+    request_id = _record(db, routing_decision=FakeDecision(classifier_stop_reason=None))
+    assert db.get_request(request_id)['classifier_stop_reason'] is None
 
 
 def test_missing_decision_records_nothing(db):
