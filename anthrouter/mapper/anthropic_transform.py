@@ -17,6 +17,7 @@ import json
 import logging
 
 from ..model_config import MODEL_OUTPUT_LIMITS, resolve_model
+from .common import CLASSIFIER_SENTINEL_KEY
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +34,11 @@ def _is_pre_5_5_haiku(model_id: str) -> bool:
     """
     model = model_id.lower()
     return 'haiku' in model and 'haiku-5-5' not in model
+
+
+def _is_haiku_5_5(model_id: str) -> bool:
+    """True for any Haiku 5.5 ID, dated variants and mixed case included."""
+    return 'haiku-5-5' in model_id.lower()
 
 
 def _supports_effort(model_id: str) -> bool:
@@ -358,8 +364,7 @@ def _rewrite_inline_system(messages: list, model: str) -> list:
     return out
 
 
-_CLASSIFIER_SENTINEL_KEY = '_anthproxy_internal_classifier'
-_INTERNAL_KEYS = frozenset({'_anthropic_beta', _CLASSIFIER_SENTINEL_KEY})
+_INTERNAL_KEYS = frozenset({'_anthropic_beta', CLASSIFIER_SENTINEL_KEY})
 
 
 def build_body(payload: dict, aliases: dict[str, str] | None = None, *,
@@ -405,7 +410,7 @@ def build_body(payload: dict, aliases: dict[str, str] | None = None, *,
     # Haiku 5.5 thinks by default and thinking tokens count against max_tokens, so
     # the classifier asks for low effort.  Keyed on the inbound sentinel, read before
     # _INTERNAL_KEYS is stripped from body; client payloads never take this path.
-    if payload.get(_CLASSIFIER_SENTINEL_KEY) and 'haiku-5-5' in body['model']:
+    if payload.get(CLASSIFIER_SENTINEL_KEY) and _is_haiku_5_5(body['model']):
         oc = body.get('output_config')
         oc = dict(oc) if isinstance(oc, dict) else {}
         if oc.get('effort') is None:

@@ -17,12 +17,14 @@ from anthrouter.model_router import (
     RoutingSummary,
     build_classifier_payload,
     build_system_prompt_classifier_payload,
+    route_model,
 )
 from anthrouter.transport import (
     AnthropicTransport,
     _request_headers,
     extract_client_credentials,
 )
+from tests.test_model_router import _payload_with_prior, _target, _text_response
 
 
 # ---------------------------------------------------------------------------
@@ -202,7 +204,9 @@ _CLASSIFIER_SENTINEL = '_anthproxy_internal_classifier'
 
 
 def _classifier_body(model, **extra):
-    return _body({'model': model, 'messages': [], _CLASSIFIER_SENTINEL: True, **extra})
+    body = _body({'model': model, 'messages': [], _CLASSIFIER_SENTINEL: True, **extra})
+    assert _CLASSIFIER_SENTINEL not in body
+    return body
 
 
 def test_haiku_5_5_classifier_payload_gains_low_effort():
@@ -255,9 +259,20 @@ def test_client_effort_on_haiku_5_5_request_is_kept():
     assert body['output_config'] == {'effort': 'high'}
 
 
-def test_client_effort_on_haiku_4_5_classifier_payload_is_still_stripped():
+def test_classifier_payload_effort_on_haiku_4_5_is_still_stripped():
     body = _classifier_body('claude-haiku-4-5', output_config={'effort': 'high', 'other': 1})
     assert body['output_config'] == {'other': 1}
+
+
+def test_client_effort_on_haiku_4_5_request_is_stripped():
+    body = _body({'model': 'claude-haiku-4-5', 'messages': [],
+                  'output_config': {'effort': 'high', 'other': 1}})
+    assert body['output_config'] == {'other': 1}
+
+
+def test_classifier_gate_matches_haiku_5_5_case_insensitively():
+    body = _classifier_body('Claude-Haiku-5-5')
+    assert body['output_config'] == {'effort': 'low'}
 
 
 def test_haiku_5_5_system_prompt_classifier_payload_gains_low_effort():
@@ -268,14 +283,15 @@ def test_haiku_5_5_system_prompt_classifier_payload_gains_low_effort():
 
 
 def test_haiku_5_5_affirmation_classifier_payload_gains_low_effort():
-    body = _body({
-        _CLASSIFIER_SENTINEL: True,
-        'model': 'claude-haiku-5-5',
-        'max_tokens': 256,
-        'temperature': 0.0,
-        'system': 'Reply with ONLY the JSON object. No other text.',
-        'messages': [{'role': 'user', 'content': '{"final_user_text":"yes"}'}],
-    })
+    target = _target(classifier_model='claude-haiku-5-5')
+    del target.backend.send_classifier_message
+    target.backend.send_message.return_value = _text_response('standard')
+    route_model(_payload_with_prior('yes', 'Plan the refactor in three steps'),
+                target, {}, cached_session_tier=None)
+    captured = target.backend.send_message.call_args[0][0]
+    assert captured[_CLASSIFIER_SENTINEL] is True
+    body = _body(captured)
+    assert body['model'] == 'claude-haiku-5-5'
     assert body['output_config'] == {'effort': 'low'}
     assert _CLASSIFIER_SENTINEL not in body
 

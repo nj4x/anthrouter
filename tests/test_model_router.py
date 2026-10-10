@@ -25,6 +25,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from anthrouter.mapper import AnthropicRequestError
 from anthrouter.model_router import (
     _CLASSIFIER_SYSTEM,
     _TRAILING_SCAN_LIMIT,
@@ -1323,14 +1324,19 @@ class TestBuildClassifierPayload:
         cp = build_classifier_payload(self._make_summary(), cfg)
         assert cp['model'] == 'haiku'
 
+    def _routed_classifier_payload(self, confidence_bump=False):
+        backend = MagicMock()
+        del backend.send_classifier_message
+        backend.send_message.return_value = _text_response('standard')
+        target = _target(backend=backend, routing=True, confidence_bump=confidence_bump)
+        route_model(_payload(model='sonnet', content='fix the bug'), target, {})
+        return backend.send_message.call_args[0][0]
+
     def test_max_tokens_leaves_room_for_thinking(self):
-        cp = build_classifier_payload(self._make_summary(), _config())
-        assert cp['max_tokens'] == 256
+        assert self._routed_classifier_payload()['max_tokens'] == 256
 
     def test_max_tokens_leaves_room_for_thinking_in_json_format(self):
-        cp = build_classifier_payload(
-            self._make_summary(), _config(confidence_bump=True))
-        assert cp['max_tokens'] == 256
+        assert self._routed_classifier_payload(confidence_bump=True)['max_tokens'] == 256
 
     def test_temperature_is_zero(self):
         cp = build_classifier_payload(self._make_summary(), _config())
@@ -3751,9 +3757,12 @@ class TestClassifierTransparencyFields:
     """New fields: classifier_model, classifier_summary_json,
     classifier_raw_response, classifier_format.
 
-    All 4 remain None on non-classifier paths.  On a successful LLM call they
-    are populated with the model ID, the bounded JSON sent, the full text
-    concatenated from the response, and the format string ('standard'/'json').
+    Non-classifier paths leave all four None.  A successful LLM call populates
+    them with the model ID, the bounded JSON sent, the text concatenated from the
+    response blocks, and the format string ('standard'/'json').  A failed or
+    invalid call populates them too, with a bounded preview of the exception or
+    of the response text in classifier_raw_response.  classifier_stop_reason is
+    set only on classifier_invalid.
     """
 
     # ------------------------------------------------------------------
@@ -3934,10 +3943,9 @@ class TestClassifierTransparencyFields:
         messages = [r.getMessage() for r in caplog.records
                     if r.name == 'anthrouter.model_router' and 'invalid score' in r.getMessage()]
         assert len(messages) == 1
-        assert 'max_tokens' in messages[0]
-        assert 'thinking' in messages[0]
-        assert 'input_tokens' in messages[0]
-        assert '120' in messages[0]
+        assert messages[0].endswith(
+            "raw='<non-text>' stop_reason='max_tokens' block_types=['thinking'] "
+            "usage={'input_tokens': 120, 'output_tokens': 300}")
 
     def test_classifier_failed_http_status_preview_truncates_tail(self, monkeypatch):
         monkeypatch.setattr('anthrouter.model_router.time.sleep', lambda _s: None)
@@ -3966,6 +3974,27 @@ class TestClassifierTransparencyFields:
         target = _target(backend=backend, routing=True)
         decision = route_model(_payload(model='sonnet', content='fix the bug'), target, {})
         assert decision.classifier_raw_response == 'ConnectionError: socket closed'
+
+    def test_classifier_failed_connection_error_has_no_http_prefix(self, monkeypatch):
+        monkeypatch.setattr('anthrouter.model_router.time.sleep', lambda _s: None)
+        backend = MagicMock()
+        del backend.send_classifier_message
+        backend.send_message.side_effect = AnthropicRequestError(
+            'upstream unreachable', error_type='api_error',
+            status_code=502, connection_error=True)
+        target = _target(backend=backend, routing=True)
+        decision = route_model(_payload(model='sonnet', content='fix the bug'), target, {})
+        assert decision.reason_code == 'classifier_failed'
+        assert decision.classifier_raw_response == 'AnthropicRequestError: upstream unreachable'
+
+    def test_classifier_failed_preview_flattens_carriage_returns_and_newlines(self, monkeypatch):
+        monkeypatch.setattr('anthrouter.model_router.time.sleep', lambda _s: None)
+        backend = MagicMock()
+        del backend.send_classifier_message
+        backend.send_message.side_effect = RuntimeError('upstream\r\n{"error": 1}\nend')
+        target = _target(backend=backend, routing=True)
+        decision = route_model(_payload(model='sonnet', content='fix the bug'), target, {})
+        assert decision.classifier_raw_response == 'RuntimeError: upstream  {"error": 1} end'
 
     def test_classifier_failed_empty_message_gives_class_name_only(self, monkeypatch):
         monkeypatch.setattr('anthrouter.model_router.time.sleep', lambda _s: None)
