@@ -3869,7 +3869,8 @@ class TestClassifierTransparencyFields:
         assert decision.classifier_raw_response is None
         assert decision.classifier_format is None
 
-    def test_classifier_failed_fields_are_none(self):
+    def test_classifier_failed_carries_evidence(self, monkeypatch):
+        monkeypatch.setattr('anthrouter.model_router.time.sleep', lambda _s: None)
         backend = MagicMock()
         del backend.send_classifier_message
         backend.send_message.side_effect = RuntimeError('network error')
@@ -3877,12 +3878,17 @@ class TestClassifierTransparencyFields:
         payload = _payload(model='sonnet', content='fix the bug')
         decision = route_model(payload, target, {})
         assert decision.reason_code == 'classifier_failed'
-        assert decision.classifier_model is None
-        assert decision.classifier_summary_json is None
-        assert decision.classifier_raw_response is None
-        assert decision.classifier_format is None
+        assert decision.applied is False
+        assert decision.routed_model == 'sonnet'
+        assert decision.classifier_model == 'haiku'
+        assert decision.classifier_summary_json is not None
+        assert decision.classifier_format == 'standard'
+        assert decision.classifier_raw_response == 'RuntimeError: network error'
+        assert decision.classifier_input_tokens == 0
+        assert decision.classifier_output_tokens == 0
+        assert decision.classifier_stop_reason is None
 
-    def test_classifier_invalid_fields_are_none(self):
+    def test_classifier_invalid_carries_evidence(self):
         backend = MagicMock()
         del backend.send_classifier_message
         backend.send_message.return_value = _text_response('something invalid here')
@@ -3890,10 +3896,131 @@ class TestClassifierTransparencyFields:
         payload = _payload(model='sonnet', content='fix the bug')
         decision = route_model(payload, target, {})
         assert decision.reason_code == 'classifier_invalid'
-        assert decision.classifier_model is None
-        assert decision.classifier_summary_json is None
-        assert decision.classifier_raw_response is None
-        assert decision.classifier_format is None
+        assert decision.classifier_model == 'haiku'
+        assert decision.classifier_summary_json is not None
+        assert decision.classifier_format == 'standard'
+        assert decision.classifier_raw_response == 'something invalid here'
+        assert decision.classifier_stop_reason == 'end_turn'
+
+    def test_classifier_invalid_thinking_only_response(self):
+        backend = MagicMock()
+        del backend.send_classifier_message
+        backend.send_message.return_value = {
+            'content': [{'type': 'thinking', 'thinking': 'deliberating'}],
+            'stop_reason': 'max_tokens',
+            'usage': {'input_tokens': 120, 'output_tokens': 300},
+        }
+        target = _target(backend=backend, routing=True)
+        decision = route_model(_payload(model='sonnet', content='fix the bug'), target, {})
+        assert decision.reason_code == 'classifier_invalid'
+        assert decision.routed_model == 'sonnet'
+        assert decision.classifier_model == 'haiku'
+        assert decision.classifier_raw_response == '<non-text>'
+        assert decision.classifier_input_tokens == 120
+        assert decision.classifier_output_tokens == 300
+        assert decision.classifier_stop_reason == 'max_tokens'
+
+    def test_classifier_invalid_warning_names_stop_reason_blocks_and_usage(self, caplog):
+        backend = MagicMock()
+        del backend.send_classifier_message
+        backend.send_message.return_value = {
+            'content': [{'type': 'thinking', 'thinking': 'deliberating'}],
+            'stop_reason': 'max_tokens',
+            'usage': {'input_tokens': 120, 'output_tokens': 300},
+        }
+        target = _target(backend=backend, routing=True)
+        with caplog.at_level(logging.WARNING, logger='anthrouter.model_router'):
+            route_model(_payload(model='sonnet', content='fix the bug'), target, {})
+        messages = [r.getMessage() for r in caplog.records
+                    if r.name == 'anthrouter.model_router' and 'invalid score' in r.getMessage()]
+        assert len(messages) == 1
+        assert 'max_tokens' in messages[0]
+        assert 'thinking' in messages[0]
+        assert 'input_tokens' in messages[0]
+        assert '120' in messages[0]
+
+    def test_classifier_failed_http_status_preview_truncates_tail(self, monkeypatch):
+        monkeypatch.setattr('anthrouter.model_router.time.sleep', lambda _s: None)
+
+        class RateLimitError(Exception):
+            def __init__(self, message, status_code):
+                super().__init__(message)
+                self.status_code = status_code
+
+        backend = MagicMock()
+        del backend.send_classifier_message
+        backend.send_message.side_effect = RateLimitError('x' * 200, 429)
+        target = _target(backend=backend, routing=True)
+        decision = route_model(_payload(model='sonnet', content='fix the bug'), target, {})
+        assert decision.reason_code == 'classifier_failed'
+        preview = decision.classifier_raw_response
+        assert preview.startswith('HTTP 429 RateLimitError: ')
+        assert preview.endswith('…')
+        assert len(preview) == 121
+
+    def test_classifier_failed_without_status_code_has_no_http_prefix(self, monkeypatch):
+        monkeypatch.setattr('anthrouter.model_router.time.sleep', lambda _s: None)
+        backend = MagicMock()
+        del backend.send_classifier_message
+        backend.send_message.side_effect = ConnectionError('socket closed')
+        target = _target(backend=backend, routing=True)
+        decision = route_model(_payload(model='sonnet', content='fix the bug'), target, {})
+        assert decision.classifier_raw_response == 'ConnectionError: socket closed'
+
+    def test_classifier_failed_empty_message_gives_class_name_only(self, monkeypatch):
+        monkeypatch.setattr('anthrouter.model_router.time.sleep', lambda _s: None)
+        backend = MagicMock()
+        del backend.send_classifier_message
+        backend.send_message.side_effect = TimeoutError()
+        target = _target(backend=backend, routing=True)
+        decision = route_model(_payload(model='sonnet', content='fix the bug'), target, {})
+        assert decision.classifier_raw_response == 'TimeoutError'
+
+    def test_classifier_failed_empty_message_with_status_keeps_prefix(self, monkeypatch):
+        monkeypatch.setattr('anthrouter.model_router.time.sleep', lambda _s: None)
+
+        class OverloadedError(Exception):
+            status_code = 529
+
+        backend = MagicMock()
+        del backend.send_classifier_message
+        backend.send_message.side_effect = OverloadedError()
+        target = _target(backend=backend, routing=True)
+        decision = route_model(_payload(model='sonnet', content='fix the bug'), target, {})
+        assert decision.classifier_raw_response == 'HTTP 529 OverloadedError'
+
+    def test_classifier_invalid_zero_content_blocks_previews_non_text(self):
+        backend = MagicMock()
+        del backend.send_classifier_message
+        backend.send_message.return_value = {'content': [], 'stop_reason': 'end_turn'}
+        target = _target(backend=backend, routing=True)
+        decision = route_model(_payload(model='sonnet', content='fix the bug'), target, {})
+        assert decision.reason_code == 'classifier_invalid'
+        assert decision.classifier_raw_response == '<non-text>'
+
+    def test_classifier_invalid_empty_text_block_previews_empty_string(self):
+        backend = MagicMock()
+        del backend.send_classifier_message
+        backend.send_message.return_value = {
+            'content': [{'type': 'text', 'text': ''}],
+            'stop_reason': 'end_turn',
+        }
+        target = _target(backend=backend, routing=True)
+        decision = route_model(_payload(model='sonnet', content='fix the bug'), target, {})
+        assert decision.reason_code == 'classifier_invalid'
+        assert decision.classifier_raw_response == ''
+
+    def test_classifier_invalid_non_string_stop_reason_stored_as_none(self):
+        backend = MagicMock()
+        del backend.send_classifier_message
+        backend.send_message.return_value = {
+            'content': [{'type': 'text', 'text': 'nope'}],
+            'stop_reason': ['end_turn'],
+        }
+        target = _target(backend=backend, routing=True)
+        decision = route_model(_payload(model='sonnet', content='fix the bug'), target, {})
+        assert decision.reason_code == 'classifier_invalid'
+        assert decision.classifier_stop_reason is None
 
     def test_rules_mode_fields_are_none(self):
         backend = _classifier_backend('standard')
