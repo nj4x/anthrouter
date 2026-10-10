@@ -35,13 +35,11 @@ bounded classifier-input invariant is preserved.
 
 Internal sentinel key
 ---------------------
-Classifier payloads carry ``_anthproxy_internal_classifier = True``.  The
-mapper must strip this key before sending upstream.  ``route_model()`` no-ops
-immediately on any payload that already carries the sentinel to prevent
-recursive classification.  The key keeps the ``anthproxy`` spelling on purpose:
-when ``upstream_base_url`` points at an anthproxy instance rather than
-api.anthropic.com, that hop recognises the marker and suppresses its own
-classification of our classifier traffic.
+Classifier payloads carry ``_anthproxy_internal_classifier = True``.
+``route_model()`` no-ops immediately on any payload that already carries the
+sentinel, which guards against recursive classification of in-process payloads
+and of payloads a client sends with the key set.  ``build_body`` strips the key
+before dispatch, so a chained anthrouter or anthproxy hop never receives it.
 """
 
 from __future__ import annotations
@@ -56,7 +54,7 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
-from .mapper import estimate_input_tokens
+from .mapper import CLASSIFIER_SENTINEL_KEY, estimate_input_tokens
 from .model_tier import model_tier_rank
 from .request_text import (
     _TRANSCRIPT_FALLBACK_LIMIT,
@@ -76,7 +74,6 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _ELIGIBLE_MODEL = 'sonnet'
-_SENTINEL_KEY = '_anthproxy_internal_classifier'
 
 # Tiers routed to when the classifier fires
 _TIER_TRIVIAL: Literal['haiku'] = 'haiku'  # superseded by config.auto_model_routing_classification; kept as default-value documentation
@@ -238,8 +235,10 @@ def _prompt_log_preview(text: str) -> str:
         return preview[:_LOG_PROMPT_LIMIT] + '…'
     return preview
 
-# Classifier response constraints
-_CLASSIFIER_MAX_TOKENS = 8
+# Classifier response constraints.  A ceiling sized for a model that thinks
+# before answering (Haiku 5.5): thinking tokens count against max_tokens, and
+# unused budget costs nothing.
+_CLASSIFIER_MAX_TOKENS = 256
 _CLASSIFIER_TEMPERATURE = 0.0
 
 _CLASSIFIER_SYSTEM = (
@@ -328,9 +327,9 @@ _CLASSIFIER_SYSTEM_JSON = (
     'Reply with ONLY the JSON object. No other text.'
 )
 
-# Larger token budget for the JSON-format response.  The JSON payload
-# {"score":42} is ~5 tokens; 40 gives ample headroom.
-_CLASSIFIER_MAX_TOKENS_JSON = 40
+# Ceiling for the JSON-format response.  The JSON payload {"score":42} is ~5
+# tokens; the rest is headroom for thinking tokens, which count against max_tokens.
+_CLASSIFIER_MAX_TOKENS_JSON = 256
 
 # Appended to _CLASSIFIER_SYSTEM_JSON when the classifier payload includes
 # prior_response_summary so the classifier knows to weight that context.
@@ -419,14 +418,18 @@ class ModelRoutingDecision:
     task_tag: str | None = None          # reserved; None until task-tag routing is added
     classifier_input_tokens: int = 0   # estimated tokens sent to classifier; 0 when no classifier call made
     classifier_output_tokens: int = 0  # estimated tokens returned by classifier; 0 when no classifier call made
-    # Classifier transparency fields — populated only when an actual LLM classifier
-    # call succeeds (reason_code in classifier_trivial/standard/deep and variants).
-    # None on all other paths (size floor, affirmation, walk-back, disabled, rules,
-    # tag, failed, invalid, override_no_classifier).
+    # Classifier transparency fields — populated when an LLM classifier call ran
+    # and succeeded (reason_code in classifier_trivial/standard/deep and variants),
+    # or ran and failed/returned an invalid label (classifier_failed, classifier_invalid:
+    # model, summary, format, raw/exception preview, tokens spent, and for invalid only,
+    # stop reason).  Failed decisions carry tokens 0 and stop reason None.  None on all
+    # other paths (size floor, affirmation, walk-back, disabled, rules, tag,
+    # override_no_classifier).
     classifier_model: str | None = None        # model ID used for the classifier call
     classifier_summary_json: str | None = None # bounded JSON sent to the classifier
-    classifier_raw_response: str | None = None # full concatenated text from classifier response blocks
+    classifier_raw_response: str | None = None # bounded preview: response text on invalid, exception text on failed
     classifier_format: str | None = None       # 'standard' or 'json' response format
+    classifier_stop_reason: str | None = None  # stop_reason of the classifier response; set only on classifier_invalid
     # Uncapped resolved tier for the affirmation_classified path only.
     # The handler writes this (not routed_model) to the tier cache so subsequent
     # turns can apply their own cap.  None on all other paths.
@@ -872,7 +875,7 @@ def build_system_prompt_classifier_payload(system_preview: str, config: 'Config'
     model is reused; no separate model config.
     """
     return {
-        _SENTINEL_KEY: True,
+        CLASSIFIER_SENTINEL_KEY: True,
         'model': config.auto_model_routing_classifier_model,
         'max_tokens': _CLASSIFIER_MAX_TOKENS,
         'temperature': _CLASSIFIER_TEMPERATURE,
@@ -1018,15 +1021,15 @@ def build_classifier_payload(
 ) -> dict:
     """Build a synthetic, non-streaming classifier request.
 
-    The payload uses the configured classifier model, tiny max_tokens,
+    The payload uses the configured classifier model, a max_tokens budget ceiling,
     temperature 0, a fixed system prompt, and a single user message with the
     JSON routing summary.  It carries the internal sentinel key so backends can
     identify and isolate classifier calls.
 
     When ``config.auto_model_routing_confidence_bump`` is True, uses the JSON
     system prompt (``_CLASSIFIER_SYSTEM_JSON``) and a larger ``max_tokens``
-    budget to accommodate the structured response.  The existing one-word prompt
-    and four-token budget are untouched when confidence bump is off.
+    budget to accommodate the structured response.  The one-word prompt and its
+    max_tokens ceiling are untouched when confidence bump is off.
 
     When ``prior_response_summary`` is provided it is injected into the routing
     summary JSON and the system prompt is extended with the prior-context suffix.
@@ -1036,7 +1039,7 @@ def build_classifier_payload(
     if use_json and prior_response_summary is not None:
         system = system + _CLASSIFIER_SYSTEM_JSON_PRIOR_SUFFIX
     return {
-        _SENTINEL_KEY: True,
+        CLASSIFIER_SENTINEL_KEY: True,
         'model': config.auto_model_routing_classifier_model,
         'max_tokens': _CLASSIFIER_MAX_TOKENS_JSON if use_json else _CLASSIFIER_MAX_TOKENS,
         'temperature': _CLASSIFIER_TEMPERATURE,
@@ -1080,9 +1083,48 @@ def _classifier_raw_text_preview(response: dict) -> str:
     if not parts:
         return '<non-text>'
     preview = ' '.join(parts).replace('\r', ' ').replace('\n', ' ').strip()
-    if len(preview) > _RAW_LABEL_LOG_LIMIT:
-        return preview[:_RAW_LABEL_LOG_LIMIT] + '…'
-    return preview
+    return _cap_raw_preview(preview)
+
+
+def _cap_raw_preview(text: str) -> str:
+    if len(text) > _RAW_LABEL_LOG_LIMIT:
+        return text[:_RAW_LABEL_LOG_LIMIT] + '…'
+    return text
+
+
+def _classifier_exception_preview(exc: BaseException) -> str:
+    """Bounded one-line description of a failed classifier call.
+
+    The HTTP status leads so it survives truncation; only the message tail is cut.
+    A transport failure carries a synthetic status but no HTTP response, so it
+    gets no ``HTTP`` prefix.
+    """
+    body = f'{type(exc).__name__}: {exc}' if str(exc) else type(exc).__name__
+    body = body.replace('\r', ' ').replace('\n', ' ')
+    status_code = getattr(exc, 'status_code', None)
+    if status_code and not getattr(exc, 'connection_error', False):
+        body = f'HTTP {status_code} {body}'
+    return _cap_raw_preview(body)
+
+
+def _classifier_usage_count(response, key: str) -> int:
+    usage = response.get('usage') if isinstance(response, dict) else None
+    if not isinstance(usage, dict):
+        return 0
+    value = usage.get(key)
+    return value if isinstance(value, int) else 0
+
+
+def _classifier_block_types(response) -> list:
+    content = response.get('content') if isinstance(response, dict) else None
+    if not isinstance(content, list):
+        return []
+    return [block.get('type') if isinstance(block, dict) else None for block in content]
+
+
+def _classifier_stop_reason(response) -> str | None:
+    stop_reason = response.get('stop_reason') if isinstance(response, dict) else None
+    return stop_reason if isinstance(stop_reason, str) else None
 
 
 def parse_classifier_label(
@@ -1380,12 +1422,12 @@ def _dispatch_classifier_mode(
     requested: str,
     log_tag: str,
     prior_response_summary: str | None = None,
-) -> tuple[int | str | None, str, int, int, str | None, str | None, str | None, str | None]:
+) -> tuple[int | str | None, str, int, int, str | None, str | None, str | None, str | None, str | None]:
     """Dispatch to the appropriate classification mode.
 
     Returns ``(score_or_label_or_tier, reason_code, clf_in, clf_out,
-    clf_model, clf_summary_json, clf_raw_response, clf_format)`` where the first
-    element is:
+    clf_model, clf_summary_json, clf_raw_response, clf_format, clf_stop_reason)``
+    where the first element is:
 
     * For ``'classifier'`` mode: a raw 0–100 integer score, or ``None`` on failure.
     * For ``'rules'`` mode: a classification label (``'trivial'``, ``'standard'``,
@@ -1394,9 +1436,12 @@ def _dispatch_classifier_mode(
     ``None`` first element means the caller must fail-closed to the requested model.
     Unknown or empty mode values fall back to ``'classifier'``.
 
-    The last four elements (clf_model, clf_summary_json, clf_raw_response,
-    clf_format) are only populated on the successful LLM call path; they are
-    ``None`` for rules, failure, and invalid paths.
+    When an LLM classifier call was made, the success, ``classifier_invalid`` and
+    ``classifier_failed`` paths populate clf_in/clf_out (tokens spent; 0 on failure),
+    clf_model, clf_summary_json, clf_format and clf_raw_response (response text
+    preview or exception preview).  clf_stop_reason is the response ``stop_reason``
+    (None on failure).  Rules and no-signal paths return all of these as
+    ``None``/0.
     """
     if mode == 'rules':
         # Rules mode: deterministic keyword-based classification; no LLM call.
@@ -1406,7 +1451,7 @@ def _dispatch_classifier_mode(
                 '%s Model router: rules mode — no signal, fail-closed to %s',
                 log_tag, requested,
             )
-            return None, 'rules_no_signal', 0, 0, None, None, None, None
+            return None, 'rules_no_signal', 0, 0, None, None, None, None, None
         reason = f'classifier_rules_{label}'
         logger.info(
             '%s Model router: rules mode → %s (requested=%s '
@@ -1414,7 +1459,7 @@ def _dispatch_classifier_mode(
             log_tag, label, requested,
             len(summary.final_user_text),
         )
-        return label, reason, 0, 0, None, None, None, None
+        return label, reason, 0, 0, None, None, None, None, None
 
     # Default / 'classifier' mode: LLM-based classifier call.
     threshold = getattr(config, 'auto_model_routing_long_context_threshold', 0)
@@ -1507,25 +1552,34 @@ def _dispatch_classifier_mode(
                 time.sleep(delay)
             else:
                 # Exhausted retries
-                return None, 'classifier_failed', 0, 0, None, None, None, None
+                return (None, 'classifier_failed', 0, 0, clf_model, clf_summary_json,
+                        _classifier_exception_preview(exc), clf_format, None)
 
     if response is None:
         # Should not reach here, but guard against it
-        return None, 'classifier_failed', 0, 0, None, None, None, None
+        return None, 'classifier_failed', 0, 0, clf_model, clf_summary_json, None, clf_format, None
+
+    clf_in = _classifier_usage_count(response, 'input_tokens')
+    clf_out = _classifier_usage_count(response, 'output_tokens')
 
     if user_score is None:
+        raw_preview = _classifier_raw_text_preview(response)
+        stop_reason = _classifier_stop_reason(response)
         logger.warning(
             '%s Model router: classifier returned invalid score — '
-            'keeping %s: raw=%r',
+            'keeping %s: raw=%r stop_reason=%r block_types=%r usage=%r',
             log_tag, requested,
-            _classifier_raw_text_preview(response),
+            raw_preview,
+            stop_reason,
+            _classifier_block_types(response),
+            response.get('usage'),
         )
-        return None, 'classifier_invalid', 0, 0, None, None, None, None
+        return (None, 'classifier_invalid', clf_in, clf_out, clf_model, clf_summary_json,
+                raw_preview, clf_format, stop_reason)
 
-    clf_in = response.get('usage', {}).get('input_tokens', 0)
-    clf_out = response.get('usage', {}).get('output_tokens', 0)
     # Return raw score; reason_code is derived in route_model() after thresholding.
-    return user_score, 'classifier_scored', clf_in, clf_out, clf_model, clf_summary_json, clf_raw_response, clf_format
+    return (user_score, 'classifier_scored', clf_in, clf_out, clf_model, clf_summary_json,
+            clf_raw_response, clf_format, None)
 
 
 # ---------------------------------------------------------------------------
@@ -1565,7 +1619,7 @@ def route_model(
     Returns a ``ModelRoutingDecision`` describing the outcome for logging.
     """
     # If this is itself a classifier payload, skip — prevents recursion
-    if payload.get(_SENTINEL_KEY):
+    if payload.get(CLASSIFIER_SENTINEL_KEY):
         raw_model = str(payload.get('model', ''))
         return ModelRoutingDecision(
             requested_model=raw_model,
@@ -1822,7 +1876,7 @@ def route_model(
             if use_json and prior_response_summary is not None:
                 aff_system = aff_system + _CLASSIFIER_SYSTEM_JSON_PRIOR_SUFFIX
             clf_payload = {
-                _SENTINEL_KEY: True,
+                CLASSIFIER_SENTINEL_KEY: True,
                 'model': config.auto_model_routing_classifier_model,
                 'max_tokens': _CLASSIFIER_MAX_TOKENS_JSON if use_json else _CLASSIFIER_MAX_TOKENS,
                 'temperature': _CLASSIFIER_TEMPERATURE,
@@ -1951,7 +2005,8 @@ def route_model(
     )
 
     (score_or_label_or_tier, dispatch_reason, clf_in_tokens, clf_out_tokens,
-     clf_model, clf_summary_json, clf_raw_response, clf_format) = _dispatch_classifier_mode(
+     clf_model, clf_summary_json, clf_raw_response, clf_format,
+     clf_stop_reason) = _dispatch_classifier_mode(
         effective_mode, summary, config, target, credentials,
         est_tokens, routing_baseline, log_tag,
         prior_response_summary=prior_response_summary,
@@ -1959,8 +2014,8 @@ def route_model(
 
     if score_or_label_or_tier is None:
         # Fail-closed: keep the originally requested model.
-        # Transparency fields remain None (their dataclass defaults) on all
-        # non-successful paths (failed, invalid, rules, tag, etc.).
+        # Classifier fields carry evidence when an LLM call ran (failed, invalid);
+        # they stay None/0 for rules, no-signal and other non-LLM paths.
         return ModelRoutingDecision(
             requested_model=requested,
             routed_model=requested,
@@ -1969,6 +2024,13 @@ def route_model(
             reason_code=dispatch_reason,  # type: ignore[arg-type]
             estimated_input_tokens=est_tokens,
             classifier_mode=effective_mode,
+            classifier_input_tokens=clf_in_tokens,
+            classifier_output_tokens=clf_out_tokens,
+            classifier_model=clf_model,
+            classifier_summary_json=clf_summary_json,
+            classifier_raw_response=clf_raw_response,
+            classifier_format=clf_format,
+            classifier_stop_reason=clf_stop_reason,
         )
 
     # --- Weighted blend (ADR 0010): applies in 'classifier' mode only.

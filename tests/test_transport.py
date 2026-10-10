@@ -1,6 +1,7 @@
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from types import SimpleNamespace
 
 import pytest
 
@@ -12,11 +13,18 @@ from anthrouter.mapper.anthropic_transform import (
     merge_betas,
 )
 from anthrouter.mapper.common import AnthropicRequestError
+from anthrouter.model_router import (
+    RoutingSummary,
+    build_classifier_payload,
+    build_system_prompt_classifier_payload,
+    route_model,
+)
 from anthrouter.transport import (
     AnthropicTransport,
     _request_headers,
     extract_client_credentials,
 )
+from tests.test_model_router import _payload_with_prior, _target, _text_response
 
 
 # ---------------------------------------------------------------------------
@@ -190,6 +198,117 @@ def test_effort_survives_on_a_model_that_accepts_it():
     body = _body({'model': 'claude-opus-5-5', 'messages': [],
                   'output_config': {'effort': 'high'}})
     assert body['output_config'] == {'effort': 'high'}
+
+
+_CLASSIFIER_SENTINEL = '_anthproxy_internal_classifier'
+
+
+def _classifier_body(model, **extra):
+    body = _body({'model': model, 'messages': [], _CLASSIFIER_SENTINEL: True, **extra})
+    assert _CLASSIFIER_SENTINEL not in body
+    return body
+
+
+def test_haiku_5_5_classifier_payload_gains_low_effort():
+    body = _classifier_body('claude-haiku-5-5')
+    assert body['output_config'] == {'effort': 'low'}
+    assert _CLASSIFIER_SENTINEL not in body
+
+
+@pytest.mark.parametrize('model', ['claude-haiku-4-5', 'claude-sonnet-4-6', 'claude-opus-5-5', 'fable'])
+def test_classifier_payload_on_other_models_gains_no_effort(model):
+    body = _classifier_body(model)
+    assert 'output_config' not in body
+    assert _CLASSIFIER_SENTINEL not in body
+
+
+def test_classifier_gate_overrides_explicit_effort():
+    body = _classifier_body('claude-haiku-5-5', output_config={'effort': 'high', 'other': 1})
+    assert body['output_config'] == {'effort': 'low', 'other': 1}
+
+
+def test_classifier_gate_keeps_existing_output_config_keys():
+    body = _classifier_body('claude-haiku-5-5', output_config={'other': 1})
+    assert body['output_config'] == {'other': 1, 'effort': 'low'}
+
+
+def test_classifier_gate_fills_null_effort():
+    body = _classifier_body('claude-haiku-5-5', output_config={'effort': None, 'other': 1})
+    assert body['output_config'] == {'effort': 'low', 'other': 1}
+
+
+def test_classifier_gate_replaces_non_dict_output_config():
+    body = _classifier_body('claude-haiku-5-5', output_config='junk')
+    assert body['output_config'] == {'effort': 'low'}
+
+
+def test_classifier_gate_ignores_sentinel_set_to_false():
+    body = _body({'model': 'claude-haiku-5-5', 'messages': [], _CLASSIFIER_SENTINEL: False})
+    assert 'output_config' not in body
+    assert _CLASSIFIER_SENTINEL not in body
+
+
+def test_non_classifier_haiku_5_5_payload_is_untouched():
+    body = _body({'model': 'claude-haiku-5-5', 'messages': []})
+    assert 'output_config' not in body
+
+
+def test_client_effort_on_haiku_5_5_request_is_kept():
+    body = _body({'model': 'claude-haiku-5-5', 'messages': [],
+                  'output_config': {'effort': 'high'}})
+    assert body['output_config'] == {'effort': 'high'}
+
+
+def test_classifier_payload_effort_on_haiku_4_5_is_still_stripped():
+    body = _classifier_body('claude-haiku-4-5', output_config={'effort': 'high', 'other': 1})
+    assert body['output_config'] == {'other': 1}
+
+
+def test_client_effort_on_haiku_4_5_request_is_stripped():
+    body = _body({'model': 'claude-haiku-4-5', 'messages': [],
+                  'output_config': {'effort': 'high', 'other': 1}})
+    assert body['output_config'] == {'other': 1}
+
+
+def test_classifier_gate_matches_haiku_5_5_case_insensitively():
+    body = _classifier_body('Claude-Haiku-5-5')
+    assert body['output_config'] == {'effort': 'low'}
+
+
+def test_haiku_5_5_system_prompt_classifier_payload_gains_low_effort():
+    cfg = SimpleNamespace(auto_model_routing_classifier_model='claude-haiku-5-5')
+    body = _body(build_system_prompt_classifier_payload('you are a helpful bot', cfg))
+    assert body['output_config'] == {'effort': 'low'}
+    assert _CLASSIFIER_SENTINEL not in body
+
+
+def test_haiku_5_5_affirmation_classifier_payload_gains_low_effort():
+    target = _target(classifier_model='claude-haiku-5-5')
+    del target.backend.send_classifier_message
+    target.backend.send_message.return_value = _text_response('standard')
+    route_model(_payload_with_prior('yes', 'Plan the refactor in three steps'),
+                target, {}, cached_session_tier=None)
+    captured = target.backend.send_message.call_args[0][0]
+    assert captured[_CLASSIFIER_SENTINEL] is True
+    body = _body(captured)
+    assert body['model'] == 'claude-haiku-5-5'
+    assert body['output_config'] == {'effort': 'low'}
+    assert _CLASSIFIER_SENTINEL not in body
+
+
+def test_classifier_payload_through_build_body_has_low_effort_and_no_sentinel():
+    summary = RoutingSummary(
+        final_user_text='hello', text_truncated=False, total_messages=1,
+        prior_user_messages=0, prior_assistant_messages=0, tool_use_count=0,
+        tool_result_count=0, final_non_text_blocks=0, has_images=False,
+    )
+    cfg = SimpleNamespace(auto_model_routing_classifier_model='haiku',
+                          auto_model_routing_confidence_bump=False)
+    body = _body(build_classifier_payload(summary, cfg))
+    assert body['model'] == 'claude-haiku-5-5'
+    assert body['max_tokens'] == 256
+    assert body['output_config'] == {'effort': 'low'}
+    assert _CLASSIFIER_SENTINEL not in body
 
 
 _PER_MESSAGE_EFFORT_BETA = 'mid-conversation-output-config-2026-07-01'

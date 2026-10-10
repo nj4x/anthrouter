@@ -36,7 +36,7 @@ Routing is governed by four layers of precedence: long-context size floor (deter
 
 The classifier only ever sees a bounded `RoutingSummary` — final user text (truncated/head-tail-capped) plus message/tool counts. It never sees the system prompt, tool schemas/names/descriptions, full history, provider metadata, or headers. `RoutingSummary.to_classifier_json()` is the enforcement point — any new field must be deliberately included there, not just added to the dataclass. System-prompt role classification (ADR 0010/0012, the weighted blend) is a *separate* classifier call with its own bounded preview, gated by `auto_model_routing_system_prompt_weight`.
 
-Classifier payloads carry the sentinel key `_anthproxy_internal_classifier: True` to prevent recursive classification across chained anthrouter instances.
+Classifier payloads carry the sentinel key `_anthproxy_internal_classifier: True` to prevent recursive classification of payloads that reach `route_model()` in-process. `build_body` strips the key before dispatch, so chained hops never receive it; the guard protects only in-process payloads or payloads a client sends with the key set.
 
 ## Code conventions
 

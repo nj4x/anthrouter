@@ -677,3 +677,76 @@ def test_routing_to_a_pricier_tier_yields_a_negative_net_savings():
     net, overhead = ProxyRequestHandler._compute_savings(decision, SAVINGS_STATS)
     assert net is not None
     assert net < 0
+
+
+# ---------------------------------------------------------------------------
+# Classifier failure evidence and overhead booking
+# ---------------------------------------------------------------------------
+
+_THINKING_ONLY_BODY = {
+    'id': 'msg_up', 'type': 'message', 'role': 'assistant',
+    'content': [{'type': 'thinking', 'thinking': 'deliberating'}],
+    'stop_reason': 'max_tokens',
+    'usage': {'input_tokens': 500, 'output_tokens': 50},
+}
+
+
+def _post_routed_prompt(server):
+    post(server, '/v1/messages', {
+        'model': 'sonnet', 'metadata': {'user_id': SESSION},
+        'messages': [{'role': 'user', 'content': 'fix the failing auth test'}]})
+    return db_rows(server)[0]
+
+
+def _classifier_calls_raise(monkeypatch, exc):
+    from anthrouter.transport import AnthropicTransport
+
+    original = AnthropicTransport.send_message
+
+    def send_message(self, payload, credentials, config=None, ratelimit_out=None):
+        if payload.get('_anthproxy_internal_classifier'):
+            raise exc
+        return original(self, payload, credentials, config, ratelimit_out)
+
+    monkeypatch.setattr(AnthropicTransport, 'send_message', send_message)
+    monkeypatch.setattr('anthrouter.model_router.time.sleep', lambda _s: None)
+
+
+def test_invalid_classifier_row_books_overhead_and_stores_evidence(proxy):
+    _FakeUpstream.json_body = _THINKING_ONLY_BODY
+    server = proxy(auto_model_routing=True, auto_model_routing_mode='classifier')
+
+    row = _post_routed_prompt(server)
+
+    assert row['reason_code'] == 'classifier_invalid'
+    assert row['classifier_overhead_usd'] > 0
+    assert row['classifier_raw_response'] == '<non-text>'
+    assert row['classifier_stop_reason'] == 'max_tokens'
+
+
+def test_failed_classifier_row_with_priced_model_books_zero_overhead(proxy, monkeypatch):
+    from anthrouter.mapper.common import AnthropicRequestError
+
+    _classifier_calls_raise(monkeypatch, AnthropicRequestError(
+        'slow down', error_type='rate_limit_error', status_code=429))
+    server = proxy(auto_model_routing=True, auto_model_routing_mode='classifier')
+
+    row = _post_routed_prompt(server)
+
+    assert row['reason_code'] == 'classifier_failed'
+    assert not row['applied']
+    assert row['classifier_model'] == 'haiku'
+    assert row['classifier_overhead_usd'] == 0.0
+    assert row['classifier_raw_response'] == 'HTTP 429 AnthropicRequestError: slow down'
+
+
+def test_failed_classifier_row_with_unpriced_model_leaves_overhead_null(proxy, monkeypatch):
+    _classifier_calls_raise(monkeypatch, RuntimeError('boom'))
+    server = proxy(auto_model_routing=True, auto_model_routing_mode='classifier',
+                   auto_model_routing_classifier_model='unpriced-model')
+
+    row = _post_routed_prompt(server)
+
+    assert row['reason_code'] == 'classifier_failed'
+    assert row['classifier_model'] == 'unpriced-model'
+    assert row['classifier_overhead_usd'] is None
