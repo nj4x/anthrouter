@@ -2,6 +2,8 @@
 
 import json
 
+CLASSIFIER_SENTINEL_KEY = '_anthproxy_internal_classifier'
+
 
 def anthropic_error_payload(type_, message):
     return {

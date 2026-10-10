@@ -35,13 +35,11 @@ bounded classifier-input invariant is preserved.
 
 Internal sentinel key
 ---------------------
-Classifier payloads carry ``_anthproxy_internal_classifier = True``.  The
-mapper must strip this key before sending upstream.  ``route_model()`` no-ops
-immediately on any payload that already carries the sentinel to prevent
-recursive classification.  The key keeps the ``anthproxy`` spelling on purpose:
-when ``upstream_base_url`` points at an anthproxy instance rather than
-api.anthropic.com, that hop recognises the marker and suppresses its own
-classification of our classifier traffic.
+Classifier payloads carry ``_anthproxy_internal_classifier = True``.
+``route_model()`` no-ops immediately on any payload that already carries the
+sentinel, which guards against recursive classification of in-process payloads
+and of payloads a client sends with the key set.  ``build_body`` strips the key
+before dispatch, so a chained anthrouter or anthproxy hop never receives it.
 """
 
 from __future__ import annotations
@@ -56,7 +54,7 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
-from .mapper import estimate_input_tokens
+from .mapper import CLASSIFIER_SENTINEL_KEY, estimate_input_tokens
 from .model_tier import model_tier_rank
 from .request_text import (
     _TRANSCRIPT_FALLBACK_LIMIT,
@@ -76,7 +74,6 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _ELIGIBLE_MODEL = 'sonnet'
-_SENTINEL_KEY = '_anthproxy_internal_classifier'
 
 # Tiers routed to when the classifier fires
 _TIER_TRIVIAL: Literal['haiku'] = 'haiku'  # superseded by config.auto_model_routing_classification; kept as default-value documentation
@@ -430,7 +427,7 @@ class ModelRoutingDecision:
     # override_no_classifier).
     classifier_model: str | None = None        # model ID used for the classifier call
     classifier_summary_json: str | None = None # bounded JSON sent to the classifier
-    classifier_raw_response: str | None = None # full concatenated text from classifier response blocks
+    classifier_raw_response: str | None = None # bounded preview: response text on invalid, exception text on failed
     classifier_format: str | None = None       # 'standard' or 'json' response format
     classifier_stop_reason: str | None = None  # stop_reason of the classifier response; set only on classifier_invalid
     # Uncapped resolved tier for the affirmation_classified path only.
@@ -878,7 +875,7 @@ def build_system_prompt_classifier_payload(system_preview: str, config: 'Config'
     model is reused; no separate model config.
     """
     return {
-        _SENTINEL_KEY: True,
+        CLASSIFIER_SENTINEL_KEY: True,
         'model': config.auto_model_routing_classifier_model,
         'max_tokens': _CLASSIFIER_MAX_TOKENS,
         'temperature': _CLASSIFIER_TEMPERATURE,
@@ -1024,7 +1021,7 @@ def build_classifier_payload(
 ) -> dict:
     """Build a synthetic, non-streaming classifier request.
 
-    The payload uses the configured classifier model, tiny max_tokens,
+    The payload uses the configured classifier model, a max_tokens budget ceiling,
     temperature 0, a fixed system prompt, and a single user message with the
     JSON routing summary.  It carries the internal sentinel key so backends can
     identify and isolate classifier calls.
@@ -1042,7 +1039,7 @@ def build_classifier_payload(
     if use_json and prior_response_summary is not None:
         system = system + _CLASSIFIER_SYSTEM_JSON_PRIOR_SUFFIX
     return {
-        _SENTINEL_KEY: True,
+        CLASSIFIER_SENTINEL_KEY: True,
         'model': config.auto_model_routing_classifier_model,
         'max_tokens': _CLASSIFIER_MAX_TOKENS_JSON if use_json else _CLASSIFIER_MAX_TOKENS,
         'temperature': _CLASSIFIER_TEMPERATURE,
@@ -1099,10 +1096,13 @@ def _classifier_exception_preview(exc: BaseException) -> str:
     """Bounded one-line description of a failed classifier call.
 
     The HTTP status leads so it survives truncation; only the message tail is cut.
+    A transport failure carries a synthetic status but no HTTP response, so it
+    gets no ``HTTP`` prefix.
     """
     body = f'{type(exc).__name__}: {exc}' if str(exc) else type(exc).__name__
+    body = body.replace('\r', ' ').replace('\n', ' ')
     status_code = getattr(exc, 'status_code', None)
-    if status_code:
+    if status_code and not getattr(exc, 'connection_error', False):
         body = f'HTTP {status_code} {body}'
     return _cap_raw_preview(body)
 
@@ -1619,7 +1619,7 @@ def route_model(
     Returns a ``ModelRoutingDecision`` describing the outcome for logging.
     """
     # If this is itself a classifier payload, skip — prevents recursion
-    if payload.get(_SENTINEL_KEY):
+    if payload.get(CLASSIFIER_SENTINEL_KEY):
         raw_model = str(payload.get('model', ''))
         return ModelRoutingDecision(
             requested_model=raw_model,
@@ -1876,7 +1876,7 @@ def route_model(
             if use_json and prior_response_summary is not None:
                 aff_system = aff_system + _CLASSIFIER_SYSTEM_JSON_PRIOR_SUFFIX
             clf_payload = {
-                _SENTINEL_KEY: True,
+                CLASSIFIER_SENTINEL_KEY: True,
                 'model': config.auto_model_routing_classifier_model,
                 'max_tokens': _CLASSIFIER_MAX_TOKENS_JSON if use_json else _CLASSIFIER_MAX_TOKENS,
                 'temperature': _CLASSIFIER_TEMPERATURE,
