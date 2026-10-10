@@ -413,8 +413,7 @@ def build_body(payload: dict, aliases: dict[str, str] | None = None, *,
     if payload.get(CLASSIFIER_SENTINEL_KEY) and _is_haiku_5_5(body['model']):
         oc = body.get('output_config')
         oc = dict(oc) if isinstance(oc, dict) else {}
-        if oc.get('effort') is None:
-            oc['effort'] = 'low'
+        oc['effort'] = 'low'
         body['output_config'] = oc
 
     if not _supports_per_message_effort(body['model'], payload.get('_anthropic_beta') or []):

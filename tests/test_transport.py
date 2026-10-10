@@ -222,9 +222,9 @@ def test_classifier_payload_on_other_models_gains_no_effort(model):
     assert _CLASSIFIER_SENTINEL not in body
 
 
-def test_classifier_gate_keeps_explicit_effort():
-    body = _classifier_body('claude-haiku-5-5', output_config={'effort': 'high'})
-    assert body['output_config'] == {'effort': 'high'}
+def test_classifier_gate_overrides_explicit_effort():
+    body = _classifier_body('claude-haiku-5-5', output_config={'effort': 'high', 'other': 1})
+    assert body['output_config'] == {'effort': 'low', 'other': 1}
 
 
 def test_classifier_gate_keeps_existing_output_config_keys():
