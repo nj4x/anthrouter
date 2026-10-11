@@ -124,9 +124,11 @@ def _supports_sampling_controls(model_id: str) -> bool:
 # rewritten into user turns by ``_rewrite_inline_system`` (ADR-0010).  Fails
 # open: a family absent here keeps its inline system turns, cache_control
 # included; the transport's one-shot forced-rewrite retry recovers a rejection
-# and warns so the family can be added.
+# and warns so the family can be added.  'haiku-4-5', not bare 'haiku': Haiku
+# 5.5, the target of the ``haiku`` alias, is left to the fail-open path
+# (ADR-0010 amendment).
 _SYSTEM_ROLE_REJECTING_FAMILIES = (
-    'sonnet-4-6', 'claude-4-5-sonnet', 'claude-sonnet-4-6', 'claude-haiku-4-5-20251001', 'haiku',
+    'sonnet-4-6', 'claude-4-5-sonnet', 'claude-sonnet-4-6', 'claude-haiku-4-5-20251001', 'haiku-4-5',
 )
 
 
@@ -134,7 +136,7 @@ def _rejects_system_role_in_messages(model_id: str) -> bool:
     """Return True iff the resolved model rejects role:'system' in messages[].
 
     Sonnet 5.5 and Opus 5.5 accept inline system turns natively and receive
-    them unchanged.
+    them unchanged; Haiku 5.5 receives them unchanged too.
     """
     model = model_id.lower()
     return any(family in model for family in _SYSTEM_ROLE_REJECTING_FAMILIES)
