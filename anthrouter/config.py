@@ -15,7 +15,8 @@ DEFAULT_UPSTREAM_BASE_URL = 'https://api.anthropic.com'
 # False = live-editable (applies immediately)
 # Excluded fields (not in this registry): admin_token, anthrouter_home, enable_ui,
 # request_history_size, tls_system_trust (patches the ssl module once at process
-# start; an admin-API write would show as "changed" without ever taking effect)
+# start; an admin-API write would show as "changed" without ever taking effect),
+# activity_label_local_reply (CLI/env only, ADR-0015)
 EDITABLE_FIELDS: dict[str, bool] = {
     # Live-editable (applies immediately)
     'auto_model_routing_classification': False,
@@ -378,6 +379,7 @@ class Config:
     oauth_usage_timezone: str | None = None  # Timezone for workday-aware OAuth pace baseline; None auto-detects with Pacific fallback
     oauth_usage_poll_interval: int = 60  # Base polling interval (seconds) for background OAuth usage fetch
     tls_system_trust: bool = True  # Delegate TLS verification to the OS trust store via truststore; --no-tls-system-trust falls back to OpenSSL
+    activity_label_local_reply: bool = True  # Answer Claude Code activity-label prompts locally with a filler verb (ADR-0015)
 
 
 def validate_config(cfg: Config) -> list[str]:
@@ -761,6 +763,17 @@ def parse_args(argv=None) -> Config:
              'OpenSSL 3.x strict mode (default since Python 3.13) rejects, e.g. "Missing '
              'Authority Key Identifier". Pass --no-tls-system-trust to fall back to '
              'OpenSSL verification (default: on, env: ANTHROUTER_TLS_SYSTEM_TRUST)',
+    )
+    p.add_argument(
+        '--activity-label-local-reply',
+        dest='activity_label_local_reply',
+        action=argparse.BooleanOptionalAction,
+        default=_env_bool('ANTHROUTER_ACTIVITY_LABEL_LOCAL_REPLY', True),
+        help='Answer Claude Code activity-label prompts ("Describe your most recent '
+             'action in 3-5 words") locally with a filler verb instead of running the '
+             'classifier and an upstream call. The request is not recorded. Pass '
+             '--no-activity-label-local-reply to send them upstream '
+             '(default: on, env: ANTHROUTER_ACTIVITY_LABEL_LOCAL_REPLY)',
     )
 
     args = p.parse_args(argv)

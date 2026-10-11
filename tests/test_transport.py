@@ -139,11 +139,11 @@ def _body(payload):
 
 
 def test_model_alias_is_resolved():
-    assert _body({'model': 'sonnet', 'messages': []})['model'] == 'claude-sonnet-4-6'
+    assert _body({'model': 'sonnet', 'messages': []})['model'] == 'claude-sonnet-5-5'
 
 
 def test_context_suffix_is_stripped_before_alias_lookup():
-    assert _body({'model': 'opus[1m]', 'messages': []})['model'] == 'claude-opus-5'
+    assert _body({'model': 'opus[1m]', 'messages': []})['model'] == 'claude-opus-5-5'
 
 
 def test_unknown_model_passes_through_verbatim():
@@ -177,13 +177,13 @@ def test_no_cache_breakpoint_is_injected_into_tools():
 
 
 def test_haiku_rejects_effort_so_it_is_dropped():
-    body = _body({'model': 'haiku', 'messages': [],
+    body = _body({'model': 'claude-haiku-4-5', 'messages': [],
                   'output_config': {'effort': 'high', 'other': 1}})
     assert body['output_config'] == {'other': 1}
 
 
 def test_output_config_disappears_when_effort_was_its_only_key():
-    body = _body({'model': 'haiku', 'messages': [], 'output_config': {'effort': 'high'}})
+    body = _body({'model': 'claude-haiku-4-5', 'messages': [], 'output_config': {'effort': 'high'}})
     assert 'output_config' not in body
 
 
@@ -390,11 +390,11 @@ def test_max_tokens_is_clamped_to_the_resolved_model_ceiling(model, ceiling):
 
 
 def test_max_tokens_is_clamped_against_the_resolved_alias_not_the_raw_name():
-    body = _body({'model': 'haiku', 'messages': [], 'max_tokens': 128000})
-    assert body['max_tokens'] == 64000
+    body = _body({'model': 'haiku', 'messages': [], 'max_tokens': 200000})
+    assert body['max_tokens'] == 128000
 
 
-@pytest.mark.parametrize('max_tokens', [64000, 1024])
+@pytest.mark.parametrize('max_tokens', [128000, 1024])
 def test_max_tokens_at_or_below_the_ceiling_is_untouched(max_tokens):
     body = _body({'model': 'haiku', 'messages': [], 'max_tokens': max_tokens})
     assert body['max_tokens'] == max_tokens
@@ -415,9 +415,9 @@ def test_non_int_max_tokens_crosses_untouched():
 
 
 def test_max_tokens_clamp_does_not_mutate_the_caller_payload():
-    payload = {'model': 'haiku', 'messages': [], 'max_tokens': 128000}
+    payload = {'model': 'haiku', 'messages': [], 'max_tokens': 200000}
     build_body(payload)
-    assert payload['max_tokens'] == 128000
+    assert payload['max_tokens'] == 200000
 
 
 def test_per_message_effort_strip_tolerates_non_dict_messages():
@@ -428,9 +428,9 @@ def test_per_message_effort_strip_tolerates_non_dict_messages():
 
 def test_haiku_drops_adaptive_thinking_but_keeps_manual():
     assert 'thinking' not in _body(
-        {'model': 'haiku', 'messages': [], 'thinking': {'type': 'adaptive'}})
+        {'model': 'claude-haiku-4-5', 'messages': [], 'thinking': {'type': 'adaptive'}})
     manual = {'type': 'enabled', 'budget_tokens': 1024}
-    assert _body({'model': 'haiku', 'messages': [], 'thinking': manual})['thinking'] == manual
+    assert _body({'model': 'claude-haiku-4-5', 'messages': [], 'thinking': manual})['thinking'] == manual
 
 
 def test_fable_drops_explicitly_disabled_thinking():
@@ -498,12 +498,12 @@ def test_between_tools_rewrite_does_not_mutate_the_caller_payload():
 
 
 def test_fixed_sampling_model_drops_sampling_controls():
-    body = _body({'model': 'sonnet', 'messages': [], 'temperature': 0.7, 'top_p': 0.9})
+    body = _body({'model': 'claude-sonnet-4-6', 'messages': [], 'temperature': 0.7, 'top_p': 0.9})
     assert 'temperature' not in body and 'top_p' not in body
 
 
 def test_sampling_controls_survive_on_a_model_that_accepts_them():
-    body = _body({'model': 'haiku', 'messages': [], 'temperature': 0.7})
+    body = _body({'model': 'claude-haiku-4-5', 'messages': [], 'temperature': 0.7})
     assert body['temperature'] == 0.7
 
 
@@ -551,7 +551,7 @@ def test_haiku_5_5_keeps_disabled_thinking_at_efforts_that_accept_it(effort):
 
 def test_clear_thinking_edit_is_dropped_when_thinking_is_inactive():
     body = _body({
-        'model': 'haiku',
+        'model': 'claude-haiku-4-5',
         'messages': [],
         'thinking': {'type': 'adaptive'},
         'context_management': {'edits': [{'type': 'clear_thinking_20251015'}]},
@@ -600,7 +600,7 @@ def _reminder(text, cache_control=None):
 
 @pytest.mark.parametrize('model', [
     'claude-sonnet-4-6', 'claude-haiku-4-5-20251001', 'claude-4-5-sonnet-20250929',
-    'haiku', 'CLAUDE-SONNET-4-6',
+    'claude-haiku-4-5', 'CLAUDE-SONNET-4-6',
 ])
 def test_rejecting_families_are_matched_as_substrings(model):
     assert _rejects_system_role_in_messages(model) is True
@@ -608,14 +608,14 @@ def test_rejecting_families_are_matched_as_substrings(model):
 
 @pytest.mark.parametrize('model', [
     'claude-sonnet-5-5', 'claude-opus-5-5', 'claude-opus-5', 'claude-fable-5-1',
-    'claude-unknown-tier-99',
+    'claude-unknown-tier-99', 'claude-haiku-5-5', 'CLAUDE-HAIKU-5-5',
 ])
 def test_accepting_models_are_outside_the_gate(model):
     assert _rejects_system_role_in_messages(model) is False
 
 
 def test_system_after_user_is_appended_as_reminder_block_with_its_cache_control():
-    body = _body({'model': 'haiku', 'messages': [
+    body = _body({'model': 'claude-haiku-4-5-20251001', 'messages': [
         {'role': 'user', 'content': [{'type': 'text', 'text': 'hi'}]},
         _system_msg('tool loop ended', cache_control=_EPHEMERAL),
     ]})
@@ -628,7 +628,7 @@ def test_system_after_user_is_appended_as_reminder_block_with_its_cache_control(
 
 
 def test_string_user_content_becomes_a_block_list_before_the_append():
-    body = _body({'model': 'haiku', 'messages': [
+    body = _body({'model': 'claude-haiku-4-5-20251001', 'messages': [
         {'role': 'user', 'content': 'hi'},
         _system_msg('note'),
     ]})
@@ -638,7 +638,7 @@ def test_string_user_content_becomes_a_block_list_before_the_append():
 
 
 def test_leading_system_message_becomes_a_standalone_user_turn():
-    body = _body({'model': 'haiku', 'messages': [
+    body = _body({'model': 'claude-haiku-4-5-20251001', 'messages': [
         _system_msg('first'),
         {'role': 'user', 'content': 'hi'},
     ]})
@@ -649,7 +649,7 @@ def test_leading_system_message_becomes_a_standalone_user_turn():
 
 
 def test_system_after_assistant_text_turn_becomes_a_standalone_user_turn():
-    body = _body({'model': 'haiku', 'messages': [
+    body = _body({'model': 'claude-haiku-4-5-20251001', 'messages': [
         {'role': 'user', 'content': 'hi'},
         {'role': 'assistant', 'content': [{'type': 'text', 'text': 'hello'}]},
         _system_msg('note', cache_control=_EPHEMERAL),
@@ -662,7 +662,7 @@ def test_system_after_assistant_tool_use_is_dropped_with_a_warning(caplog):
     tool_use = {'role': 'assistant', 'content': [
         {'type': 'tool_use', 'id': 't1', 'name': 'read', 'input': {}}]}
     with caplog.at_level('WARNING', logger='anthrouter.mapper.anthropic_transform'):
-        body = _body({'model': 'haiku', 'messages': [
+        body = _body({'model': 'claude-haiku-4-5-20251001', 'messages': [
             {'role': 'user', 'content': 'hi'},
             tool_use,
             _system_msg('note'),
@@ -677,7 +677,7 @@ def test_system_after_assistant_tool_use_is_dropped_with_a_warning(caplog):
 
 
 def test_string_system_content_is_wrapped_and_message_level_cache_control_is_kept():
-    body = _body({'model': 'haiku', 'messages': [
+    body = _body({'model': 'claude-haiku-4-5-20251001', 'messages': [
         {'role': 'user', 'content': 'hi'},
         {'role': 'system', 'content': 'plain', 'cache_control': _EPHEMERAL},
     ]})
@@ -685,7 +685,7 @@ def test_string_system_content_is_wrapped_and_message_level_cache_control_is_kep
 
 
 def test_block_level_cache_control_wins_over_message_level():
-    body = _body({'model': 'haiku', 'messages': [
+    body = _body({'model': 'claude-haiku-4-5-20251001', 'messages': [
         {'role': 'user', 'content': 'hi'},
         {'role': 'system', 'cache_control': {'type': 'ephemeral', 'ttl': '5m'},
          'content': [{'type': 'text', 'text': 'a'},
@@ -695,7 +695,7 @@ def test_block_level_cache_control_wins_over_message_level():
 
 
 def test_message_level_output_config_on_system_entry_is_discarded():
-    body = _body({'model': 'haiku', 'messages': [
+    body = _body({'model': 'claude-haiku-4-5-20251001', 'messages': [
         {'role': 'user', 'content': 'hi'},
         _system_msg('note', output_config={'effort': 'low'}),
     ]})
@@ -706,7 +706,7 @@ def test_message_level_output_config_on_system_entry_is_discarded():
 
 
 def test_empty_system_message_vanishes():
-    body = _body({'model': 'haiku', 'messages': [
+    body = _body({'model': 'claude-haiku-4-5-20251001', 'messages': [
         {'role': 'user', 'content': 'hi'},
         {'role': 'system', 'content': []},
     ]})
@@ -719,6 +719,16 @@ def test_accepting_model_keeps_inline_system_and_its_cache_control():
         _system_msg('note', cache_control=_EPHEMERAL),
     ]
     body = _body({'model': 'claude-sonnet-5-5', 'messages': messages})
+    assert body['messages'] == messages
+
+
+def test_haiku_alias_resolves_to_5_5_and_keeps_inline_system():
+    messages = [
+        {'role': 'user', 'content': 'hi'},
+        _system_msg('note', cache_control=_EPHEMERAL),
+    ]
+    body = _body({'model': 'haiku', 'messages': messages})
+    assert body['model'] == 'claude-haiku-5-5'
     assert body['messages'] == messages
 
 
@@ -739,7 +749,7 @@ def test_inline_system_rewrite_does_not_mutate_the_caller_payload():
     user = {'role': 'user', 'content': 'hi'}
     system = _system_msg('note', cache_control=_EPHEMERAL)
     messages = [user, system]
-    payload = {'model': 'haiku', 'messages': messages}
+    payload = {'model': 'claude-haiku-4-5-20251001', 'messages': messages}
     build_body(payload)
     assert payload['messages'] is messages
     assert messages == [{'role': 'user', 'content': 'hi'},
@@ -783,7 +793,7 @@ def test_fallback_beta_is_dropped_for_every_model(model, beta):
 
 
 def test_clear_thinking_beta_is_dropped_when_thinking_is_inactive():
-    payload = {'model': 'haiku', 'thinking': {'type': 'adaptive'},
+    payload = {'model': 'claude-haiku-4-5', 'thinking': {'type': 'adaptive'},
                '_anthropic_beta': ['clear_thinking_20251015']}
     assert merge_betas(payload) == ''
 
@@ -856,7 +866,7 @@ def test_request_reaches_upstream_carrying_the_client_credential():
     sent = stub.requests[0]
     assert sent['headers']['x-api-key'] == 'sk-ant-secret'
     assert sent['headers']['user-agent'] == 'claude-cli/2.1.88 (external, cli)'
-    assert sent['body']['model'] == 'claude-sonnet-4-6'
+    assert sent['body']['model'] == 'claude-sonnet-5-5'
     assert sent['path'] == '/v1/messages?beta=true'
 
 
@@ -1011,7 +1021,7 @@ def test_system_role_400_is_not_retried_for_a_model_already_in_the_tuple():
     with _StubUpstream(_rejects_system_role) as stub:
         with pytest.raises(AnthropicRequestError) as exc:
             AnthropicTransport(stub.base_url).send_message(
-                {**_INLINE_SYSTEM_PAYLOAD, 'model': 'haiku'}, CREDS)
+                {**_INLINE_SYSTEM_PAYLOAD, 'model': 'claude-haiku-4-5-20251001'}, CREDS)
 
     assert exc.value.status_code == 400
     assert len(stub.requests) == 1
@@ -1115,4 +1125,4 @@ def test_count_tokens_falls_back_to_a_local_estimate():
             {'model': 'sonnet', 'messages': [{'role': 'user', 'content': 'hi' * 100}]}, CREDS)
 
     assert result['input_tokens'] > 0
-    assert result['model'] == 'claude-sonnet-4-6'
+    assert result['model'] == 'claude-sonnet-5-5'

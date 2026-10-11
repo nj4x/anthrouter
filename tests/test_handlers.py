@@ -19,8 +19,14 @@ from anthrouter.handlers import (
     parse_local_command,
     session_key,
 )
+from anthrouter.mapper import CLASSIFIER_SENTINEL_KEY
 from anthrouter.model_config import resolve_model
 from anthrouter.model_router import ModelRoutingDecision
+from anthrouter.request_text import (
+    ACTIVITY_LABEL_FALLBACKS,
+    ACTIVITY_LABEL_PREFIX,
+    is_activity_label_prompt,
+)
 from anthrouter.session_state import MAX_ENTRIES, SessionState
 from tests.conftest import DEEP_PROMPT, SESSION, SSE_BODY, _FakeUpstream, db_rows, post
 
@@ -593,6 +599,93 @@ class TestHappyNewYearShortCircuit:
             'system': HAPPY_NEW_YEAR_PREFIX,
             'messages': [{'role': 'user', 'content': 'hi'}]})
         assert result['content'][0]['text'] == HAPPY_BIRTHDAY_REPLY
+
+
+# ---------------------------------------------------------------------------
+# Activity-label local reply (ADR-0015)
+# ---------------------------------------------------------------------------
+
+_LABEL_PROMPT = f'{ACTIVITY_LABEL_PREFIX}, present tense.'
+
+
+def _label_payload(content=_LABEL_PROMPT, **extra):
+    return {'model': 'claude-sonnet-5-5', 'metadata': {'user_id': SESSION},
+            'messages': [{'role': 'user', 'content': content}], **extra}
+
+
+@pytest.mark.parametrize('text, expected', [
+    (_LABEL_PROMPT, True),
+    (f'  \n{_LABEL_PROMPT}', True),
+    (f'<system-reminder>ctx</system-reminder>\n{_LABEL_PROMPT}', True),
+    (f'Please. {_LABEL_PROMPT}', False),
+    (_LABEL_PROMPT.lower(), False),
+    ('', False),
+    (None, False),
+])
+def test_activity_label_prompt_is_a_prefix_match_after_reminder_stripping(text, expected):
+    assert is_activity_label_prompt(text) is expected
+
+
+class TestActivityLabelLocalReply:
+    def test_non_streaming_reply_is_a_fallback_verb_and_skips_upstream(self, proxy):
+        server = proxy(auto_model_routing=True, auto_model_routing_mode='rules')
+        result = post(server, '/v1/messages', _label_payload())
+        assert result['content'][0]['text'] in ACTIVITY_LABEL_FALLBACKS
+        assert result['model'] == 'claude-sonnet-5-5'
+        assert _FakeUpstream.received == []
+
+    def test_streaming_reply_is_a_fallback_verb(self, proxy):
+        server = proxy()
+        body = post(server, '/v1/messages', _label_payload(stream=True), raw=True)
+        assert any(f'"text": "{verb}"' in body for verb in ACTIVITY_LABEL_FALLBACKS)
+        assert 'event: message_stop' in body
+        assert _FakeUpstream.received == []
+
+    def test_nothing_is_recorded(self, proxy):
+        server = proxy()
+        post(server, '/v1/messages', _label_payload())
+        assert db_rows(server) == []
+
+    def test_text_blocks_after_a_reminder_block_are_detected(self, proxy):
+        server = proxy()
+        post(server, '/v1/messages', _label_payload(content=[
+            {'type': 'text', 'text': '<system-reminder>ctx</system-reminder>'},
+            {'type': 'text', 'text': _LABEL_PROMPT},
+        ]))
+        assert _FakeUpstream.received == []
+
+    def test_trailing_system_entry_does_not_hide_the_final_user_turn(self, proxy):
+        server = proxy()
+        payload = _label_payload()
+        payload['messages'].append({'role': 'system', 'content': 'tool loop ended'})
+        post(server, '/v1/messages', payload)
+        assert _FakeUpstream.received == []
+
+    def test_only_the_final_user_turn_is_checked(self, proxy):
+        server = proxy()
+        post(server, '/v1/messages', {
+            'model': 'claude-sonnet-5-5',
+            'messages': [
+                {'role': 'user', 'content': _LABEL_PROMPT},
+                {'role': 'assistant', 'content': 'Cooking'},
+                {'role': 'user', 'content': 'now fix the bug'},
+            ]})
+        assert len(_FakeUpstream.received) == 1
+
+    def test_ordinary_prompt_is_dispatched(self, proxy):
+        server = proxy()
+        post(server, '/v1/messages', _label_payload(content='Describe the bug.'))
+        assert len(_FakeUpstream.received) == 1
+
+    def test_flag_off_dispatches_upstream(self, proxy):
+        server = proxy(activity_label_local_reply=False)
+        post(server, '/v1/messages', _label_payload())
+        assert len(_FakeUpstream.received) == 1
+
+    def test_classifier_sentinel_payload_is_dispatched(self, proxy):
+        server = proxy()
+        post(server, '/v1/messages', _label_payload(**{CLASSIFIER_SENTINEL_KEY: True}))
+        assert len(_FakeUpstream.received) == 1
 
 
 # ---------------------------------------------------------------------------

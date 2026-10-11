@@ -39,3 +39,9 @@ Rewrite inline `role:'system'` messages as `<system-reminder>` text blocks appen
 ## Origin
 
 Ported from anthproxy ADR-0032 (`docs/adr/0032-system-role-fold-gated-by-model.md`, commit 444b941) and ADR-0036 (`docs/adr/0036-inline-system-rewrite-as-user-turn.md`, commit 2c31e9a). The gate and fail-open retry come from ADR-0032; the rewrite design and placement rules come from ADR-0036. Combined into one ADR for anthrouter because the rewrite replaces any fold from the start — anthrouter adds both pieces together, not sequentially.
+
+## Amendment (2026-10-10): Haiku 5.5 leaves the tuple
+
+The bare `'haiku'` entry is narrowed to `'haiku-4-5'`, matching anthproxy 79a4d60. The tuple is now `('sonnet-4-6', 'claude-4-5-sonnet', 'claude-sonnet-4-6', 'claude-haiku-4-5-20251001', 'haiku-4-5')`. The built-in `haiku` alias resolves to `claude-haiku-5-5`, so with bare `'haiku'` every trivial-tier request had its inline system turns rewritten, including message-level `output_config`, which the rewrite discards. Haiku 4.5 still matches and is still rewritten.
+
+No Anthropic document states that Haiku 5.5 accepts inline `role:'system'`. The evidence is operational: anthproxy dispatched 9633 requests to Haiku 5.5 on the Anthropic backend between 2026-10-09 07:00 UTC and 2026-10-11 05:04 UTC with the narrowed tuple, and none was recorded as an error. Those rows store no outbound body, so a silent forced-rewrite retry is not ruled out. If Haiku 5.5 does reject the role, the transport's one-shot forced-rewrite retry recovers the request and logs a WARN naming the model, which is the signal to put `'haiku-5-5'` back in the tuple.
