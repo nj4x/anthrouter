@@ -17,6 +17,7 @@ import hashlib
 import json
 import logging
 import mimetypes
+import random
 import re
 import threading
 import time
@@ -28,17 +29,24 @@ from pathlib import Path
 
 from . import admin
 from .db import compute_cost
-from .mapper import AnthropicRequestError, anthropic_error_payload, sse_event
+from .mapper import CLASSIFIER_SENTINEL_KEY, AnthropicRequestError, anthropic_error_payload, sse_event
 from .model_router import (
     ModelRoutingDecision,
     RoutingTarget,
+    _TRAILING_SCAN_LIMIT,
     _cap_cached_tier,
     _extract_user_text,
     calibrated_ratio,
     route_model,
 )
 from .model_tier import classify_model_tier
-from .request_text import _WRAPPER_TAGS, last_transcript_user_turn, strip_reminders
+from .request_text import (
+    _WRAPPER_TAGS,
+    ACTIVITY_LABEL_FALLBACKS,
+    is_activity_label_prompt,
+    last_transcript_user_turn,
+    strip_reminders,
+)
 from .sanitizer import sanitize_system_prompt
 from .transport import extract_client_credentials
 
@@ -183,6 +191,37 @@ def _has_happy_new_year_system_prompt(payload: dict) -> bool:
         if isinstance(text, str) and text.startswith(HAPPY_NEW_YEAR_PREFIX):
             return True
     return False
+
+
+def _final_user_raw_text(payload: dict) -> str | None:
+    """Raw text of the final user turn, located as routing locates it (ADR-0011).
+
+    The final turn is the last ``role == 'user'`` entry within the trailing
+    ``_TRAILING_SCAN_LIMIT`` messages; trailing non-user entries are skipped.
+    Returns None when there is no such turn or its content is malformed.
+    """
+    messages = payload.get('messages')
+    if not isinstance(messages, list) or not messages:
+        return None
+    lowest = max(len(messages) - _TRAILING_SCAN_LIMIT, 0)
+    for i in range(len(messages) - 1, lowest - 1, -1):
+        msg = messages[i]
+        if isinstance(msg, dict) and msg.get('role') == 'user':
+            extracted = _extract_user_text(msg.get('content'))
+            return None if extracted is None else extracted[1]
+    return None
+
+
+def _is_activity_label_request(payload: dict) -> bool:
+    """True iff the final user turn is a Claude Code activity-label prompt (ADR-0015).
+
+    A payload carrying the classifier sentinel is never one: in-process
+    classifier traffic must reach upstream.
+    """
+    if payload.get(CLASSIFIER_SENTINEL_KEY):
+        return False
+    text = _final_user_raw_text(payload)
+    return text is not None and is_activity_label_prompt(text)
 
 
 def _session_short_id(sess_key: str) -> str:
@@ -608,6 +647,10 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
 
             if _has_happy_new_year_system_prompt(payload):
                 self._handle_happy_new_year(payload)
+                return
+
+            if self.config.activity_label_local_reply and _is_activity_label_request(payload):
+                self._handle_activity_label(payload)
                 return
 
             anthropic_beta = self.headers.get('anthropic-beta', '')
@@ -1051,6 +1094,25 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
             self._send_sse(_local_message_sse(HAPPY_BIRTHDAY_REPLY, model))
         else:
             self._send_json(200, _local_message(HAPPY_BIRTHDAY_REPLY, model))
+
+    def _handle_activity_label(self, payload: dict):
+        """Answer a Claude Code activity-label prompt with a filler verb (ADR-0015).
+
+        Runs before routing, so no classifier call, routing-state write or
+        upstream dispatch happens.  anthrouter keeps no conversation summary,
+        so the reply is always a verb from ``ACTIVITY_LABEL_FALLBACKS``.  Not
+        recorded to the database, like ``_handle_happy_new_year``.
+        """
+        sess_key = session_key(payload)
+        self._session_prefix = _session_short_id(sess_key) if sess_key else None
+        self._session_hash = _system_hash(payload)
+        model = payload.get('model', '')
+        reply = random.choice(ACTIVITY_LABEL_FALLBACKS)
+        logger.info('%s Routing request: operation=activity_label_local', self._log_tag())
+        if payload.get('stream'):
+            self._send_sse(_local_message_sse(reply, model))
+        else:
+            self._send_json(200, _local_message(reply, model))
 
     def _help_markdown(self) -> str:
         return (

@@ -127,6 +127,31 @@ def is_title_generation(text: str) -> bool:
     return last_line.startswith(_TITLE_GEN_PREFIX)
 
 
+# Claude Code asks for a 3-5 word activity label for each live sub-agent.  The
+# final user turn starts with this fixed prefix (ADR-0015).  Detection is a
+# plain case-sensitive prefix match after reminder stripping.
+ACTIVITY_LABEL_PREFIX = 'Describe your most recent action in 3-5 words'
+
+# The local reply to an activity-label prompt, picked per ask so the label
+# moves instead of sitting on one word.  anthrouter keeps no conversation
+# summary to answer from, so every label is one of these (ADR-0015).
+ACTIVITY_LABEL_FALLBACKS = (
+    'Discombobulating', 'Recombobulating', 'Cooking', 'Pondering', 'Tinkering',
+    'Noodling', 'Puzzling', 'Brewing', 'Wrangling', 'Untangling',
+)
+
+
+def is_activity_label_prompt(text: str) -> bool:
+    """Return True iff *text* is a Claude Code activity-label prompt.
+
+    *text* is the final user turn's raw text.  Reminder blocks are stripped
+    first, then the prefix must match at the start.
+    """
+    if not isinstance(text, str):
+        return False
+    return strip_reminders(text).startswith(ACTIVITY_LABEL_PREFIX)
+
+
 def strip_reminders(text: str) -> str:
     """Remove Claude Code wrapper blocks and trim outer whitespace.
 

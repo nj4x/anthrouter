@@ -60,6 +60,21 @@ def test_tls_system_trust_env_disables(monkeypatch):
     assert parse_args([]).tls_system_trust is False
 
 
+def test_activity_label_local_reply_defaults_to_true(monkeypatch):
+    monkeypatch.delenv('ANTHROUTER_ACTIVITY_LABEL_LOCAL_REPLY', raising=False)
+    assert parse_args([]).activity_label_local_reply is True
+    assert Config().activity_label_local_reply is True
+
+
+def test_activity_label_local_reply_no_flag():
+    assert parse_args(['--no-activity-label-local-reply']).activity_label_local_reply is False
+
+
+def test_activity_label_local_reply_env_disables(monkeypatch):
+    monkeypatch.setenv('ANTHROUTER_ACTIVITY_LABEL_LOCAL_REPLY', '0')
+    assert parse_args([]).activity_label_local_reply is False
+
+
 def test_env_overrides(monkeypatch):
     monkeypatch.setenv('ANTHROUTER_PORT', '9001')
     monkeypatch.setenv('ANTHROUTER_AUTO_MODEL_ROUTING', '1')
@@ -215,6 +230,11 @@ def test_editable_fields_excludes_request_history_size():
 def test_editable_fields_excludes_tls_system_trust():
     """tls_system_trust is not in EDITABLE_FIELDS (patches ssl at process start)."""
     assert 'tls_system_trust' not in EDITABLE_FIELDS
+
+
+def test_editable_fields_excludes_activity_label_local_reply():
+    """activity_label_local_reply is not in EDITABLE_FIELDS (CLI/env only, ADR-0015)."""
+    assert 'activity_label_local_reply' not in EDITABLE_FIELDS
 
 
 # =============================================================================
