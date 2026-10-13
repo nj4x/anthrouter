@@ -4,27 +4,20 @@ How the engineering skills should consume this repo's domain documentation when 
 
 ## Before exploring, read these
 
-### Domain glossary and decisions
-
-- **`CONTEXT.md`** at the repo root — holds the domain model (Tier, Routing decision, Classifier, etc.). Read this before modifying routing or classification logic.
-- **`docs/adr/`** — architecture decisions that govern how requests flow through the proxy. Required reading before touching `install.sh`/`uninstall.sh`, routing, or admin APIs (see ADR-0001, ADR-0005).
-
-### When working in multi-context repos
-
-- **`CONTEXT-MAP.md`** at the repo root if it exists — points at one `CONTEXT.md` per context. Read each one relevant to the topic.
-- **`docs/adr/`** — read ADRs that touch the area you're about to work in. In multi-context repos, also check `src/<context>/docs/adr/` for context-scoped decisions.
-- **`.data/requirements/`** at the repo root — formal requirements docs (FS, SRS, API definitions, test cases). Read docs relevant to the feature you're working on.
+- **`GLOSSARY.md`** at the repo root — holds the domain model (Tier, Routing decision, Classifier, etc.). Read this before modifying routing or classification logic.
+- **`docs/adr/`** — read ADRs that touch the area you're about to work in. Required reading before touching `install.sh`/`uninstall.sh`, routing, or admin APIs (see ADR-0001, ADR-0005).
+- **`.data/requirements/`** at the repo root — formal requirements docs (FS, SRS, API definitions, test cases). Read docs relevant to the feature you're working on. When this file has a "Requirements corpus" section, that section names the corpus instead.
 - **`.data/docs/`** at the repo root — external reference documentation (vendor APIs, third-party integrations). Skills in `.data/docs/skills/` may provide additional tools.
 
-If any of these files or directories don't exist, **proceed silently**. Don't flag their absence; don't suggest creating them upfront. The `/domain-modeling` skill creates `CONTEXT.md` and ADRs lazily when terms or decisions actually get resolved.
+If any of these files or directories don't exist, **proceed silently**. Don't flag their absence; don't suggest creating them upfront. The `/domain-modeling` skill creates `GLOSSARY.md` and ADRs lazily when terms or decisions actually get resolved.
 
 ## File structure
 
-Single-context repo (most repos):
+Single-context repo:
 
 ```
 /
-├── CONTEXT.md
+├── GLOSSARY.md
 ├── .data/
 │   ├── requirements/     ← formal requirements docs (FS, SRS, API definitions)
 │   └── docs/             ← external reference docs (vendor APIs, integrations)
@@ -34,27 +27,9 @@ Single-context repo (most repos):
 └── src/
 ```
 
-Multi-context repo (presence of `CONTEXT-MAP.md` at the root):
-
-```
-/
-├── CONTEXT-MAP.md
-├── .data/
-│   ├── requirements/
-│   └── docs/
-├── docs/adr/                          ← system-wide decisions
-└── src/
-    ├── ordering/
-    │   ├── CONTEXT.md
-    │   └── docs/adr/                  ← context-specific decisions
-    └── billing/
-        ├── CONTEXT.md
-        └── docs/adr/
-```
-
 ## Use the glossary's vocabulary
 
-When your output names a domain concept (in an issue title, a refactor proposal, a hypothesis, a test name), use the term as defined in `CONTEXT.md`. Don't drift to synonyms the glossary explicitly avoids.
+When your output names a domain concept (in an issue title, a refactor proposal, a hypothesis, a test name), use the term as defined in `GLOSSARY.md`. Don't drift to synonyms the glossary explicitly avoids.
 
 If the concept you need isn't in the glossary yet, that's a signal — either you're inventing language the project doesn't use (reconsider) or there's a real gap (note it for `/domain-modeling`).
 
@@ -71,4 +46,4 @@ Formal requirements carry stable IDs (e.g. `REQ-1234`) assigned by `/FS-skill` a
 - **`Requirements:` field** — a labelled line on tickets and ADRs listing the IDs the artifact satisfies (e.g. `Requirements: REQ-1234, REQ-1240`).
 - **Inline `(ID)` tags** — parenthetical IDs on individual spec items (user stories, implementation decisions) that trace to a requirement.
 
-`CONTEXT.md` never carries requirement IDs — it stays a pure glossary of names and definitions. IDs live in specs, tickets, ADRs, and commit/PR bodies.
+`GLOSSARY.md` never carries requirement IDs — it stays a pure glossary of names and definitions. IDs live in specs, tickets, ADRs, and commit/PR bodies.

@@ -46,7 +46,7 @@ Classifier payloads carry the sentinel key `_anthproxy_internal_classifier: True
 
 ## Domain and architecture
 
-See `docs/agents/domain.md` for reading the domain model (`CONTEXT.md`) and design decisions (`docs/adr/`).
+See `docs/agents/domain.md` for reading the domain model (`GLOSSARY.md`) and design decisions (`docs/adr/`).
 
 See `docs/agents/architecture.md` for full details on request path, routing, sanitizer, transport, persistence, and local commands.
 
