@@ -1508,7 +1508,6 @@ def _dispatch_classifier_mode(
         target.backend, 'send_classifier_message', target.backend.send_message
     )
 
-    # Exponential backoff floor: 1s, 2s, 4s, 8s, capped; jitter rides above it.
     max_retries = getattr(config, 'auto_model_routing_classifier_max_retries', 4)
     response = None
 
@@ -1577,6 +1576,10 @@ def _dispatch_classifier_mode(
                 floor = min(1.0 * 2 ** attempt, 8.0)
                 if retry_after is not None:
                     floor = max(retry_after, floor)
+                if not rate_limited:
+                    # A 5xx keeps retrying within budget, but upstream timing on it
+                    # must never stretch the request thread past the 429 ceiling.
+                    floor = min(floor, CLASSIFIER_MAX_RETRY_DELAY_SECONDS)
                 if rate_limited and floor > CLASSIFIER_MAX_RETRY_DELAY_SECONDS:
                     logger.info(
                         '%s Model router: classifier rate-limited for %.1fs '

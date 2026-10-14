@@ -5196,7 +5196,7 @@ class TestClassifierRetryPolicy:
                                   status_code=503, retry_after=3600.0),
             jitter=1.0)
         assert calls == 5
-        assert sleeps == [3600.0, 3600.0, 3600.0, 3600.0]
+        assert sleeps == [10.0] * 4
         assert decision.reason_code == 'classifier_failed'
 
     def test_non_retryable_status_returns_classifier_failed_at_once(self, monkeypatch):

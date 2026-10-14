@@ -1300,6 +1300,7 @@ def test_error_log_429_plain_text_carries_status_headers_preview_no_code(caplog)
     with caplog.at_level(logging.WARNING, logger='anthrouter.http_util'), pytest.raises(AnthropicRequestError):
         handle_error_response(429, body, _HeaderOnlyResponse(headers))
     assert '429' in caplog.text
+    assert 'Upstream error HTTP 429 (plain): Error' in caplog.text
     assert 'request-id=req-plain' in caplog.text
     assert 'retry-after=3.0' in caplog.text
     assert 'ratelimit=' in caplog.text

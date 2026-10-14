@@ -1005,6 +1005,28 @@ def test_5xx_produces_502_without_retry_after(proxy, monkeypatch):
     assert err.headers.get('Retry-After') is None
 
 
+@pytest.mark.parametrize('upstream_status,client_status',
+                         [(503, 502), (400, 400), (401, 401), (403, 403)])
+def test_retry_after_not_echoed_on_non_429(proxy, monkeypatch, upstream_status, client_status):
+    """Upstream Retry-After on a non-429 error must not reach the client."""
+    monkeypatch.setattr('anthrouter.transport.time.sleep', lambda _s: None)
+    _FakeUpstream.status = upstream_status
+    _FakeUpstream.extra_headers = {'Retry-After': '30'}
+    server = proxy()
+    err = _post_expect_error(server, client_status)
+    assert err.headers.get('Retry-After') is None
+
+
+def test_retry_after_non_finite_omitted(proxy, monkeypatch):
+    """retry-after-ms: 1e999 parses to inf; header is omitted, response still sent."""
+    monkeypatch.setattr('anthrouter.transport.time.sleep', lambda _s: None)
+    _FakeUpstream.status = 429
+    _FakeUpstream.extra_headers = {'retry-after-ms': '1e999'}
+    server = proxy()
+    err = _post_expect_error(server, 429)
+    assert err.headers.get('Retry-After') is None
+
+
 # ---------------------------------------------------------------------------
 # Ticket #36 — Record the attempt number (transport retries only)
 # ---------------------------------------------------------------------------

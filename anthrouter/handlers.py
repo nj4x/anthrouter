@@ -1246,7 +1246,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
 
     def _send_error(self, exc: AnthropicRequestError) -> None:
         self._send_json(exc.status_code, anthropic_error_payload(exc.error_type, exc.message),
-                        retry_after=exc.retry_after)
+                        retry_after=exc.retry_after if exc.status_code == 429 else None)
 
     def _validate_content_type(self):
         if 'application/json' not in self.headers.get('Content-Type', ''):
@@ -1281,7 +1281,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
             self.send_response(status)
             self.send_header('Content-Type', 'application/json')
             self.send_header('Content-Length', str(len(body)))
-            if retry_after is not None:
+            if retry_after is not None and math.isfinite(retry_after):
                 self.send_header('Retry-After', str(int(math.ceil(retry_after))))
             self.end_headers()
             self.wfile.write(body)
