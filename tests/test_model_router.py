@@ -47,7 +47,6 @@ from anthrouter.model_router import (
     route_model,
 )
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -155,22 +154,25 @@ class TestReasonCode:
 
     def test_session_cached_tier_is_valid_reason_code(self):
         """'session_cached_tier' must be in the ReasonCode Literal."""
-        from anthrouter.model_router import ReasonCode
         import typing
+
+        from anthrouter.model_router import ReasonCode
         args = typing.get_args(ReasonCode)
         assert 'session_cached_tier' in args
 
     def test_session_cached_walkback_is_valid_reason_code(self):
         """'session_cached_walkback' must be in the ReasonCode Literal."""
-        from anthrouter.model_router import ReasonCode
         import typing
+
+        from anthrouter.model_router import ReasonCode
         args = typing.get_args(ReasonCode)
         assert 'session_cached_walkback' in args
 
     def test_all_expected_reason_codes_present(self):
         """Guard against accidental removal of existing codes."""
-        from anthrouter.model_router import ReasonCode
         import typing
+
+        from anthrouter.model_router import ReasonCode
         args = typing.get_args(ReasonCode)
         expected = {
             'disabled', 'model_not_eligible', 'malformed_payload',
@@ -186,8 +188,9 @@ class TestReasonCode:
 
     def test_affirmation_reason_codes_are_valid(self):
         """All affirmation reason codes must be in the ReasonCode Literal."""
-        from anthrouter.model_router import ReasonCode
         import typing
+
+        from anthrouter.model_router import ReasonCode
         args = typing.get_args(ReasonCode)
         assert 'affirmation_inherited' in args
         assert 'affirmation_floored_standard' in args  # retained for old stats rows
@@ -461,8 +464,9 @@ class TestLongContextSizeFloor:
         assert decision.reason_code == 'model_not_eligible'
 
     def test_size_forced_long_context_is_valid_reason_code(self):
-        from anthrouter.model_router import ReasonCode
         import typing
+
+        from anthrouter.model_router import ReasonCode
         assert 'size_forced_long_context' in typing.get_args(ReasonCode)
 
     def test_decision_carries_estimated_input_tokens(self):
@@ -523,7 +527,7 @@ class TestCalibratedRatio:
         assert round(calibrated_ratio(34_000, 20_000, 1.0), 3) == 1.7
 
     def test_clamped_to_max(self):
-        from anthrouter.model_router import calibrated_ratio, _RATIO_MAX
+        from anthrouter.model_router import _RATIO_MAX, calibrated_ratio
         assert calibrated_ratio(200_000, 20_000, 1.0) == _RATIO_MAX
 
     def test_never_below_one(self):
@@ -583,7 +587,7 @@ class TestHardOverrides:
         backend.send_classifier_message.return_value = _score_response('trivial')
         payload = _payload(
             model='sonnet',
-            **{'thinking': {'type': 'enabled', 'budget_tokens': 1000}},
+            thinking={'type': 'enabled', 'budget_tokens': 1000},
         )
         target = _target(backend=backend, routing=True)
         decision = route_model(payload, target, {})
@@ -595,7 +599,7 @@ class TestHardOverrides:
     def test_thinking_adaptive_falls_through_to_classifier(self):
         backend = MagicMock()
         backend.send_classifier_message.return_value = _score_response('standard')
-        payload = _payload(model='sonnet', **{'thinking': {'type': 'adaptive'}})
+        payload = _payload(model='sonnet', thinking={'type': 'adaptive'})
         target = _target(backend=backend, routing=True)
         decision = route_model(payload, target, {})
         assert payload['model'] == 'sonnet'
@@ -607,7 +611,7 @@ class TestHardOverrides:
         backend = MagicMock()
         backend.send_classifier_message.return_value = _score_response('standard')
         target = _target(backend=backend, routing=True)
-        payload = _payload(model='sonnet', **{'thinking': {'type': 'disabled'}})
+        payload = _payload(model='sonnet', thinking={'type': 'disabled'})
         decision = route_model(payload, target, {})
         assert decision.reason_code == 'classifier_standard'
         backend.send_classifier_message.assert_called_once()
@@ -616,7 +620,7 @@ class TestHardOverrides:
     def test_high_effort_falls_through_to_classifier(self, effort):
         backend = MagicMock()
         backend.send_classifier_message.return_value = _score_response('deep')
-        payload = _payload(model='sonnet', **{'output_config': {'effort': effort}})
+        payload = _payload(model='sonnet', output_config={'effort': effort})
         target = _target(backend=backend, routing=True)
         decision = route_model(payload, target, {})
         # user=deep(100), no sys → midpoint(56); blend=round(86.8)=87 → deep
@@ -631,7 +635,7 @@ class TestHardOverrides:
         backend.send_classifier_message.return_value = _score_response('standard')
         target = _target(backend=backend, routing=True)
         if effort is not None:
-            payload = _payload(model='sonnet', **{'output_config': {'effort': effort}})
+            payload = _payload(model='sonnet', output_config={'effort': effort})
         else:
             payload = _payload(model='sonnet')
         decision = route_model(payload, target, {})
@@ -971,10 +975,7 @@ class TestBuildRoutingSummary:
         # always-on in the Claude Code envelope and only bias the classifier.
         payload = _payload(
             content='Solve this',
-            **{
-                'thinking': {'type': 'enabled', 'budget_tokens': 100},
-                'output_config': {'effort': 'high'},
-            },
+            thinking={'type': 'enabled', 'budget_tokens': 100}, output_config={'effort': 'high'},
         )
         s = build_routing_summary(payload)
         assert s is not None
@@ -3012,7 +3013,10 @@ class TestAffirmationEnrichment:
         """When confidence_bump=True, the affirmation classifier call uses
         _CLASSIFIER_SYSTEM_JSON + _CLASSIFIER_SYSTEM_JSON_PRIOR_SUFFIX and
         parse_classifier_score_json, not the one-word prompt/parser."""
-        from anthrouter.model_router import _CLASSIFIER_SYSTEM_JSON, _CLASSIFIER_SYSTEM_JSON_PRIOR_SUFFIX
+        from anthrouter.model_router import (
+            _CLASSIFIER_SYSTEM_JSON,
+            _CLASSIFIER_SYSTEM_JSON_PRIOR_SUFFIX,
+        )
         backend = MagicMock()
         del backend.send_classifier_message
         backend.send_message.return_value = {
@@ -3488,6 +3492,7 @@ class TestModelRoutingDecisionTelemetry:
     def test_dataclasses_replace_preserves_telemetry(self):
         """dataclasses.replace() on a ModelRoutingDecision preserves telemetry fields."""
         from dataclasses import replace
+
         from anthrouter.model_router import ModelRoutingDecision
         original = ModelRoutingDecision(
             requested_model='sonnet',
@@ -3622,6 +3627,7 @@ class TestConfidenceBumpPromotion:
     def test_dataclasses_replace_preserves_telemetry(self):
         """dataclasses.replace() on a ModelRoutingDecision preserves telemetry fields."""
         from dataclasses import replace
+
         from anthrouter.model_router import ModelRoutingDecision
         original = ModelRoutingDecision(
             requested_model='sonnet',
@@ -4237,6 +4243,7 @@ class TestClassifierTransparencyFields:
     def test_dataclasses_replace_preserves_new_fields(self):
         """dataclasses.replace() on a decision preserves the 4 new fields."""
         from dataclasses import replace
+
         from anthrouter.model_router import ModelRoutingDecision
         original = ModelRoutingDecision(
             requested_model='sonnet',
@@ -4862,6 +4869,7 @@ class TestBlendedReasonCodes:
 
     def test_all_six_blended_codes_in_reason_code_literal(self):
         import typing
+
         from anthrouter.model_router import ReasonCode
         args = typing.get_args(ReasonCode)
         for raw, blended in (

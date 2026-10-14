@@ -19,7 +19,7 @@
 |------------------|-------------------|-------|
 | `anthproxy/handlers.py` (2840 lines) | `anthrouter/handlers.py` (1256 lines) | anthrouter is ~56% smaller; removed multi-backend dispatch, retry logic, and credential handling complexity |
 | `anthproxy/transport.py` (N/A - backends handle transport) | `anthrouter/transport.py` (246 lines) | anthrouter has single unified transport; anthproxy has per-backend transport in `anthproxy/anthropic/backend.py`, `anthproxy/bedrock/backend.py`, etc. |
-| `anthproxy/mapper/anthropic_transform.py` | `anthrouter/mapper/anthropic_transform.py` | Nearly identical; both handle model alias resolution, beta merging, body building |
+| `anthproxy/mapper/anthropic_transform.py` | `anthrouter/mapper/anthropic_transform.py` | Nearly identical; both handle model alias resolution, beta merging, body building. anthproxy also prepends the Claude Code identity block and `REQUIRED_BETAS` to every request; anthrouter prepends only the identity block, and only to classifier payloads (2026-10-14) |
 | `anthproxy/mapper/common.py` | `anthrouter/mapper/common.py` | Shared utilities for error handling, token estimation, thinking-block stripping |
 
 ### 1.2 Model Routing

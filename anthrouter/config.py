@@ -98,7 +98,7 @@ FIELD_METADATA: dict[str, dict] = {
         'group': 'Model Routing',
     },
     'model_aliases': {
-        'description': 'Comma-separated alias:model pairs mapping model aliases to target models. Example: "gpt4:claude-opus-4,turbo:claude-opus-3.5-sonnet".',
+        'description': 'Comma-separated alias:model pairs mapping model aliases to target models. Example: "gpt4:claude-opus-4,turbo:claude-sonnet-4". Empty to disable aliasing.',
         'type': 'str',
         'group': 'Model Routing',
     },
@@ -182,11 +182,6 @@ FIELD_METADATA: dict[str, dict] = {
     },
     'lock_requested_model': {
         'description': 'Override the incoming request model with a fixed baseline before auto routing fires; "off" disables the lock and passes the client model through unchanged.',
-        'type': 'str',
-        'group': 'Model Routing',
-    },
-    'model_aliases': {
-        'description': 'Comma-separated alias:model pairs mapping model aliases to target models. Example: "gpt4:claude-opus-4,turbo:claude-sonnet-4". Empty to disable aliasing.',
         'type': 'str',
         'group': 'Model Routing',
     },

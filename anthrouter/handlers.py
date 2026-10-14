@@ -30,11 +30,16 @@ from pathlib import Path
 
 from . import admin
 from .db import compute_cost
-from .mapper import CLASSIFIER_SENTINEL_KEY, AnthropicRequestError, anthropic_error_payload, sse_event
+from .mapper import (
+    CLASSIFIER_SENTINEL_KEY,
+    AnthropicRequestError,
+    anthropic_error_payload,
+    sse_event,
+)
 from .model_router import (
+    _TRAILING_SCAN_LIMIT,
     ModelRoutingDecision,
     RoutingTarget,
-    _TRAILING_SCAN_LIMIT,
     _cap_cached_tier,
     _extract_user_text,
     calibrated_ratio,
@@ -441,7 +446,7 @@ def _rewrite_message_start_model(chunk: str, requested_model: str) -> str:
         return chunk
     changed = False
 
-    def _sub(m: 're.Match') -> str:
+    def _sub(m: re.Match) -> str:
         nonlocal changed
         try:
             event = json.loads(m.group(1))

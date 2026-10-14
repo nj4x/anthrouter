@@ -3,7 +3,8 @@
 Alias resolution, beta merging, and body construction.  anthrouter forwards the
 client's own request essentially as it arrived — it injects no system blocks, no
 required betas, and no cache breakpoints, because the client already speaks
-native Anthropic and holds its own credential.
+native Anthropic and holds its own credential.  The one exception is anthrouter's
+own classifier traffic, which gets the Claude Code identity block (``build_body``).
 
 What it does do is model-aware sanitization, and only because it *changes the
 model*: a payload valid for the tier the client asked for can be rejected with
@@ -24,6 +25,15 @@ logger = logging.getLogger(__name__)
 ANTHROPIC_VERSION = '2023-06-01'
 MESSAGES_PATH = '/v1/messages?beta=true'
 COUNT_TOKENS_PATH = '/v1/messages/count_tokens?beta=true'
+
+# Since 2026-10 every identity-less classifier call on an OAuth token got 429
+# rate_limit_error while identified requests on the same token succeeded, so
+# classifier calls carry the first block anthproxy sends (owner decision; see
+# docs/research/2026-10-14-classifier-429-anthproxy-diff.md).
+_CLASSIFIER_IDENTITY_BLOCK = {
+    'type': 'text',
+    'text': "You are Claude Code, Anthropic's official CLI for Claude.",
+}
 
 
 def _is_pre_5_5_haiku(model_id: str) -> bool:
@@ -417,6 +427,13 @@ def build_body(payload: dict, aliases: dict[str, str] | None = None, *,
         oc = dict(oc) if isinstance(oc, dict) else {}
         oc['effort'] = 'low'
         body['output_config'] = oc
+
+    if payload.get(CLASSIFIER_SENTINEL_KEY):
+        system = body.get('system')
+        if isinstance(system, str):
+            system = [{'type': 'text', 'text': system}] if system else []
+        if system is None or isinstance(system, list):
+            body['system'] = [_CLASSIFIER_IDENTITY_BLOCK, *(system or [])]
 
     if not _supports_per_message_effort(body['model'], payload.get('_anthropic_beta') or []):
         _strip_per_message_effort(body)

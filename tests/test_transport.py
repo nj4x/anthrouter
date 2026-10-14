@@ -311,6 +311,49 @@ def test_classifier_payload_through_build_body_has_low_effort_and_no_sentinel():
     assert _CLASSIFIER_SENTINEL not in body
 
 
+_IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude."
+
+
+def test_classifier_payload_gets_identity_block_before_its_own_system_prompt():
+    body = _body({
+        _CLASSIFIER_SENTINEL: True, 'model': 'haiku', 'max_tokens': 8,
+        'system': 'classify', 'messages': [{'role': 'user', 'content': 'x'}],
+    })
+    assert body['system'] == [
+        {'type': 'text', 'text': _IDENTITY},
+        {'type': 'text', 'text': 'classify'},
+    ]
+
+
+def test_classifier_payload_without_system_gets_only_identity_block():
+    body = _body({_CLASSIFIER_SENTINEL: True, 'model': 'haiku', 'max_tokens': 8,
+                  'messages': [{'role': 'user', 'content': 'x'}]})
+    assert body['system'] == [{'type': 'text', 'text': _IDENTITY}]
+
+
+def test_classifier_payload_list_system_keeps_its_blocks_after_identity():
+    block = {'type': 'text', 'text': 'classify'}
+    body = _body({_CLASSIFIER_SENTINEL: True, 'model': 'haiku', 'max_tokens': 8,
+                  'system': [block], 'messages': [{'role': 'user', 'content': 'x'}]})
+    assert body['system'] == [{'type': 'text', 'text': _IDENTITY}, block]
+
+
+def test_classifier_payload_with_unexpected_system_type_is_left_alone():
+    body = _body({_CLASSIFIER_SENTINEL: True, 'model': 'haiku', 'max_tokens': 8,
+                  'system': {'type': 'text', 'text': 'x'},
+                  'messages': [{'role': 'user', 'content': 'x'}]})
+    assert body['system'] == {'type': 'text', 'text': 'x'}
+
+
+def test_client_payload_system_is_not_touched():
+    body = _body({'model': 'haiku', 'max_tokens': 8, 'system': 'mine',
+                  'messages': [{'role': 'user', 'content': 'x'}]})
+    assert body['system'] == 'mine'
+    body = _body({'model': 'haiku', 'max_tokens': 8,
+                  'messages': [{'role': 'user', 'content': 'x'}]})
+    assert 'system' not in body
+
+
 _PER_MESSAGE_EFFORT_BETA = 'mid-conversation-output-config-2026-07-01'
 
 

@@ -30,7 +30,6 @@ from anthrouter.request_text import (
 from anthrouter.session_state import MAX_ENTRIES, SessionState
 from tests.conftest import DEEP_PROMPT, SESSION, SSE_BODY, _FakeUpstream, db_rows, post
 
-
 # ---------------------------------------------------------------------------
 # Local commands
 # ---------------------------------------------------------------------------

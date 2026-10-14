@@ -171,7 +171,7 @@ _TRAILING_SCAN_LIMIT = 8
 _LOG_PROMPT_LIMIT = 200
 
 
-def _score_to_tier(score: int | float, trivial_threshold: float, standard_threshold: float) -> str:
+def _score_to_tier(score: float, trivial_threshold: float, standard_threshold: float) -> str:
     """Map a 0–100 numeric score to a tier label using configured thresholds."""
     if score < trivial_threshold:
         return 'trivial'
@@ -869,7 +869,7 @@ def _extract_system_prompt_preview(payload: dict, limit: int) -> str:
     return ''
 
 
-def build_system_prompt_classifier_payload(system_preview: str, config: 'Config') -> dict:
+def build_system_prompt_classifier_payload(system_preview: str, config: Config) -> dict:
     """Build a classifier payload for system-prompt role-complexity inference.
 
     Uses _CLASSIFIER_SYSTEM_PROMPT_TIER (role-focused prompt, not task-focused)
@@ -897,7 +897,7 @@ def _classify_system_prompt(
     cache_size: int,
     trivial_threshold: float,
     standard_threshold: float,
-    config: 'Config',
+    config: Config,
     target: RoutingTarget,
     credentials: dict,
     log_tag: str,
@@ -971,7 +971,7 @@ def _apply_weighted_blend(
     user_score: int,
     system_prompt_sha256: str | None,
     payload: dict,
-    config: 'Config',
+    config: Config,
     target: RoutingTarget,
     credentials: dict,
     log_tag: str,
@@ -1018,7 +1018,7 @@ def _apply_weighted_blend(
 
 def build_classifier_payload(
     summary: RoutingSummary,
-    config: 'Config',
+    config: Config,
     prior_response_summary: str | None = None,
 ) -> dict:
     """Build a synthetic, non-streaming classifier request.
@@ -1350,7 +1350,7 @@ _RULES_STANDARD_KEYWORDS: tuple[str, ...] = (
 )
 
 
-def classify_by_rules(summary: 'RoutingSummary') -> str | None:
+def classify_by_rules(summary: RoutingSummary) -> str | None:
     """Rule-based routing classifier using only RoutingSummary fields.
 
     Conservative; returns a classification label (``'trivial'``,
@@ -1425,8 +1425,8 @@ CLASSIFIER_MAX_RETRY_DELAY_SECONDS = 10.0
 
 def _dispatch_classifier_mode(
     mode: str,
-    summary: 'RoutingSummary',
-    config: 'Config',
+    summary: RoutingSummary,
+    config: Config,
     target: RoutingTarget,
     credentials: dict,
     est_tokens: int,
@@ -1484,7 +1484,7 @@ def _dispatch_classifier_mode(
         requested,
         len(summary.final_user_text),
         est_tokens,
-        threshold if threshold > 0 else 0,
+        max(0, threshold),
         _size_pct,
         _prompt_log_preview(summary.final_user_text),
     )
