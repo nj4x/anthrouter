@@ -816,10 +816,11 @@ def _classifier_calls_raise(monkeypatch, exc):
 
     original = AnthropicTransport.send_message
 
-    def send_message(self, payload, credentials, config=None, ratelimit_out=None):
+    def send_message(self, payload, credentials, config=None, ratelimit_out=None,
+                     attempt_out=None):
         if payload.get('_anthproxy_internal_classifier'):
             raise exc
-        return original(self, payload, credentials, config, ratelimit_out)
+        return original(self, payload, credentials, config, ratelimit_out, attempt_out)
 
     monkeypatch.setattr(AnthropicTransport, 'send_message', send_message)
     monkeypatch.setattr('anthrouter.model_router.time.sleep', lambda _s: None)
@@ -997,3 +998,102 @@ def test_5xx_produces_502_without_retry_after(proxy, monkeypatch):
     err = _post_expect_error(server, 502)
     assert err.headers.get('Retry-After') is None
 
+
+# ---------------------------------------------------------------------------
+# Ticket #36 — Record the attempt number (transport retries only)
+# ---------------------------------------------------------------------------
+
+def _fail_first_n_posts(monkeypatch, n):
+    """Make the fake upstream answer HTTP 500 to its first ``n`` POSTs, then 200."""
+    original = _FakeUpstream.do_POST
+    calls = {'n': 0}
+
+    def do_POST(self):
+        calls['n'] += 1
+        type(self).status = 500 if calls['n'] <= n else 200
+        original(self)
+
+    monkeypatch.setattr(_FakeUpstream, 'do_POST', do_POST)
+
+
+def _post_one_prompt(server):
+    request = urllib.request.Request(
+        server.base_url + '/v1/messages',
+        data=json.dumps({'model': 'sonnet', 'metadata': {'user_id': SESSION},
+                         'messages': [{'role': 'user', 'content': 'hi'}]}).encode(),
+        headers={'Content-Type': 'application/json', 'x-api-key': 'k'},
+        method='POST')
+    try:
+        urllib.request.urlopen(request).read()
+    except urllib.error.HTTPError:
+        pass
+    return db_rows(server)[0]
+
+
+def test_transport_retried_request_records_attempt_above_one(proxy, monkeypatch):
+    monkeypatch.setattr('anthrouter.transport.time.sleep', lambda _s: None)
+    _fail_first_n_posts(monkeypatch, 2)
+    server = proxy()
+
+    row = _post_one_prompt(server)
+
+    assert row['status'] == 'success'
+    assert row['attempt'] == 3
+
+
+def test_exhausted_transport_request_records_the_exhausted_count(proxy, monkeypatch):
+    from anthrouter.http_util import MAX_RETRIES
+
+    monkeypatch.setattr('anthrouter.transport.time.sleep', lambda _s: None)
+    _FakeUpstream.status = 500
+    server = proxy()
+
+    row = _post_one_prompt(server)
+
+    assert row['status'] == 'error'
+    assert row['attempt'] == MAX_RETRIES + 1
+    assert len(_FakeUpstream.received) == MAX_RETRIES + 1
+
+
+def test_request_that_never_reaches_the_retry_loop_records_one(proxy, monkeypatch):
+    from anthrouter.mapper.common import AnthropicRequestError
+    from anthrouter.transport import AnthropicTransport
+
+    def refuse(self, payload, credentials, config=None, ratelimit_out=None,
+               attempt_out=None):
+        raise AnthropicRequestError('refused before dispatch', status_code=400)
+
+    monkeypatch.setattr(AnthropicTransport, 'send_message', refuse)
+    server = proxy()
+
+    row = _post_one_prompt(server)
+
+    assert _FakeUpstream.received == []
+    assert row['status'] == 'error'
+    assert row['attempt'] == 1
+
+
+def test_classifier_retry_with_first_try_upstream_success_records_one(proxy, monkeypatch):
+    from anthrouter.mapper.common import AnthropicRequestError
+    from anthrouter.transport import AnthropicTransport
+
+    original = AnthropicTransport.send_message
+    classifier_calls = []
+
+    def send_message(self, payload, credentials, config=None, ratelimit_out=None,
+                     attempt_out=None):
+        if payload.get('_anthproxy_internal_classifier'):
+            classifier_calls.append(1)
+            raise AnthropicRequestError('overloaded', error_type='api_error',
+                                        status_code=503)
+        return original(self, payload, credentials, config, ratelimit_out, attempt_out)
+
+    monkeypatch.setattr(AnthropicTransport, 'send_message', send_message)
+    monkeypatch.setattr('anthrouter.model_router.time.sleep', lambda _s: None)
+    server = proxy(auto_model_routing=True, auto_model_routing_mode='classifier')
+
+    row = _post_routed_prompt(server)
+
+    assert len(classifier_calls) > 1
+    assert row['status'] == 'success'
+    assert row['attempt'] == 1

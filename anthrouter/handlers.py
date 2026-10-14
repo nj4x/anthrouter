@@ -631,6 +631,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         self._prompt_capture = {}
         self._sanitizer_events = []
         self._ratelimit = {}
+        self._attempt = {}
 
     # -- messages -------------------------------------------------------------
 
@@ -827,6 +828,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         if streaming:
             sse_gen = self.transport.send_message_stream(
                 payload, credentials, self.config, ratelimit_out=self._ratelimit,
+                attempt_out=self._attempt,
             )
             wrapped = self._usage_sse_wrapper(sse_gen, start_time, model, sid)
             self._send_sse(self._rewrite_response_model_sse(wrapped))
@@ -834,6 +836,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
 
         result = self.transport.send_message(
             payload, credentials, self.config, ratelimit_out=self._ratelimit,
+            attempt_out=self._attempt,
         )
         self.sessions.record_ratelimit(self._ratelimit)
         usage = result.get('usage', {}) or {}
@@ -1015,6 +1018,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
                 response_text=response_text,
                 sanitizer_events=self._sanitizer_events,
                 ratelimit=self._ratelimit,
+                attempt=self._attempt.get('attempt', 1),
                 net_savings_usd=net_savings_usd,
                 classifier_overhead_usd=classifier_overhead_usd,
                 **self._prompt_capture,
