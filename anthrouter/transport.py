@@ -111,7 +111,13 @@ class AnthropicTransport:
 
     def _send_with_retries(self, payload: dict, credentials: dict, stream: bool,
                            path: str = MESSAGES_PATH, method: str = 'POST',
-                           ratelimit_out: dict | None = None, config=None):
+                           ratelimit_out: dict | None = None, config=None,
+                           attempt_out: dict | None = None):
+        """Send with retries; ``attempt_out['attempt']`` holds the 1-based attempt in flight.
+
+        The value is written before each dispatch, so it is already correct when
+        the loop raises: an exhausted request reports the attempts it made.
+        """
         aliases = config.model_aliases if config else None
         body_bytes = build_body(payload, aliases=aliases)
         betas = merge_betas(payload, aliases=aliases)
@@ -121,6 +127,8 @@ class AnthropicTransport:
         rewrite_forced = False
 
         for attempt in range(MAX_RETRIES + 1):
+            if attempt_out is not None:
+                attempt_out['attempt'] = attempt + 1
             conn = self.target.connect()
             try:
                 conn.request(method, url_path, body=body_bytes, headers=headers)
@@ -156,6 +164,8 @@ class AnthropicTransport:
                 time.sleep(delay)
                 continue
 
+            if ratelimit_out is not None:
+                ratelimit_out.update(parse_ratelimit_headers(resp))
             resp_body = resp.read()
             conn.close()
 
@@ -201,16 +211,18 @@ class AnthropicTransport:
                     )
                     continue
 
-            handle_error_response(resp.status, resp_body)
+            handle_error_response(resp.status, resp_body, resp)
 
         raise AnthropicRequestError('Upstream request failed', error_type='api_error',
                                     status_code=502)
 
     def send_message(self, payload: dict, credentials: dict, config=None,
-                     ratelimit_out: dict | None = None) -> dict:
+                     ratelimit_out: dict | None = None,
+                     attempt_out: dict | None = None) -> dict:
         stream = bool(payload.get('stream'))
         conn, resp = self._send_with_retries(payload, credentials, stream=stream,
-                                             ratelimit_out=ratelimit_out, config=config)
+                                             ratelimit_out=ratelimit_out, config=config,
+                                             attempt_out=attempt_out)
         try:
             body = resp.read()
         finally:
@@ -226,9 +238,11 @@ class AnthropicTransport:
             ) from exc
 
     def send_message_stream(self, payload: dict, credentials: dict, config=None,
-                            ratelimit_out: dict | None = None):
+                            ratelimit_out: dict | None = None,
+                            attempt_out: dict | None = None):
         conn, resp = self._send_with_retries(payload, credentials, stream=True,
-                                             ratelimit_out=ratelimit_out, config=config)
+                                             ratelimit_out=ratelimit_out, config=config,
+                                             attempt_out=attempt_out)
         try:
             pending = ''
             for line in read_sse_lines(resp):

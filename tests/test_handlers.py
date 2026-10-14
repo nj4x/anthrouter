@@ -21,7 +21,7 @@ from anthrouter.handlers import (
 )
 from anthrouter.mapper import CLASSIFIER_SENTINEL_KEY
 from anthrouter.model_config import resolve_model
-from anthrouter.model_router import ModelRoutingDecision
+from anthrouter.model_router import _TRAILING_SCAN_LIMIT, ModelRoutingDecision
 from anthrouter.request_text import (
     ACTIVITY_LABEL_FALLBACKS,
     ACTIVITY_LABEL_PREFIX,
@@ -244,6 +244,26 @@ def test_successful_request_records_usage_and_the_rate_limit_window(proxy):
     assert row['ratelimit_reset_at'] == '2026-08-31T12:00:00Z'
 
 
+@pytest.mark.parametrize('status, row_status', [(429, 'rate_limited'), (500, 'error')])
+def test_failed_request_row_stores_the_rate_limit_window(proxy, status, row_status):
+    _FakeUpstream.status = status
+    _FakeUpstream.extra_headers = {
+        'anthropic-ratelimit-requests-remaining': '42',
+        'anthropic-ratelimit-tokens-remaining': '13000',
+        'anthropic-ratelimit-tokens-reset': '2026-08-31T12:00:00Z',
+    }
+    server = proxy()
+    with pytest.raises(urllib.error.HTTPError):
+        post(server, '/v1/messages', {
+            'model': 'sonnet', 'metadata': {'user_id': SESSION},
+            'messages': [{'role': 'user', 'content': 'hello there'}]})
+    row = db_rows(server)[0]
+    assert row['status'] == row_status
+    assert row['ratelimit_requests_remaining'] == 42
+    assert row['ratelimit_tokens_remaining'] == 13000
+    assert row['ratelimit_reset_at'] == '2026-08-31T12:00:00Z'
+
+
 def test_streaming_request_records_usage_by_max_not_by_sum(proxy):
     server = proxy()
     post(server, '/v1/messages', {
@@ -441,11 +461,17 @@ def test_requested_tier_maps_tier_models_and_isolates_others(model, expected):
 
 
 def _continuation(model):
-    """A turn whose final message is not from the user: no text to classify."""
+    """Same conversation as ``hi``, but no user turn within the trailing scan.
+
+    A short trailing run of assistant messages does not qualify:
+    build_routing_summary walks back over it to the last user turn (ADR-0011)
+    and the turn is re-classified. Beyond ``_TRAILING_SCAN_LIMIT`` the router
+    finds no user text, while the first-user-message anchor is unchanged.
+    """
     return {
         'model': model, 'metadata': {'user_id': SESSION},
-        'messages': [{'role': 'user', 'content': 'hi'},
-                     {'role': 'assistant', 'content': 'hello'}],
+        'messages': [{'role': 'user', 'content': 'hi'}]
+        + [{'role': 'assistant', 'content': 'hello'}] * _TRAILING_SCAN_LIMIT,
     }
 
 
@@ -796,10 +822,11 @@ def _classifier_calls_raise(monkeypatch, exc):
 
     original = AnthropicTransport.send_message
 
-    def send_message(self, payload, credentials, config=None, ratelimit_out=None):
+    def send_message(self, payload, credentials, config=None, ratelimit_out=None,
+                     attempt_out=None):
         if payload.get('_anthproxy_internal_classifier'):
             raise exc
-        return original(self, payload, credentials, config, ratelimit_out)
+        return original(self, payload, credentials, config, ratelimit_out, attempt_out)
 
     monkeypatch.setattr(AnthropicTransport, 'send_message', send_message)
     monkeypatch.setattr('anthrouter.model_router.time.sleep', lambda _s: None)
@@ -817,7 +844,7 @@ def test_invalid_classifier_row_books_overhead_and_stores_evidence(proxy):
     assert row['classifier_stop_reason'] == 'max_tokens'
 
 
-def test_failed_classifier_row_with_priced_model_books_zero_overhead(proxy, monkeypatch):
+def test_rate_limited_classifier_row_with_priced_model_books_zero_overhead(proxy, monkeypatch):
     from anthrouter.mapper.common import AnthropicRequestError
 
     _classifier_calls_raise(monkeypatch, AnthropicRequestError(
@@ -826,7 +853,7 @@ def test_failed_classifier_row_with_priced_model_books_zero_overhead(proxy, monk
 
     row = _post_routed_prompt(server)
 
-    assert row['reason_code'] == 'classifier_failed'
+    assert row['reason_code'] == 'classifier_rate_limited'
     assert not row['applied']
     assert row['classifier_model'] == 'haiku'
     assert row['classifier_overhead_usd'] == 0.0
@@ -843,3 +870,258 @@ def test_failed_classifier_row_with_unpriced_model_leaves_overhead_null(proxy, m
     assert row['reason_code'] == 'classifier_failed'
     assert row['classifier_model'] == 'unpriced-model'
     assert row['classifier_overhead_usd'] is None
+
+
+# ---------------------------------------------------------------------------
+# Fail-closed paths record the model they dispatch (ADR-0016)
+# ---------------------------------------------------------------------------
+
+def _fail_closed_case(proxy, monkeypatch, case, **overrides):
+    """Build a proxy that fails closed with ``case``; return it and the client model."""
+    if case == 'classifier_failed':
+        _classifier_calls_raise(monkeypatch, RuntimeError('boom'))
+        return proxy(auto_model_routing=True, auto_model_routing_mode='classifier',
+                     **overrides), 'haiku'
+    if case == 'classifier_rate_limited':
+        from anthrouter.mapper.common import AnthropicRequestError
+
+        _classifier_calls_raise(monkeypatch, AnthropicRequestError(
+            'slow down', error_type='rate_limit_error', status_code=429))
+        return proxy(auto_model_routing=True, auto_model_routing_mode='classifier',
+                     **overrides), 'haiku'
+    if case == 'disabled':
+        return proxy(auto_model_routing=False, **overrides), 'haiku'
+    return proxy(auto_model_routing=True, auto_model_routing_mode='rules',
+                 **overrides), ''
+
+
+_FAIL_CLOSED_CASES = ['classifier_failed', 'classifier_rate_limited', 'disabled',
+                      'model_not_eligible']
+
+
+@pytest.mark.parametrize('case', _FAIL_CLOSED_CASES)
+def test_locked_fail_closed_records_the_model_it_dispatches(proxy, monkeypatch, case):
+    server, client_model = _fail_closed_case(
+        proxy, monkeypatch, case, lock_requested_model='sonnet')
+
+    body = post(server, '/v1/messages', {
+        'model': client_model, 'metadata': {'user_id': SESSION},
+        'messages': [{'role': 'user', 'content': 'fix the failing auth test'}]})
+    row = db_rows(server)[0]
+
+    assert row['reason_code'] == case
+    assert _FakeUpstream.received[-1]['payload']['model'] == resolve_model('sonnet')
+    assert row['routed_model'] == 'sonnet'
+    assert row['requested_model'] == client_model
+    assert row['applied']
+    assert body['model'] == client_model
+
+
+# 'model_not_eligible' is absent: without a lock its ineligible model (empty or
+# non-string) never reaches the upstream — the mapper rejects it with a 400.
+@pytest.mark.parametrize('case', ['classifier_failed', 'classifier_rate_limited', 'disabled'])
+def test_unlocked_fail_closed_keeps_the_client_model(proxy, monkeypatch, case):
+    server, client_model = _fail_closed_case(proxy, monkeypatch, case)
+
+    body = post(server, '/v1/messages', {
+        'model': client_model, 'metadata': {'user_id': SESSION},
+        'messages': [{'role': 'user', 'content': 'fix the failing auth test'}]})
+    row = db_rows(server)[0]
+
+    assert row['reason_code'] == case
+    assert _FakeUpstream.received[-1]['payload']['model'] == resolve_model(client_model)
+    assert row['routed_model'] == client_model
+    assert row['requested_model'] == client_model
+    assert not row['applied']
+    # Nothing was rewritten, so the response echoes the upstream's resolved model,
+    # which is identical to the client's model.
+    assert body['model'] == resolve_model(client_model)
+
+
+# ---------------------------------------------------------------------------
+# Ticket #34 — Truthful Retry-After on outbound 429
+# ---------------------------------------------------------------------------
+
+def _post_expect_error(server, status_code):
+    """POST to /v1/messages and return the HTTPError (non-2xx)."""
+    import urllib.error
+    request = urllib.request.Request(
+        server.base_url + '/v1/messages',
+        data=json.dumps({'model': 'sonnet',
+                         'messages': [{'role': 'user', 'content': 'hi'}]}).encode(),
+        headers={'Content-Type': 'application/json', 'x-api-key': 'k'},
+        method='POST')
+    with pytest.raises(urllib.error.HTTPError) as exc_info:
+        urllib.request.urlopen(request)
+    assert exc_info.value.code == status_code
+    return exc_info.value
+
+
+def test_retry_after_omitted_when_upstream_sent_none(proxy, monkeypatch):
+    """429 with no upstream Retry-After header omits Retry-After in the response."""
+    monkeypatch.setattr('anthrouter.transport.time.sleep', lambda _s: None)
+    _FakeUpstream.status = 429
+    server = proxy()
+    err = _post_expect_error(server, 429)
+    assert err.headers.get('Retry-After') is None
+
+
+def test_retry_after_echoed_as_integer_seconds(proxy, monkeypatch):
+    """upstream Retry-After: 5 is echoed as '5'."""
+    monkeypatch.setattr('anthrouter.transport.time.sleep', lambda _s: None)
+    _FakeUpstream.status = 429
+    _FakeUpstream.extra_headers = {'Retry-After': '5'}
+    server = proxy()
+    err = _post_expect_error(server, 429)
+    assert err.headers.get('Retry-After') == '5'
+
+
+def test_retry_after_zero_echoed_not_omitted(proxy, monkeypatch):
+    """upstream Retry-After: 0 is echoed as '0', not omitted."""
+    monkeypatch.setattr('anthrouter.transport.time.sleep', lambda _s: None)
+    _FakeUpstream.status = 429
+    _FakeUpstream.extra_headers = {'Retry-After': '0'}
+    server = proxy()
+    err = _post_expect_error(server, 429)
+    assert err.headers.get('Retry-After') == '0'
+
+
+def test_retry_after_ms_rounded_up(proxy, monkeypatch):
+    """upstream retry-after-ms: 1500 (stored as 1.5s) is echoed as '2' (ceiling)."""
+    monkeypatch.setattr('anthrouter.transport.time.sleep', lambda _s: None)
+    _FakeUpstream.status = 429
+    _FakeUpstream.extra_headers = {'retry-after-ms': '1500'}
+    server = proxy()
+    err = _post_expect_error(server, 429)
+    assert err.headers.get('Retry-After') == '2'
+
+
+def test_5xx_produces_502_without_retry_after(proxy, monkeypatch):
+    """A 5xx from the upstream produces a 502 with no Retry-After header."""
+    monkeypatch.setattr('anthrouter.transport.time.sleep', lambda _s: None)
+    _FakeUpstream.status = 500
+    server = proxy()
+    err = _post_expect_error(server, 502)
+    assert err.headers.get('Retry-After') is None
+
+
+@pytest.mark.parametrize('upstream_status,client_status',
+                         [(503, 502), (400, 400), (401, 401), (403, 403)])
+def test_retry_after_not_echoed_on_non_429(proxy, monkeypatch, upstream_status, client_status):
+    """Upstream Retry-After on a non-429 error must not reach the client."""
+    monkeypatch.setattr('anthrouter.transport.time.sleep', lambda _s: None)
+    _FakeUpstream.status = upstream_status
+    _FakeUpstream.extra_headers = {'Retry-After': '30'}
+    server = proxy()
+    err = _post_expect_error(server, client_status)
+    assert err.headers.get('Retry-After') is None
+
+
+def test_retry_after_non_finite_omitted(proxy, monkeypatch):
+    """retry-after-ms: 1e999 parses to inf; header is omitted, response still sent."""
+    monkeypatch.setattr('anthrouter.transport.time.sleep', lambda _s: None)
+    _FakeUpstream.status = 429
+    _FakeUpstream.extra_headers = {'retry-after-ms': '1e999'}
+    server = proxy()
+    err = _post_expect_error(server, 429)
+    assert err.headers.get('Retry-After') is None
+
+
+# ---------------------------------------------------------------------------
+# Ticket #36 — Record the attempt number (transport retries only)
+# ---------------------------------------------------------------------------
+
+def _fail_first_n_posts(monkeypatch, n):
+    """Make the fake upstream answer HTTP 500 to its first ``n`` POSTs, then 200."""
+    original = _FakeUpstream.do_POST
+    calls = {'n': 0}
+
+    def do_POST(self):
+        calls['n'] += 1
+        type(self).status = 500 if calls['n'] <= n else 200
+        original(self)
+
+    monkeypatch.setattr(_FakeUpstream, 'do_POST', do_POST)
+
+
+def _post_one_prompt(server):
+    request = urllib.request.Request(
+        server.base_url + '/v1/messages',
+        data=json.dumps({'model': 'sonnet', 'metadata': {'user_id': SESSION},
+                         'messages': [{'role': 'user', 'content': 'hi'}]}).encode(),
+        headers={'Content-Type': 'application/json', 'x-api-key': 'k'},
+        method='POST')
+    try:
+        urllib.request.urlopen(request).read()
+    except urllib.error.HTTPError:
+        pass
+    return db_rows(server)[0]
+
+
+def test_transport_retried_request_records_attempt_above_one(proxy, monkeypatch):
+    monkeypatch.setattr('anthrouter.transport.time.sleep', lambda _s: None)
+    _fail_first_n_posts(monkeypatch, 2)
+    server = proxy()
+
+    row = _post_one_prompt(server)
+
+    assert row['status'] == 'success'
+    assert row['attempt'] == 3
+
+
+def test_exhausted_transport_request_records_the_exhausted_count(proxy, monkeypatch):
+    from anthrouter.http_util import MAX_RETRIES
+
+    monkeypatch.setattr('anthrouter.transport.time.sleep', lambda _s: None)
+    _FakeUpstream.status = 500
+    server = proxy()
+
+    row = _post_one_prompt(server)
+
+    assert row['status'] == 'error'
+    assert row['attempt'] == MAX_RETRIES + 1
+    assert len(_FakeUpstream.received) == MAX_RETRIES + 1
+
+
+def test_request_that_never_reaches_the_retry_loop_records_one(proxy, monkeypatch):
+    from anthrouter.mapper.common import AnthropicRequestError
+    from anthrouter.transport import AnthropicTransport
+
+    def refuse(self, payload, credentials, config=None, ratelimit_out=None,
+               attempt_out=None):
+        raise AnthropicRequestError('refused before dispatch', status_code=400)
+
+    monkeypatch.setattr(AnthropicTransport, 'send_message', refuse)
+    server = proxy()
+
+    row = _post_one_prompt(server)
+
+    assert _FakeUpstream.received == []
+    assert row['status'] == 'error'
+    assert row['attempt'] == 1
+
+
+def test_classifier_retry_with_first_try_upstream_success_records_one(proxy, monkeypatch):
+    from anthrouter.mapper.common import AnthropicRequestError
+    from anthrouter.transport import AnthropicTransport
+
+    original = AnthropicTransport.send_message
+    classifier_calls = []
+
+    def send_message(self, payload, credentials, config=None, ratelimit_out=None,
+                     attempt_out=None):
+        if payload.get('_anthproxy_internal_classifier'):
+            classifier_calls.append(1)
+            raise AnthropicRequestError('overloaded', error_type='api_error',
+                                        status_code=503)
+        return original(self, payload, credentials, config, ratelimit_out, attempt_out)
+
+    monkeypatch.setattr(AnthropicTransport, 'send_message', send_message)
+    monkeypatch.setattr('anthrouter.model_router.time.sleep', lambda _s: None)
+    server = proxy(auto_model_routing=True, auto_model_routing_mode='classifier')
+
+    row = _post_routed_prompt(server)
+
+    assert len(classifier_calls) > 1
+    assert row['status'] == 'success'
+    assert row['attempt'] == 1

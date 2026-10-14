@@ -47,6 +47,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import random
 import re
 import threading
 import time
@@ -373,6 +374,7 @@ ReasonCode = Literal[
     'classifier_deep_blended_standard',
     'classifier_deep_blended_trivial',
     'classifier_failed',
+    'classifier_rate_limited',
     'classifier_invalid',
     # Rules-mode reason codes
     'classifier_rules_trivial',
@@ -1412,6 +1414,15 @@ def classify_by_rules(summary: 'RoutingSummary') -> str | None:
 # Multi-mode classifier dispatcher
 # ---------------------------------------------------------------------------
 
+# Upper bound on the classifier's own sleep *between* outer attempts when a 429
+# carries upstream retry timing.  A 429 asking for longer than this ends the
+# classifier's retries instead: waiting it out would stall the request far past
+# any benefit of a routed model, and routing falls closed anyway.  The ceiling
+# gates the floor, never the jittered value, so a wait of up to 12.5s is still
+# possible.  It does not bound the transport's own wait inside one attempt.
+CLASSIFIER_MAX_RETRY_DELAY_SECONDS = 10.0
+
+
 def _dispatch_classifier_mode(
     mode: str,
     summary: 'RoutingSummary',
@@ -1436,8 +1447,8 @@ def _dispatch_classifier_mode(
     ``None`` first element means the caller must fail-closed to the requested model.
     Unknown or empty mode values fall back to ``'classifier'``.
 
-    When an LLM classifier call was made, the success, ``classifier_invalid`` and
-    ``classifier_failed`` paths populate clf_in/clf_out (tokens spent; 0 on failure),
+    When an LLM classifier call was made, the success, ``classifier_invalid``,
+    ``classifier_failed`` and ``classifier_rate_limited`` paths populate clf_in/clf_out (tokens spent; 0 on failure),
     clf_model, clf_summary_json, clf_format and clf_raw_response (response text
     preview or exception preview).  clf_stop_reason is the response ``stop_reason``
     (None on failure).  Rules and no-signal paths return all of these as
@@ -1497,11 +1508,10 @@ def _dispatch_classifier_mode(
         target.backend, 'send_classifier_message', target.backend.send_message
     )
 
-    # Exponential backoff: 1s, 2s, 4s, 8s (max 4 retries)
-    backoff_delays = [1.0, 2.0, 4.0, 8.0]
+    max_retries = getattr(config, 'auto_model_routing_classifier_max_retries', 4)
     response = None
 
-    for attempt in range(len(backoff_delays) + 1):
+    for attempt in range(max_retries + 1):
         try:
             response = send_fn(classifier_payload, credentials, config)
             # Extract full concatenated text from all text-type content blocks.
@@ -1532,6 +1542,8 @@ def _dispatch_classifier_mode(
             # Log full exception with status code if available (e.g., 429 rate limit)
             status_code = getattr(exc, 'status_code', None)
             error_type = getattr(exc, 'error_type', None)
+            retry_after = getattr(exc, 'retry_after', None)
+            rate_limited = status_code == 429
             if status_code:
                 logger.warning(
                     '%s Model router: classifier call failed (HTTP %d, %s) — keeping %s: %s',
@@ -1543,16 +1555,50 @@ def _dispatch_classifier_mode(
                     log_tag, requested, exc,
                 )
 
-            if attempt < len(backoff_delays):
-                delay = backoff_delays[attempt]
+            # Retry only plausibly transient failures, matching should_retry() in
+            # http_util.py: a short backoff cannot clear a 429 that carries no
+            # retry timing, and retrying it multiplies the client's own traffic
+            # against an endpoint already refusing it.  Zero counts as timing —
+            # the classifier must not disagree with the transport about the same
+            # response.
+            transient = (
+                getattr(exc, 'connection_error', False)
+                or status_code is None
+                or status_code >= 500
+                or (rate_limited and retry_after is not None)
+            )
+            if not transient:
+                reason = 'classifier_rate_limited' if rate_limited else 'classifier_failed'
+                return (None, reason, 0, 0, clf_model, clf_summary_json,
+                        _classifier_exception_preview(exc), clf_format, None)
+
+            if attempt < max_retries:
+                floor = min(1.0 * 2 ** attempt, 8.0)
+                if retry_after is not None:
+                    floor = max(retry_after, floor)
+                if not rate_limited:
+                    # A 5xx keeps retrying within budget, but upstream timing on it
+                    # must never stretch the request thread past the 429 ceiling.
+                    floor = min(floor, CLASSIFIER_MAX_RETRY_DELAY_SECONDS)
+                if rate_limited and floor > CLASSIFIER_MAX_RETRY_DELAY_SECONDS:
+                    logger.info(
+                        '%s Model router: classifier rate-limited for %.1fs '
+                        '(above the %.1fs ceiling) — giving up, keeping %s',
+                        log_tag, floor, CLASSIFIER_MAX_RETRY_DELAY_SECONDS, requested,
+                    )
+                    return (None, 'classifier_rate_limited', 0, 0, clf_model,
+                            clf_summary_json, _classifier_exception_preview(exc),
+                            clf_format, None)
+                delay = floor * random.uniform(1.0, 1.25)
                 logger.info(
                     '%s Model router: retrying classifier in %.1fs (attempt %d/%d)',
-                    log_tag, delay, attempt + 1, len(backoff_delays),
+                    log_tag, delay, attempt + 1, max_retries,
                 )
                 time.sleep(delay)
             else:
                 # Exhausted retries
-                return (None, 'classifier_failed', 0, 0, clf_model, clf_summary_json,
+                reason = 'classifier_rate_limited' if rate_limited else 'classifier_failed'
+                return (None, reason, 0, 0, clf_model, clf_summary_json,
                         _classifier_exception_preview(exc), clf_format, None)
 
     if response is None:
@@ -1632,6 +1678,7 @@ def route_model(
     config = target.config
 
     raw_model = payload.get('model')
+    raw_model_str = str(raw_model) if isinstance(raw_model, str) else repr(raw_model)
 
     # Apply baseline_model lock at input: substitute the client's model with the
     # locked baseline so all downstream paths (classifier, routing summary, cache)
@@ -1639,33 +1686,36 @@ def route_model(
     if baseline_model:
         payload['model'] = baseline_model
 
+    # When a baseline_model lock is active, routing decisions (tier caps, classifier
+    # log context) operate against the locked baseline rather than the client's
+    # arbitrary model.  The client-sent model is preserved in `requested` for
+    # response echoing, the `applied` flag, and ModelRoutingDecision.requested_model.
+    # The disabled, model_not_eligible, and classifier fail-closed returns below report
+    # this value, so the model a fail-closed path dispatches is the model it records (ADR-0016).
+    routing_baseline = baseline_model if baseline_model else raw_model_str
+
     if not config.auto_model_routing:
         return ModelRoutingDecision(
-            requested_model=str(raw_model) if isinstance(raw_model, str) else repr(raw_model),
-            routed_model=str(raw_model) if isinstance(raw_model, str) else repr(raw_model),
+            requested_model=raw_model_str,
+            routed_model=routing_baseline,
             classification=None,
-            applied=False,
+            applied=(routing_baseline != raw_model_str),
             reason_code='disabled',
         )
 
     # Any non-empty string model value is eligible
     if not is_model_auto_routable(raw_model):
         return ModelRoutingDecision(
-            requested_model=str(raw_model) if isinstance(raw_model, str) else repr(raw_model),
-            routed_model=str(raw_model) if isinstance(raw_model, str) else repr(raw_model),
+            requested_model=raw_model_str,
+            routed_model=routing_baseline,
             classification=None,
-            applied=False,
+            applied=(routing_baseline != raw_model_str),
             reason_code='model_not_eligible',
         )
 
-    # Capture the actual incoming model string; fail-closed branches return this.
+    # Capture the actual incoming model string; every return reports it as
+    # requested_model.  Fail-closed branches route to routing_baseline.
     requested = raw_model  # guaranteed str and non-empty by is_model_auto_routable
-
-    # When a baseline_model lock is active, routing decisions (tier caps, classifier
-    # log context) operate against the locked baseline rather than the client's
-    # arbitrary model.  The client-sent model is preserved in `requested` for
-    # response echoing, the `applied` flag, and ModelRoutingDecision.requested_model.
-    routing_baseline = baseline_model if baseline_model else requested
 
     # --- Long-context size floor (deterministic, pre-classifier).  When the
     # estimated total request size is near the 200K window, force the long-context
@@ -2013,14 +2063,15 @@ def route_model(
     )
 
     if score_or_label_or_tier is None:
-        # Fail-closed: keep the originally requested model.
+        # Fail-closed: keep routing_baseline, which payload['model'] already holds
+        # (the client's model unless a baseline lock is active; ADR-0016).
         # Classifier fields carry evidence when an LLM call ran (failed, invalid);
         # they stay None/0 for rules, no-signal and other non-LLM paths.
         return ModelRoutingDecision(
             requested_model=requested,
-            routed_model=requested,
+            routed_model=routing_baseline,
             classification=None,
-            applied=False,
+            applied=(routing_baseline != requested),
             reason_code=dispatch_reason,  # type: ignore[arg-type]
             estimated_input_tokens=est_tokens,
             classifier_mode=effective_mode,

@@ -19,6 +19,7 @@ USAGE_TIMEOUT_SECONDS = 5
 CACHE_TTL_SECONDS = 60
 FETCH_INTERVAL_SECONDS = 60  # Default base interval; overridden by config
 MAX_BACKOFF_SECONDS = 300  # 5 minutes: cap exponential backoff
+MIN_COOLDOWN_SECONDS = 5  # Floor on the unhealthy path only; healthy polls keep their configured cadence
 
 
 @dataclass
@@ -66,6 +67,9 @@ class OAuthUsageCache:
         self._tz = pace.resolve_timezone(timezone_name)
         self._base_interval = poll_interval_seconds or FETCH_INTERVAL_SECONDS
         self._backoff_multiplier = 1.0  # Exponential backoff: 1x, 2x, 4x, … up to MAX_BACKOFF
+        self._retry_after_seconds: float | None = None  # From the last failed poll's 429, if readable
+        self._cooldown_active = False  # Opens on the first failed poll, closes on the next success
+        self._window_429_logged = False  # True after the first 429 line is emitted in a cooldown window
 
     def get(self, access_token: str) -> OAuthUsage | None:
         """Fetch cached usage or refresh if stale. Never blocks on network."""
@@ -81,7 +85,7 @@ class OAuthUsageCache:
             if token_hash != self._token_hash or now > self._fetch_scheduled_at:
                 self._token_hash = token_hash
                 self._current_token = access_token
-                sleep_secs = min(self._base_interval * self._backoff_multiplier, MAX_BACKOFF_SECONDS)
+                sleep_secs = self._cooldown_seconds()
                 self._fetch_scheduled_at = now + sleep_secs
                 logger.debug('OAuth usage fetch scheduled for token %s... (sleep %.1fs)', token_hash[:8], sleep_secs)
 
@@ -105,6 +109,83 @@ class OAuthUsageCache:
         with self._lock:
             return self._usage
 
+    def _cooldown_seconds(self) -> float:
+        """Seconds to wait before the next poll. Caller holds ``self._lock``.
+
+        Healthy (multiplier 1, last poll succeeded): exactly the configured base interval.
+        ``MIN_COOLDOWN_SECONDS`` does not apply, so an operator who sets
+        ``--oauth-usage-poll-interval`` below it keeps that cadence.
+
+        Failing (multiplier > 1): ``min(max(retry_after, base * multiplier,
+        MIN_COOLDOWN_SECONDS), MAX_BACKOFF_SECONDS)``, with an absent ``retry_after``
+        dropping out of the ``max``. ``Retry-After`` enters only through ``max``, so it
+        can raise the wait but never lower it — the earlier design overwrote the
+        multiplier with it, and ``Retry-After: 0`` then pinned the loop at zero sleep.
+        """
+        if self._backoff_multiplier <= 1:
+            return float(self._base_interval)
+        wait = max(self._base_interval * self._backoff_multiplier, MIN_COOLDOWN_SECONDS)
+        if self._retry_after_seconds is not None:
+            wait = max(wait, self._retry_after_seconds)
+        return min(wait, MAX_BACKOFF_SECONDS)
+
+    def _record_success(self, usage: OAuthUsage, token_hash: str | None) -> None:
+        """Cache a poll that returned a payload, and close the cooldown window.
+
+        Resetting the multiplier, the stored ``Retry-After`` and the window is one event:
+        a healthy poll means the next failure is a new outage and logs at warning again.
+        """
+        with self._lock:
+            if token_hash != self._token_hash:
+                return
+            self._usage = usage
+            self._cached_at = time.time()
+            self._backoff_multiplier = 1.0
+            self._retry_after_seconds = None
+            self._cooldown_active = False
+            self._window_429_logged = False
+
+    def _record_failure(self, exc: Exception) -> None:
+        """Open or extend the cooldown window after a failed poll.
+
+        The failure line is a warning only on the poll that opens the window; later
+        failures inside the same window log at debug, so a long outage does not flood
+        the log with one line per attempt.
+        """
+        with self._lock:
+            window_was_open = self._cooldown_active
+            if self._usage:
+                self._usage.usage_stale = True
+            self._backoff_multiplier = min(self._backoff_multiplier * 2, MAX_BACKOFF_SECONDS / self._base_interval)
+            self._cooldown_active = True
+        if window_was_open:
+            logger.debug('OAuth usage fetch failed: %s', exc)
+        else:
+            logger.warning('OAuth usage fetch failed: %s', exc)
+
+    def _note_error_response(self, status: int, headers: dict[str, str]) -> None:
+        """Record a non-200 response's ``Retry-After`` and log a 429 once per cooldown window.
+
+        A missing header, a non-429 status, or an unparseable value leaves
+        ``_retry_after_seconds`` as ``None`` so it drops out of the cooldown ``max``.
+        Runs before ``_record_failure`` for the same poll, so the window is still closed
+        on the poll that opens it.
+        """
+        retry_after: float | None = None
+        retry_after_str = headers.get('retry-after')
+        if status == 429 and retry_after_str:
+            try:
+                retry_after = float(retry_after_str)
+            except ValueError:
+                logger.warning('OAuth usage 429: invalid Retry-After header %r', retry_after_str)
+        with self._lock:
+            self._retry_after_seconds = retry_after
+            already_logged = self._window_429_logged
+            if status == 429:
+                self._window_429_logged = True
+        if status == 429 and not already_logged:
+            logger.info('OAuth usage 429: cooling down (Retry-After %s)', retry_after_str or 'absent')
+
     def _background_fetch_loop(self) -> None:
         """Single background thread that fetches OAuth usage at intervals with exponential backoff on 429."""
         while True:
@@ -114,7 +195,7 @@ class OAuthUsageCache:
             with self._lock:
                 token = self._current_token
                 token_hash = self._token_hash
-                sleep_secs = min(self._base_interval * self._backoff_multiplier, MAX_BACKOFF_SECONDS)
+                sleep_secs = self._cooldown_seconds()
 
             if token is None:
                 self._stop_event.wait(timeout=self._base_interval)
@@ -129,22 +210,17 @@ class OAuthUsageCache:
                 usage.usage_age_seconds = 0
                 usage.usage_stale = False
 
-                with self._lock:
-                    if token_hash == self._token_hash:
-                        self._usage = usage
-                        self._cached_at = time.time()
-                        self._backoff_multiplier = 1.0  # Reset backoff on success
+                self._record_success(usage, token_hash)
                 logger.debug('OAuth usage fetched: burn_pct=%s eligible=%s', usage.burn_pct, usage.eligible)
             except Exception as exc:
-                logger.warning('OAuth usage fetch failed: %s', exc)
-                # Mark existing cache as stale on failure, and double backoff
-                with self._lock:
-                    if self._usage:
-                        self._usage.usage_stale = True
-                    self._backoff_multiplier = min(self._backoff_multiplier * 2, MAX_BACKOFF_SECONDS / self._base_interval)
+                self._record_failure(exc)
 
     def _fetch_usage(self, access_token: str) -> OAuthUsage:
         """Fetch OAuth usage from Anthropic API."""
+        # Clear first: a poll that never reaches a response (connection error, timeout) must
+        # not inherit the previous poll's Retry-After into the next cooldown.
+        with self._lock:
+            self._retry_after_seconds = None
         conn = http.client.HTTPSConnection(ANTHROPIC_HOST, timeout=USAGE_TIMEOUT_SECONDS)
         try:
             conn.request(
@@ -165,17 +241,7 @@ class OAuthUsageCache:
             conn.close()
 
         if status != 200:
-            # Parse Retry-After for 429; apply it to backoff multiplier
-            retry_after_str = headers.get('retry-after')
-            if status == 429 and retry_after_str:
-                try:
-                    retry_after = float(retry_after_str)
-                    # Set multiplier so next sleep = retry_after (capped at MAX_BACKOFF)
-                    with self._lock:
-                        self._backoff_multiplier = min(retry_after / self._base_interval, MAX_BACKOFF_SECONDS / self._base_interval)
-                    logger.info('OAuth usage 429: applying Retry-After header (%.1fs)', retry_after)
-                except (ValueError, ZeroDivisionError):
-                    logger.warning('OAuth usage 429: invalid Retry-After header %r', retry_after_str)
+            self._note_error_response(status, headers)
             raise RuntimeError(f'OAuth usage endpoint returned HTTP {status}')
 
         data = json.loads(body)

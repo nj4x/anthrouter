@@ -1,11 +1,12 @@
 import json
+import logging
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
 
 import pytest
 
-from anthrouter.http_util import UpstreamTarget
+from anthrouter.http_util import MAX_RETRIES, UpstreamTarget, handle_error_response
 from anthrouter.mapper.anthropic_transform import (
     _rejects_system_role_in_messages,
     _rewrite_inline_system,
@@ -25,7 +26,6 @@ from anthrouter.transport import (
     extract_client_credentials,
 )
 from tests.test_model_router import _payload_with_prior, _target, _text_response
-
 
 # ---------------------------------------------------------------------------
 # UpstreamTarget
@@ -924,7 +924,83 @@ def test_429_without_timing_guidance_surfaces_immediately():
                 {'model': 'sonnet', 'messages': []}, CREDS)
 
     assert exc.value.status_code == 429
+    assert exc.value.retry_after is None
     assert len(stub.requests) == 1
+
+
+class _HeaderOnlyResponse:
+    """Stands in for an ``http.client`` response whose body is already read.
+
+    Built from ``(name, value)`` pairs so duplicate header names survive, and
+    joined with ``', '`` on read the way ``HTTPResponse.getheader`` does.
+    """
+
+    def __init__(self, headers):
+        self._headers: dict[str, list[str]] = {}
+        pairs = headers.items() if isinstance(headers, dict) else headers
+        for name, value in pairs:
+            self._headers.setdefault(name.lower(), []).append(value)
+
+    def getheader(self, name, default=None):
+        values = self._headers.get(name.lower())
+        if values is None:
+            return default
+        return ', '.join(values)
+
+
+_RATE_LIMITED_BODY = json.dumps({'error': {'message': 'slow down'}}).encode()
+
+
+@pytest.mark.parametrize('status, headers, expected', [
+    (400, {'Retry-After': '3'}, 3.0),
+    (401, {'retry-after-ms': '1500'}, 1.5),
+    (403, {}, None),
+    (429, {'Retry-After': '7'}, 7.0),
+    (429, {'Retry-After': '0'}, 0.0),
+    (429, {'retry-after-ms': '1500'}, 1.5),
+    (429, {}, None),
+    (429, {'Retry-After': 'soon'}, None),
+    (429, {'retry-after-ms': 'soon'}, None),
+    (500, {'Retry-After': '2'}, 2.0),
+    (500, {'retry-after-ms': '250'}, 0.25),
+    (500, {}, None),
+])
+def test_handle_error_response_populates_retry_after_in_float_seconds(
+        status, headers, expected):
+    with pytest.raises(AnthropicRequestError) as exc:
+        handle_error_response(status, _RATE_LIMITED_BODY, _HeaderOnlyResponse(headers))
+
+    assert exc.value.retry_after == expected
+    if expected is not None:
+        assert type(exc.value.retry_after) is float
+
+
+def test_timed_429_surfaces_its_retry_after_once_retries_run_out():
+    def limited(_n, _body):
+        return 429, {'Retry-After': '0'}, _RATE_LIMITED_BODY
+
+    with _StubUpstream(limited) as stub, pytest.raises(AnthropicRequestError) as exc:
+        AnthropicTransport(stub.base_url).send_message(
+            {'model': 'sonnet', 'messages': []}, CREDS)
+
+    assert exc.value.status_code == 429
+    assert exc.value.retry_after == 0.0
+    assert type(exc.value.retry_after) is float
+    assert len(stub.requests) == MAX_RETRIES + 1
+
+
+def test_5xx_surfaces_its_retry_after_once_retries_run_out():
+    def broken(_n, _body):
+        return 500, {'retry-after-ms': '0'}, b'{}'
+
+    with _StubUpstream(broken) as stub, pytest.raises(AnthropicRequestError) as exc:
+        AnthropicTransport(stub.base_url).send_message(
+            {'model': 'sonnet', 'messages': []}, CREDS)
+
+    assert exc.value.status_code == 502
+    assert exc.value.retry_after == 0.0
+    assert type(exc.value.retry_after) is float
+    assert len(stub.requests) == MAX_RETRIES + 1
 
 
 def test_thinking_signature_400_recovers_by_stripping_history_once():
@@ -1126,3 +1202,130 @@ def test_count_tokens_falls_back_to_a_local_estimate():
 
     assert result['input_tokens'] > 0
     assert result['model'] == 'claude-sonnet-5-5'
+
+
+# ---------------------------------------------------------------------------
+# Rate-limit window captured on error branch (ticket #38)
+# ---------------------------------------------------------------------------
+
+_RL_HEADERS = {
+    'anthropic-ratelimit-requests-remaining': '0',
+    'anthropic-ratelimit-tokens-remaining': '5000',
+    'anthropic-ratelimit-tokens-reset': '2026-08-31T13:00:00Z',
+}
+_RL_429_BODY = json.dumps({'error': {'type': 'rate_limit_error', 'message': 'slow'}}).encode()
+
+
+def test_ratelimit_out_populated_on_non_retried_429():
+    """ratelimit_out is updated on the error branch for a 429 with no Retry-After."""
+    def limited(_n, _body):
+        return 429, _RL_HEADERS, _RL_429_BODY
+
+    ratelimit_out = {}
+    with _StubUpstream(limited) as stub, pytest.raises(AnthropicRequestError) as exc:
+        AnthropicTransport(stub.base_url).send_message(
+            {'model': 'sonnet', 'messages': []}, CREDS, ratelimit_out=ratelimit_out)
+
+    assert exc.value.status_code == 429
+    assert ratelimit_out.get('requests_remaining') == 0
+    assert ratelimit_out.get('tokens_remaining') == 5000
+    assert ratelimit_out.get('reset_at') == '2026-08-31T13:00:00Z'
+
+
+def test_ratelimit_out_populated_on_exhausted_500():
+    """ratelimit_out is updated on the error branch for a 500 after retries run out."""
+    rl_headers = {
+        'anthropic-ratelimit-requests-remaining': '10',
+        'anthropic-ratelimit-tokens-remaining': '50000',
+    }
+
+    def broken(_n, _body):
+        return 500, rl_headers, b'{}'
+
+    ratelimit_out = {}
+    with _StubUpstream(broken) as stub, pytest.raises(AnthropicRequestError) as exc:
+        AnthropicTransport(stub.base_url).send_message(
+            {'model': 'sonnet', 'messages': []}, CREDS, ratelimit_out=ratelimit_out)
+
+    assert exc.value.status_code == 502
+    assert ratelimit_out.get('requests_remaining') == 10
+    assert ratelimit_out.get('tokens_remaining') == 50000
+
+
+# ---------------------------------------------------------------------------
+# handle_error_response log format (ticket #38)
+# ---------------------------------------------------------------------------
+
+def test_error_log_429_json_carries_request_id_retry_and_ratelimit(caplog):
+    """429 JSON error: log carries request-id, retry-after, ratelimit headers, type."""
+    headers = {
+        'retry-after': '5',
+        'request-id': 'req-abc123',
+        'anthropic-ratelimit-requests-remaining': '0',
+        'anthropic-ratelimit-tokens-remaining': '8000',
+    }
+    body = json.dumps({'error': {
+        'type': 'rate_limit_error',
+        'message': 'Spend limit reached',
+    }}).encode()
+    with caplog.at_level(logging.WARNING, logger='anthrouter.http_util'), pytest.raises(AnthropicRequestError):
+        handle_error_response(429, body, _HeaderOnlyResponse(headers))
+    assert 'request-id=req-abc123' in caplog.text
+    assert 'retry-after=5.0' in caplog.text
+    assert 'type=rate_limit_error' in caplog.text
+    assert 'ratelimit=' in caplog.text
+
+
+def test_error_log_429_json_includes_error_code_when_present(caplog):
+    """429 JSON error with error.code: log includes the code."""
+    headers = {'request-id': 'req-xyz'}
+    body = json.dumps({'error': {
+        'type': 'rate_limit_error',
+        'code': 'enforced_spend_limit_reached',
+        'message': 'Spend limit',
+    }}).encode()
+    with caplog.at_level(logging.WARNING, logger='anthrouter.http_util'), pytest.raises(AnthropicRequestError):
+        handle_error_response(429, body, _HeaderOnlyResponse(headers))
+    assert 'code=enforced_spend_limit_reached' in caplog.text
+
+
+def test_error_log_429_plain_text_carries_status_headers_preview_no_code(caplog):
+    """429 plain-text body: log carries status, headers, body preview; no code field."""
+    headers = {
+        'retry-after': '3',
+        'request-id': 'req-plain',
+        'anthropic-ratelimit-requests-remaining': '0',
+    }
+    body = b'Error'
+    with caplog.at_level(logging.WARNING, logger='anthrouter.http_util'), pytest.raises(AnthropicRequestError):
+        handle_error_response(429, body, _HeaderOnlyResponse(headers))
+    assert '429' in caplog.text
+    assert 'Upstream error HTTP 429 (plain): Error' in caplog.text
+    assert 'request-id=req-plain' in caplog.text
+    assert 'retry-after=3.0' in caplog.text
+    assert 'ratelimit=' in caplog.text
+    assert 'code=' not in caplog.text
+    assert 'type=' not in caplog.text
+
+
+def test_error_log_5xx_carries_request_id_and_retry(caplog):
+    """5xx error: log carries request-id and retry-after like a 429."""
+    headers = {'retry-after-ms': '250', 'request-id': 'req-5xx'}
+    with caplog.at_level(logging.WARNING, logger='anthrouter.http_util'), pytest.raises(AnthropicRequestError):
+        handle_error_response(503, b'{}', _HeaderOnlyResponse(headers))
+    assert 'HTTP 503' in caplog.text
+    assert 'request-id=req-5xx' in caplog.text
+    assert 'retry-after=0.25' in caplog.text
+
+
+def test_error_log_400_keeps_short_form_no_ratelimit_fields(caplog):
+    """400 error: log uses the existing short form — no request-id or ratelimit fields."""
+    headers = {'retry-after': '1', 'anthropic-ratelimit-requests-remaining': '5'}
+    body = json.dumps({'error': {'type': 'invalid_request_error',
+                                 'message': 'Bad param'}}).encode()
+    with caplog.at_level(logging.WARNING, logger='anthrouter.http_util'), pytest.raises(AnthropicRequestError):
+        handle_error_response(400, body, _HeaderOnlyResponse(headers))
+    assert 'Bad param' in caplog.text
+    assert 'request-id' not in caplog.text
+    assert 'ratelimit=' not in caplog.text
+    assert 'retry-after' not in caplog.text
