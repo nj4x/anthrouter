@@ -21,7 +21,7 @@ from anthrouter.handlers import (
 )
 from anthrouter.mapper import CLASSIFIER_SENTINEL_KEY
 from anthrouter.model_config import resolve_model
-from anthrouter.model_router import ModelRoutingDecision
+from anthrouter.model_router import _TRAILING_SCAN_LIMIT, ModelRoutingDecision
 from anthrouter.request_text import (
     ACTIVITY_LABEL_FALLBACKS,
     ACTIVITY_LABEL_PREFIX,
@@ -461,11 +461,17 @@ def test_requested_tier_maps_tier_models_and_isolates_others(model, expected):
 
 
 def _continuation(model):
-    """A turn whose final message is not from the user: no text to classify."""
+    """Same conversation as ``hi``, but no user turn within the trailing scan.
+
+    A short trailing run of assistant messages does not qualify:
+    build_routing_summary walks back over it to the last user turn (ADR-0011)
+    and the turn is re-classified. Beyond ``_TRAILING_SCAN_LIMIT`` the router
+    finds no user text, while the first-user-message anchor is unchanged.
+    """
     return {
         'model': model, 'metadata': {'user_id': SESSION},
-        'messages': [{'role': 'user', 'content': 'hi'},
-                     {'role': 'assistant', 'content': 'hello'}],
+        'messages': [{'role': 'user', 'content': 'hi'}]
+        + [{'role': 'assistant', 'content': 'hello'}] * _TRAILING_SCAN_LIMIT,
     }
 
 
