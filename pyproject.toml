@@ -10,7 +10,7 @@ requires-python = ">=3.10"
 dependencies = ["truststore>=0.10.0"]
 
 [project.optional-dependencies]
-dev = ["ruff>=0.8.0"]
+dev = ["ruff>=0.15.20"]
 
 [project.scripts]
 anthrouter = "anthrouter.__main__:main"
@@ -27,6 +27,12 @@ anthrouter = ["ui/dist/**/*"]
 
 [tool.ruff]
 target-version = "py310"
+
+[tool.ruff.lint]
+# Pinned: ruff 0.16 widened its default rule set, which flagged the intentional
+# fail-closed `except Exception` guards across the routing path.  `I` adds
+# import sorting on top of ruff's pre-0.16 default (E4, E7, E9, F).
+select = ["E4", "E7", "E9", "F", "I"]
 
 [dependency-groups]
 dev = [

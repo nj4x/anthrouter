@@ -22,7 +22,14 @@ import types
 import typing
 from pathlib import Path
 
-from anthrouter.config import EDITABLE_FIELDS, FIELD_METADATA, Config, validate_config, _parse_classification_str, _parse_model_aliases_str
+from anthrouter.config import (
+    EDITABLE_FIELDS,
+    FIELD_METADATA,
+    Config,
+    _parse_classification_str,
+    _parse_model_aliases_str,
+    validate_config,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -342,18 +349,14 @@ def _get_config(config) -> tuple[int, dict]:
             else:
                 attr_value = getattr(config, field_name, '')
                 # Special-case: format dict fields as comma-separated string
-                if field_name == 'auto_model_routing_classification' and isinstance(attr_value, dict):
-                    value = ','.join(f'{k}:{v}' for k, v in attr_value.items())
-                elif field_name == 'model_aliases' and isinstance(attr_value, dict):
+                if field_name == 'auto_model_routing_classification' and isinstance(attr_value, dict) or field_name == 'model_aliases' and isinstance(attr_value, dict):
                     value = ','.join(f'{k}:{v}' for k, v in attr_value.items())
                 else:
                     value = str(attr_value)
         else:
             attr_value = getattr(config, field_name, '')
             # Special-case: format dict fields as comma-separated string
-            if field_name == 'auto_model_routing_classification' and isinstance(attr_value, dict):
-                value = ','.join(f'{k}:{v}' for k, v in attr_value.items())
-            elif field_name == 'model_aliases' and isinstance(attr_value, dict):
+            if field_name == 'auto_model_routing_classification' and isinstance(attr_value, dict) or field_name == 'model_aliases' and isinstance(attr_value, dict):
                 value = ','.join(f'{k}:{v}' for k, v in attr_value.items())
             else:
                 value = str(attr_value)

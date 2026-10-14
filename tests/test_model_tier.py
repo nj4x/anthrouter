@@ -12,7 +12,6 @@ import pytest
 
 from anthrouter.model_tier import TIER_RANK, classify_model_tier, model_tier_rank
 
-
 # ---------------------------------------------------------------------------
 # classify_model_tier
 # ---------------------------------------------------------------------------

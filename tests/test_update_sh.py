@@ -3,10 +3,8 @@ import json
 import os
 import socket
 import subprocess
-import sys
 import threading
-import time
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 
@@ -48,6 +46,19 @@ def _start_server(port, stop_event):
     return server, thread
 
 
+def _local_upstream(path):
+    """Tiny git repo so update.sh never clones over the network."""
+    path.mkdir()
+    (path / "pyproject.toml").write_text(
+        '[project]\nname = "anthrouter"\nversion = "0.0.1"\n'
+    )
+    git = ["git", "-c", "user.name=t", "-c", "user.email=t@t"]
+    subprocess.run([*git, "init", "-q"], cwd=path, check=True)
+    subprocess.run([*git, "add", "."], cwd=path, check=True)
+    subprocess.run([*git, "commit", "-qm", "init"], cwd=path, check=True)
+    return f"file://{path}"
+
+
 def _setup_fake_install(
     tmp_path,
     *,
@@ -55,10 +66,12 @@ def _setup_fake_install(
     with_venv_bak=False,
     with_lock=False,
     venv_bak_has_executable=False,
-    upstream_url="https://github.com/nj4x/anthrouter.git",
+    upstream_url=None,
     port=None,
 ):
     """Set up a fake anthrouter install in tmp_path."""
+    if upstream_url is None:
+        upstream_url = _local_upstream(tmp_path / "default-upstream")
     home = tmp_path / "home"
     anthrouter_dir = home / ".anthrouter"
     anthrouter_dir.mkdir(parents=True)
@@ -87,7 +100,6 @@ def _setup_fake_install(
     fake_python.chmod(0o755)
 
     # Fake pip - can be configured to fail
-    fake_pip = venv_bin / "pip"
     pip_script = anthrouter_dir / "pip_fail.sh"
     if not pip_script.exists():
         pip_script.write_text("#!/usr/bin/env bash\nexit 0\n")
@@ -119,8 +131,7 @@ class H(BaseHTTPRequestHandler):
 
 s = HTTPServer(('127.0.0.1', {port}), H)
 s.serve_forever()
-" &
-echo $!
+"
 """)
     else:
         # Shim that does nothing (for failure tests)
@@ -243,7 +254,6 @@ def test_abort_completed_not_true(tmp_path):
         tmp_path, manifest_extra={"completed": False}
     )
 
-    update_script = Path(__file__).parent.parent / "update.sh"
     result = _run_update(home, anthrouter_dir)
 
     assert result.returncode != 0
@@ -262,7 +272,6 @@ def test_abort_upstream_url_missing(tmp_path):
     del manifest["upstreamUrl"]
     manifest_path.write_text(json.dumps(manifest, indent=2))
 
-    update_script = Path(__file__).parent.parent / "update.sh"
     result = _run_update(home, anthrouter_dir)
 
     assert result.returncode != 0
@@ -280,7 +289,6 @@ def test_abort_shim_path_missing(tmp_path):
     del manifest["shimPath"]
     manifest_path.write_text(json.dumps(manifest, indent=2))
 
-    update_script = Path(__file__).parent.parent / "update.sh"
     result = _run_update(home, anthrouter_dir)
 
     assert result.returncode != 0
@@ -294,7 +302,6 @@ def test_abort_shim_path_not_executable(tmp_path):
     shim = anthrouter_dir / "shim.sh"
     shim.chmod(0o644)
 
-    update_script = Path(__file__).parent.parent / "update.sh"
     result = _run_update(home, anthrouter_dir)
 
     assert result.returncode != 0
@@ -307,7 +314,6 @@ def test_abort_lock_exists(tmp_path):
         tmp_path, with_lock=True
     )
 
-    update_script = Path(__file__).parent.parent / "update.sh"
     result = _run_update(home, anthrouter_dir)
 
     assert result.returncode != 0
@@ -337,8 +343,7 @@ def test_lock_removed_after_failed_run(tmp_path):
     (venv_bin / "pip").write_text(f"#!/usr/bin/env bash\nexec {pip_script} \"$@\"\n")
     (venv_bin / "pip").chmod(0o755)
 
-    update_script = Path(__file__).parent.parent / "update.sh"
-    result = _run_update(home, anthrouter_dir)
+    _run_update(home, anthrouter_dir)
 
     # Lock should be removed
     assert not (anthrouter_dir / "update.lock").exists()
@@ -355,9 +360,6 @@ def test_venv_bak_reuse(tmp_path):
     manifest = json.loads(manifest_path.read_text())
     manifest["upstreamUrl"] = f"file://{upstream_repo}"
     manifest_path.write_text(json.dumps(manifest, indent=2))
-
-    # Add marker to venv.bak to track it
-    venv_bak = anthrouter_dir / "venv.bak"
 
     # Set up a working server port
     port = _find_free_port()
@@ -385,8 +387,7 @@ class H(BaseHTTPRequestHandler):
 
 s = HTTPServer(('127.0.0.1', {port}), H)
 s.serve_forever()
-" &
-echo $!
+"
 """)
     shim.chmod(0o755)
 
@@ -395,7 +396,7 @@ echo $!
     # Script should mention reusing venv.bak
     assert "reusing" in result.stdout.lower() or "already exists" in result.stdout
     # On success, venv.bak is deleted, so check that the run completed successfully
-    assert result.returncode == 0, f"Expected success, got: {result.stderr}"
+    assert result.returncode == 0, f"Expected success, got: {result.stderr}\n{result.stdout}"
 
 
 def test_pip_install_failure_restore(tmp_path):
@@ -416,7 +417,6 @@ def test_pip_install_failure_restore(tmp_path):
     (venv_bin / "pip").write_text(f"#!/usr/bin/env bash\nexec {pip_fail} \"$@\"\n")
     (venv_bin / "pip").chmod(0o755)
 
-    update_script = Path(__file__).parent.parent / "update.sh"
     result = _run_update(home, anthrouter_dir)
 
     assert result.returncode != 0
@@ -480,7 +480,6 @@ def test_restore_failure_non_executable(tmp_path):
     (venv_bin / "pip").write_text(f"#!/usr/bin/env bash\nexec {pip_fail} \"$@\"\n")
     (venv_bin / "pip").chmod(0o755)
 
-    update_script = Path(__file__).parent.parent / "update.sh"
     result = _run_update(home, anthrouter_dir)
 
     assert result.returncode != 0
@@ -562,8 +561,7 @@ class H(BaseHTTPRequestHandler):
 
 s = HTTPServer(('127.0.0.1', {port}), H)
 s.serve_forever()
-" &
-echo $!
+"
 """)
     shim.chmod(0o755)
 
@@ -572,10 +570,9 @@ echo $!
     (venv_bin / "pip").write_text("#!/usr/bin/env bash\nexit 0\n")
     (venv_bin / "pip").chmod(0o755)
 
-    update_script = Path(__file__).parent.parent / "update.sh"
     result = _run_update(home, anthrouter_dir)
 
-    assert result.returncode == 0, f"Expected success, got: {result.stderr}"
+    assert result.returncode == 0, f"Expected success, got: {result.stderr}\n{result.stdout}"
     assert "complete" in result.stdout.lower()
 
     # venv.bak should be deleted on success
@@ -607,7 +604,6 @@ def test_temp_clone_dir_cleaned(tmp_path):
     (venv_bin / "pip").write_text("#!/usr/bin/env bash\nexit 1\n")
     (venv_bin / "pip").chmod(0o755)
 
-    update_script = Path(__file__).parent.parent / "update.sh"
     result = _run_update(home, anthrouter_dir)
 
     # Should fail
