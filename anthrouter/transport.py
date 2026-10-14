@@ -201,7 +201,7 @@ class AnthropicTransport:
                     )
                     continue
 
-            handle_error_response(resp.status, resp_body)
+            handle_error_response(resp.status, resp_body, resp)
 
         raise AnthropicRequestError('Upstream request failed', error_type='api_error',
                                     status_code=502)

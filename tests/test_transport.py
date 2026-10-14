@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from anthrouter.http_util import UpstreamTarget
+from anthrouter.http_util import MAX_RETRIES, UpstreamTarget, handle_error_response
 from anthrouter.mapper.anthropic_transform import (
     _rejects_system_role_in_messages,
     _rewrite_inline_system,
@@ -924,7 +924,83 @@ def test_429_without_timing_guidance_surfaces_immediately():
                 {'model': 'sonnet', 'messages': []}, CREDS)
 
     assert exc.value.status_code == 429
+    assert exc.value.retry_after is None
     assert len(stub.requests) == 1
+
+
+class _HeaderOnlyResponse:
+    """Stands in for an ``http.client`` response whose body is already read.
+
+    Built from ``(name, value)`` pairs so duplicate header names survive, and
+    joined with ``', '`` on read the way ``HTTPResponse.getheader`` does.
+    """
+
+    def __init__(self, headers):
+        self._headers: dict[str, list[str]] = {}
+        pairs = headers.items() if isinstance(headers, dict) else headers
+        for name, value in pairs:
+            self._headers.setdefault(name.lower(), []).append(value)
+
+    def getheader(self, name, default=None):
+        values = self._headers.get(name.lower())
+        if values is None:
+            return default
+        return ', '.join(values)
+
+
+_RATE_LIMITED_BODY = json.dumps({'error': {'message': 'slow down'}}).encode()
+
+
+@pytest.mark.parametrize('status, headers, expected', [
+    (400, {'Retry-After': '3'}, 3.0),
+    (401, {'retry-after-ms': '1500'}, 1.5),
+    (403, {}, None),
+    (429, {'Retry-After': '7'}, 7.0),
+    (429, {'Retry-After': '0'}, 0.0),
+    (429, {'retry-after-ms': '1500'}, 1.5),
+    (429, {}, None),
+    (429, {'Retry-After': 'soon'}, None),
+    (429, {'retry-after-ms': 'soon'}, None),
+    (500, {'Retry-After': '2'}, 2.0),
+    (500, {'retry-after-ms': '250'}, 0.25),
+    (500, {}, None),
+])
+def test_handle_error_response_populates_retry_after_in_float_seconds(
+        status, headers, expected):
+    with pytest.raises(AnthropicRequestError) as exc:
+        handle_error_response(status, _RATE_LIMITED_BODY, _HeaderOnlyResponse(headers))
+
+    assert exc.value.retry_after == expected
+    if expected is not None:
+        assert type(exc.value.retry_after) is float
+
+
+def test_timed_429_surfaces_its_retry_after_once_retries_run_out():
+    def limited(_n, _body):
+        return 429, {'Retry-After': '0'}, _RATE_LIMITED_BODY
+
+    with _StubUpstream(limited) as stub, pytest.raises(AnthropicRequestError) as exc:
+        AnthropicTransport(stub.base_url).send_message(
+            {'model': 'sonnet', 'messages': []}, CREDS)
+
+    assert exc.value.status_code == 429
+    assert exc.value.retry_after == 0.0
+    assert type(exc.value.retry_after) is float
+    assert len(stub.requests) == MAX_RETRIES + 1
+
+
+def test_5xx_surfaces_its_retry_after_once_retries_run_out():
+    def broken(_n, _body):
+        return 500, {'retry-after-ms': '0'}, b'{}'
+
+    with _StubUpstream(broken) as stub, pytest.raises(AnthropicRequestError) as exc:
+        AnthropicTransport(stub.base_url).send_message(
+            {'model': 'sonnet', 'messages': []}, CREDS)
+
+    assert exc.value.status_code == 502
+    assert exc.value.retry_after == 0.0
+    assert type(exc.value.retry_after) is float
+    assert len(stub.requests) == MAX_RETRIES + 1
 
 
 def test_thinking_signature_400_recovers_by_stripping_history_once():
