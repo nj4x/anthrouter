@@ -190,6 +190,8 @@ def handle_error_response(status: int, body_bytes: bytes, resp) -> None:
     transport's loop-exit fallback) are not covered by that guarantee.
     """
     retry_after = parse_retry_after(resp)
+    is_json = True
+    error_code = ''
     try:
         detail = json.loads(body_bytes)
         error = detail.get('error') or {}
@@ -197,11 +199,30 @@ def handle_error_response(status: int, body_bytes: bytes, resp) -> None:
             error = {}
         message = error.get('message', '') or detail.get('message', '') or str(detail)
         error_type = error.get('type', '')
+        error_code = error.get('code', '') or ''
     except (json.JSONDecodeError, TypeError):
         message = body_bytes.decode('utf-8', errors='replace')[:500]
         error_type = ''
+        is_json = False
 
-    logger.warning('Upstream error HTTP %d: %s', status, message[:300])
+    if status == 429 or status >= 500:
+        req_id = resp.getheader('request-id') if resp is not None else None
+        rl = parse_ratelimit_headers(resp)
+        if is_json:
+            type_part = f' type={error_type}' if error_type else ''
+            code_part = f' code={error_code}' if error_code else ''
+            logger.warning(
+                'Upstream error HTTP %d: %s%s%s  request-id=%s  retry-after=%s  ratelimit=%s',
+                status, message[:300], type_part, code_part,
+                req_id, retry_after, rl or None,
+            )
+        else:
+            logger.warning(
+                'Upstream error HTTP %d (plain): %s  request-id=%s  retry-after=%s  ratelimit=%s',
+                status, message[:300], req_id, retry_after, rl or None,
+            )
+    else:
+        logger.warning('Upstream error HTTP %d: %s', status, message[:300])
 
     if status == 400:
         raise AnthropicRequestError(

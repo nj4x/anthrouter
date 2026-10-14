@@ -93,13 +93,13 @@ class _FakeUpstream(BaseHTTPRequestHandler):
 def upstream():
     _FakeUpstream.received = []
     _FakeUpstream.status = 200
+    _FakeUpstream.extra_headers = {}
     _FakeUpstream.json_body = {
         'id': 'msg_up', 'type': 'message', 'role': 'assistant',
         'content': [{'type': 'text', 'text': 'hi there'}],
         'usage': {'input_tokens': 100, 'output_tokens': 7,
                   'cache_read_input_tokens': 900},
     }
-    _FakeUpstream.extra_headers = {}
     server = ThreadingHTTPServer(('127.0.0.1', 0), _FakeUpstream)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     yield server
@@ -146,5 +146,3 @@ def post(server, path, payload, headers=None, raw=False):
 
 def db_rows(server):
     return server.RequestHandlerClass.request_db.get_requests(limit=10)
-
-

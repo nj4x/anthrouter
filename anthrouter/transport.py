@@ -156,6 +156,8 @@ class AnthropicTransport:
                 time.sleep(delay)
                 continue
 
+            if ratelimit_out is not None:
+                ratelimit_out.update(parse_ratelimit_headers(resp))
             resp_body = resp.read()
             conn.close()
 

@@ -244,6 +244,26 @@ def test_successful_request_records_usage_and_the_rate_limit_window(proxy):
     assert row['ratelimit_reset_at'] == '2026-08-31T12:00:00Z'
 
 
+@pytest.mark.parametrize('status, row_status', [(429, 'rate_limited'), (500, 'error')])
+def test_failed_request_row_stores_the_rate_limit_window(proxy, status, row_status):
+    _FakeUpstream.status = status
+    _FakeUpstream.extra_headers = {
+        'anthropic-ratelimit-requests-remaining': '42',
+        'anthropic-ratelimit-tokens-remaining': '13000',
+        'anthropic-ratelimit-tokens-reset': '2026-08-31T12:00:00Z',
+    }
+    server = proxy()
+    with pytest.raises(urllib.error.HTTPError):
+        post(server, '/v1/messages', {
+            'model': 'sonnet', 'metadata': {'user_id': SESSION},
+            'messages': [{'role': 'user', 'content': 'hello there'}]})
+    row = db_rows(server)[0]
+    assert row['status'] == row_status
+    assert row['ratelimit_requests_remaining'] == 42
+    assert row['ratelimit_tokens_remaining'] == 13000
+    assert row['ratelimit_reset_at'] == '2026-08-31T12:00:00Z'
+
+
 def test_streaming_request_records_usage_by_max_not_by_sum(proxy):
     server = proxy()
     post(server, '/v1/messages', {
