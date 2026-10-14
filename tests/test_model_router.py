@@ -88,6 +88,8 @@ def _config(routing=True, classifier_model='haiku', long_context_threshold=190_0
     cfg.auto_model_routing_standard_threshold = 75.0
     cfg.auto_model_routing_system_prompt_cache_size = 256
     cfg.auto_model_routing_system_prompt_preview_limit = 500
+    # Concrete int (not a MagicMock) so the classifier retry budget is countable.
+    cfg.auto_model_routing_classifier_max_retries = 4
     return cfg
 
 
@@ -178,7 +180,7 @@ class TestReasonCode:
             'affirmation_classified', 'affirmation_classifier_failed',
             'rule_title_generation',
             'classifier_trivial', 'classifier_standard', 'classifier_deep',
-            'classifier_failed', 'classifier_invalid',
+            'classifier_failed', 'classifier_rate_limited', 'classifier_invalid',
         }
         assert expected.issubset(set(args))
 
@@ -3947,7 +3949,7 @@ class TestClassifierTransparencyFields:
             "raw='<non-text>' stop_reason='max_tokens' block_types=['thinking'] "
             "usage={'input_tokens': 120, 'output_tokens': 300}")
 
-    def test_classifier_failed_http_status_preview_truncates_tail(self, monkeypatch):
+    def test_classifier_rate_limited_http_status_preview_truncates_tail(self, monkeypatch):
         monkeypatch.setattr('anthrouter.model_router.time.sleep', lambda _s: None)
 
         class RateLimitError(Exception):
@@ -3960,7 +3962,7 @@ class TestClassifierTransparencyFields:
         backend.send_message.side_effect = RateLimitError('x' * 200, 429)
         target = _target(backend=backend, routing=True)
         decision = route_model(_payload(model='sonnet', content='fix the bug'), target, {})
-        assert decision.reason_code == 'classifier_failed'
+        assert decision.reason_code == 'classifier_rate_limited'
         preview = decision.classifier_raw_response
         assert preview.startswith('HTTP 429 RateLimitError: ')
         assert preview.endswith('…')
@@ -5088,3 +5090,153 @@ class TestRoutingTarget:
 
         assert payload['model'] == 'opus'
         assert decision.applied is True
+
+
+# ---------------------------------------------------------------------------
+# Classifier retry policy: only plausibly transient failures are retried
+# ---------------------------------------------------------------------------
+
+class TestClassifierRetryPolicy:
+    """_dispatch_classifier_mode retries, delays and rate-limit early exits."""
+
+    def _run(self, monkeypatch, exc, max_retries=4, jitter=None):
+        """Drive route_model with a failing classifier; return (decision, calls, sleeps)."""
+        sleeps: list[float] = []
+        monkeypatch.setattr('anthrouter.model_router.time.sleep', sleeps.append)
+        if jitter is not None:
+            monkeypatch.setattr('anthrouter.model_router.random.uniform',
+                                lambda _lo, _hi: jitter)
+        backend = MagicMock()
+        del backend.send_classifier_message
+        backend.send_message.side_effect = exc
+        target = _target(backend=backend, routing=True)
+        target.config.auto_model_routing_classifier_max_retries = max_retries
+        decision = route_model(_payload(model='sonnet', content='fix the bug'), target, {})
+        return decision, backend.send_message.call_count, sleeps
+
+    @staticmethod
+    def _rate_limit(retry_after=None, message='slow down'):
+        return AnthropicRequestError(message, error_type='rate_limit_error',
+                                     status_code=429, retry_after=retry_after)
+
+    def test_untimed_429_calls_backend_once_and_never_sleeps(self, monkeypatch):
+        decision, calls, sleeps = self._run(monkeypatch, self._rate_limit())
+        assert calls == 1
+        assert sleeps == []
+        assert decision.reason_code == 'classifier_rate_limited'
+        assert decision.routed_model == 'sonnet'
+        assert decision.applied is False
+
+    def test_timed_429_retries_and_waits_at_least_the_upstream_timing(self, monkeypatch):
+        decision, calls, sleeps = self._run(
+            monkeypatch, self._rate_limit(retry_after=5.0), jitter=1.0)
+        assert calls == 5
+        assert sleeps == [5.0, 5.0, 5.0, 8.0]
+        assert decision.reason_code == 'classifier_rate_limited'
+
+    def test_timed_429_jitter_rides_above_the_floor(self, monkeypatch):
+        _decision, _calls, sleeps = self._run(
+            monkeypatch, self._rate_limit(retry_after=5.0), jitter=1.25)
+        assert sleeps == [6.25, 6.25, 6.25, 10.0]
+        assert all(s >= 5.0 for s in sleeps)
+
+    def test_zero_retry_after_counts_as_timing_and_uses_the_computed_floor(self, monkeypatch):
+        decision, calls, sleeps = self._run(
+            monkeypatch, self._rate_limit(retry_after=0.0), jitter=1.0)
+        assert calls == 5
+        assert sleeps == [1.0, 2.0, 4.0, 8.0]
+        assert decision.reason_code == 'classifier_rate_limited'
+
+    def test_unparseable_retry_after_is_untimed_and_calls_backend_once(self, monkeypatch):
+        # parse_retry_after() yields None for an unparseable header, so the
+        # exception reaches the classifier with retry_after None.
+        decision, calls, sleeps = self._run(monkeypatch, self._rate_limit(retry_after=None))
+        assert calls == 1
+        assert sleeps == []
+        assert decision.reason_code == 'classifier_rate_limited'
+
+    def test_429_above_the_ceiling_stops_without_a_classifier_sleep(self, monkeypatch):
+        decision, calls, sleeps = self._run(
+            monkeypatch, self._rate_limit(retry_after=3600.0))
+        assert calls == 1
+        assert sleeps == []
+        assert decision.reason_code == 'classifier_rate_limited'
+        assert decision.routed_model == 'sonnet'
+
+    def test_5xx_retries_four_times_at_the_default_budget(self, monkeypatch):
+        decision, calls, sleeps = self._run(
+            monkeypatch,
+            AnthropicRequestError('upstream broke', error_type='api_error',
+                                  status_code=500),
+            jitter=1.0)
+        assert calls == 5
+        assert sleeps == [1.0, 2.0, 4.0, 8.0]
+        assert decision.reason_code == 'classifier_failed'
+
+    def test_connection_error_retries_four_times_at_the_default_budget(self, monkeypatch):
+        decision, calls, sleeps = self._run(
+            monkeypatch,
+            AnthropicRequestError('unreachable', error_type='api_error',
+                                  status_code=502, connection_error=True),
+            jitter=1.0)
+        assert calls == 5
+        assert len(sleeps) == 4
+        assert decision.reason_code == 'classifier_failed'
+
+    def test_missing_status_code_retries_four_times(self, monkeypatch):
+        decision, calls, _sleeps = self._run(
+            monkeypatch, RuntimeError('network error'), jitter=1.0)
+        assert calls == 5
+        assert decision.reason_code == 'classifier_failed'
+
+    def test_timed_5xx_above_the_ceiling_still_retries_within_budget(self, monkeypatch):
+        decision, calls, sleeps = self._run(
+            monkeypatch,
+            AnthropicRequestError('upstream broke', error_type='api_error',
+                                  status_code=503, retry_after=3600.0),
+            jitter=1.0)
+        assert calls == 5
+        assert sleeps == [3600.0, 3600.0, 3600.0, 3600.0]
+        assert decision.reason_code == 'classifier_failed'
+
+    def test_non_retryable_status_returns_classifier_failed_at_once(self, monkeypatch):
+        decision, calls, sleeps = self._run(
+            monkeypatch,
+            AnthropicRequestError('bad request', error_type='invalid_request_error',
+                                  status_code=400))
+        assert calls == 1
+        assert sleeps == []
+        assert decision.reason_code == 'classifier_failed'
+
+    def test_zero_budget_makes_one_call_and_no_sleep(self, monkeypatch):
+        decision, calls, sleeps = self._run(
+            monkeypatch,
+            AnthropicRequestError('upstream broke', error_type='api_error',
+                                  status_code=500),
+            max_retries=0)
+        assert calls == 1
+        assert sleeps == []
+        assert decision.reason_code == 'classifier_failed'
+
+    def test_zero_budget_on_timed_429_makes_one_call_and_no_sleep(self, monkeypatch):
+        decision, calls, sleeps = self._run(
+            monkeypatch, self._rate_limit(retry_after=5.0), max_retries=0)
+        assert calls == 1
+        assert sleeps == []
+        assert decision.reason_code == 'classifier_rate_limited'
+
+    def test_every_jittered_delay_lies_between_the_floor_and_1_25_times_it(self, monkeypatch):
+        _decision, _calls, sleeps = self._run(
+            monkeypatch,
+            AnthropicRequestError('upstream broke', error_type='api_error',
+                                  status_code=500))
+        floors = [1.0, 2.0, 4.0, 8.0]
+        assert len(sleeps) == len(floors)
+        for floor, slept in zip(floors, sleeps):
+            assert floor <= slept <= floor * 1.25
+
+    def test_rate_limited_preview_format_is_unchanged(self, monkeypatch):
+        decision, _calls, _sleeps = self._run(
+            monkeypatch, self._rate_limit(message='slow down'))
+        assert decision.classifier_raw_response == (
+            'HTTP 429 AnthropicRequestError: slow down')

@@ -186,11 +186,13 @@ def test_editable_fields_live_editable_fields():
         'auto_model_routing_standard_threshold',
         'auto_model_routing_system_prompt_cache_size',
         'auto_model_routing_system_prompt_preview_limit',
+        'auto_model_routing_classifier_max_retries',
         'lock_requested_model',
         'sanitize_system_prompt',
         'sse_keepalive_interval',
         'db_retention_days',
         'auto_model_routing_classification',
+        'oauth_usage_poll_interval',
     }
     assert live_editable == expected
 
@@ -721,3 +723,55 @@ def test_oauth_usage_timezone_in_field_metadata():
     assert 'description' in meta
     assert 'group' in meta
     assert meta['group'] == 'OAuth Usage'
+
+
+def test_classifier_max_retries_defaults_to_four():
+    assert parse_args([]).auto_model_routing_classifier_max_retries == 4
+
+
+def test_classifier_max_retries_env_var(monkeypatch):
+    """ANTHROUTER_AUTO_MODEL_ROUTING_CLASSIFIER_MAX_RETRIES env var is honoured."""
+    monkeypatch.setenv('ANTHROUTER_AUTO_MODEL_ROUTING_CLASSIFIER_MAX_RETRIES', '0')
+    assert parse_args([]).auto_model_routing_classifier_max_retries == 0
+
+
+def test_classifier_max_retries_flag_overrides_env(monkeypatch):
+    monkeypatch.setenv('ANTHROUTER_AUTO_MODEL_ROUTING_CLASSIFIER_MAX_RETRIES', '0')
+    cfg = parse_args(['--auto-model-routing-classifier-max-retries', '2'])
+    assert cfg.auto_model_routing_classifier_max_retries == 2
+
+
+def test_classifier_max_retries_env_above_range_rejected(monkeypatch):
+    monkeypatch.setenv('ANTHROUTER_AUTO_MODEL_ROUTING_CLASSIFIER_MAX_RETRIES', '5')
+    with pytest.raises(SystemExit):
+        parse_args([])
+
+
+def test_classifier_max_retries_negative_rejected():
+    with pytest.raises(SystemExit):
+        parse_args(['--auto-model-routing-classifier-max-retries', '-1'])
+
+
+def test_validate_config_classifier_max_retries_bounds():
+    assert validate_config(_make_valid_config(
+        auto_model_routing_classifier_max_retries=0)) == []
+    assert validate_config(_make_valid_config(
+        auto_model_routing_classifier_max_retries=4)) == []
+    errors = validate_config(_make_valid_config(
+        auto_model_routing_classifier_max_retries=5))
+    assert len(errors) == 1
+    assert 'auto_model_routing_classifier_max_retries must be in [0, 4]' in errors[0]
+
+
+def test_classifier_max_retries_in_editable_fields():
+    """Live-editable (False) so an operator can cut it through POST /admin/config."""
+    assert EDITABLE_FIELDS['auto_model_routing_classifier_max_retries'] is False
+
+
+def test_classifier_max_retries_in_field_metadata():
+    meta = FIELD_METADATA['auto_model_routing_classifier_max_retries']
+    assert meta['type'] == 'int'
+    assert meta['min'] == 0
+    assert meta['max'] == 4
+    assert meta['group'] == 'Model Routing'
+    assert 'description' in meta

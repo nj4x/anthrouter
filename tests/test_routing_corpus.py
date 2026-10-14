@@ -82,6 +82,8 @@ def _config(
     cfg.auto_model_routing_standard_threshold = 75.0
     cfg.auto_model_routing_system_prompt_cache_size = 256
     cfg.auto_model_routing_system_prompt_preview_limit = 500
+    # Concrete int (not a MagicMock) so the classifier retry budget is countable.
+    cfg.auto_model_routing_classifier_max_retries = 4
     return cfg
 
 

@@ -41,6 +41,7 @@ EDITABLE_FIELDS: dict[str, bool] = {
     'auto_model_routing_user_prompt_weight': False,
     'auto_model_routing_trivial_threshold': False,
     'auto_model_routing_standard_threshold': False,
+    'auto_model_routing_classifier_max_retries': False,
     'auto_model_routing_system_prompt_cache_size': False,
     'auto_model_routing_system_prompt_preview_limit': False,
     'lock_requested_model': False,
@@ -134,6 +135,13 @@ FIELD_METADATA: dict[str, dict] = {
         'type': 'float',
         'min': 0.0,
         'max': 1.0,
+        'group': 'Model Routing',
+    },
+    'auto_model_routing_classifier_max_retries': {
+        'description': 'Maximum classifier retries after a failed attempt; 0 means one attempt and no retry. Each retry also carries the transport\'s own retries, so lowering this cuts upstream calls under account pressure.',
+        'type': 'int',
+        'min': 0,
+        'max': 4,
         'group': 'Model Routing',
     },
     'auto_model_routing_system_prompt_cache_size': {
@@ -366,6 +374,7 @@ class Config:
     auto_model_routing_user_prompt_weight: float = 0.80
     auto_model_routing_trivial_threshold: float = 30.0
     auto_model_routing_standard_threshold: float = 60.0
+    auto_model_routing_classifier_max_retries: int = 4
     auto_model_routing_system_prompt_cache_size: int = 256
     auto_model_routing_system_prompt_preview_limit: int = 500
     lock_requested_model: str = 'off'   # Model baseline lock for routing; 'off' disables
@@ -446,6 +455,13 @@ def validate_config(cfg: Config) -> list[str]:
     if prior_limit < prior_min or prior_limit > prior_max:
         errors.append(f'auto_model_routing_prior_response_summary_limit must be in [{prior_min}, {prior_max}], got {prior_limit}')
     
+    retries_meta = FIELD_METADATA.get('auto_model_routing_classifier_max_retries', {})
+    retries_min = retries_meta.get('min', 0)
+    retries_max = retries_meta.get('max', 4)
+    retries = cfg.auto_model_routing_classifier_max_retries
+    if retries < retries_min or retries > retries_max:
+        errors.append(f'auto_model_routing_classifier_max_retries must be in [{retries_min}, {retries_max}], got {retries}')
+
     cache_meta = FIELD_METADATA.get('auto_model_routing_system_prompt_cache_size', {})
     cache_min = cache_meta.get('min', 1)
     if cfg.auto_model_routing_system_prompt_cache_size < cache_min:
@@ -666,6 +682,17 @@ def parse_args(argv=None) -> Config:
              'between trivial_threshold and this value is "standard". '
              'Must be strictly greater than --auto-model-routing-trivial-threshold. '
              '(default: 60, env: ANTHROUTER_AUTO_MODEL_ROUTING_STANDARD_THRESHOLD)',
+    )
+    p.add_argument(
+        '--auto-model-routing-classifier-max-retries',
+        dest='auto_model_routing_classifier_max_retries', type=int,
+        default=int(os.environ.get(
+            'ANTHROUTER_AUTO_MODEL_ROUTING_CLASSIFIER_MAX_RETRIES', '4')),
+        help='Maximum retries of the classifier call after a failed attempt; 0 means '
+             'one attempt and no retry. Only plausibly transient failures are retried '
+             '(connection error, missing status, HTTP 500+, or a 429 carrying retry '
+             'timing). Valid range: [0, 4]. '
+             '(default: 4, env: ANTHROUTER_AUTO_MODEL_ROUTING_CLASSIFIER_MAX_RETRIES)',
     )
     p.add_argument(
         '--auto-model-routing-system-prompt-cache-size',

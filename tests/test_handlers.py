@@ -817,7 +817,7 @@ def test_invalid_classifier_row_books_overhead_and_stores_evidence(proxy):
     assert row['classifier_stop_reason'] == 'max_tokens'
 
 
-def test_failed_classifier_row_with_priced_model_books_zero_overhead(proxy, monkeypatch):
+def test_rate_limited_classifier_row_with_priced_model_books_zero_overhead(proxy, monkeypatch):
     from anthrouter.mapper.common import AnthropicRequestError
 
     _classifier_calls_raise(monkeypatch, AnthropicRequestError(
@@ -826,7 +826,7 @@ def test_failed_classifier_row_with_priced_model_books_zero_overhead(proxy, monk
 
     row = _post_routed_prompt(server)
 
-    assert row['reason_code'] == 'classifier_failed'
+    assert row['reason_code'] == 'classifier_rate_limited'
     assert not row['applied']
     assert row['classifier_model'] == 'haiku'
     assert row['classifier_overhead_usd'] == 0.0
@@ -855,13 +855,21 @@ def _fail_closed_case(proxy, monkeypatch, case, **overrides):
         _classifier_calls_raise(monkeypatch, RuntimeError('boom'))
         return proxy(auto_model_routing=True, auto_model_routing_mode='classifier',
                      **overrides), 'haiku'
+    if case == 'classifier_rate_limited':
+        from anthrouter.mapper.common import AnthropicRequestError
+
+        _classifier_calls_raise(monkeypatch, AnthropicRequestError(
+            'slow down', error_type='rate_limit_error', status_code=429))
+        return proxy(auto_model_routing=True, auto_model_routing_mode='classifier',
+                     **overrides), 'haiku'
     if case == 'disabled':
         return proxy(auto_model_routing=False, **overrides), 'haiku'
     return proxy(auto_model_routing=True, auto_model_routing_mode='rules',
                  **overrides), ''
 
 
-_FAIL_CLOSED_CASES = ['classifier_failed', 'disabled', 'model_not_eligible']
+_FAIL_CLOSED_CASES = ['classifier_failed', 'classifier_rate_limited', 'disabled',
+                      'model_not_eligible']
 
 
 @pytest.mark.parametrize('case', _FAIL_CLOSED_CASES)
@@ -884,7 +892,7 @@ def test_locked_fail_closed_records_the_model_it_dispatches(proxy, monkeypatch, 
 
 # 'model_not_eligible' is absent: without a lock its ineligible model (empty or
 # non-string) never reaches the upstream — the mapper rejects it with a 400.
-@pytest.mark.parametrize('case', ['classifier_failed', 'disabled'])
+@pytest.mark.parametrize('case', ['classifier_failed', 'classifier_rate_limited', 'disabled'])
 def test_unlocked_fail_closed_keeps_the_client_model(proxy, monkeypatch, case):
     server, client_model = _fail_closed_case(proxy, monkeypatch, case)
 
