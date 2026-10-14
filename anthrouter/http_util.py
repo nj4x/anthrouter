@@ -179,12 +179,17 @@ def should_retry(status: int, resp) -> bool:
     return True
 
 
-def handle_error_response(status: int, body_bytes: bytes) -> None:
+def handle_error_response(status: int, body_bytes: bytes, resp) -> None:
     """Map an upstream HTTP error status to an ``AnthropicRequestError``.
 
     Always raises — never returns.  The upstream ``error.type`` is forwarded for
-    400s so native Anthropic error types survive the hop.
+    400s so native Anthropic error types survive the hop.  ``resp`` is read for
+    its headers only.  Every error raised *here* carries the upstream retry
+    guidance as ``retry_after`` — float seconds, unrounded and uncapped, or
+    ``None`` when absent or unparseable.  Callers that raise elsewhere (the
+    transport's loop-exit fallback) are not covered by that guarantee.
     """
+    retry_after = parse_retry_after(resp)
     try:
         detail = json.loads(body_bytes)
         error = detail.get('error') or {}
@@ -200,15 +205,20 @@ def handle_error_response(status: int, body_bytes: bytes) -> None:
 
     if status == 400:
         raise AnthropicRequestError(
-            message, error_type=error_type or 'invalid_request_error', status_code=400)
+            message, error_type=error_type or 'invalid_request_error', status_code=400,
+            retry_after=retry_after)
     if status == 401:
-        raise AnthropicRequestError(message, error_type='authentication_error', status_code=401)
+        raise AnthropicRequestError(message, error_type='authentication_error', status_code=401,
+                                    retry_after=retry_after)
     if status == 403:
-        raise AnthropicRequestError(message, error_type='permission_error', status_code=403)
+        raise AnthropicRequestError(message, error_type='permission_error', status_code=403,
+                                    retry_after=retry_after)
     if status == 429:
-        raise AnthropicRequestError(message, error_type='rate_limit_error', status_code=429)
+        raise AnthropicRequestError(message, error_type='rate_limit_error', status_code=429,
+                                    retry_after=retry_after)
     raise AnthropicRequestError(
         f'Upstream error (HTTP {status}): {message}',
         error_type='api_error',
         status_code=502,
+        retry_after=retry_after,
     )
