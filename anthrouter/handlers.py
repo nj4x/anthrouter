@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import mimetypes
 import random
 import re
@@ -1240,7 +1241,8 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         return f'[{sess} {shash}]'
 
     def _send_error(self, exc: AnthropicRequestError) -> None:
-        self._send_json(exc.status_code, anthropic_error_payload(exc.error_type, exc.message))
+        self._send_json(exc.status_code, anthropic_error_payload(exc.error_type, exc.message),
+                        retry_after=exc.retry_after)
 
     def _validate_content_type(self):
         if 'application/json' not in self.headers.get('Content-Type', ''):
@@ -1259,14 +1261,24 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         except (json.JSONDecodeError, ValueError):
             raise AnthropicRequestError('Malformed JSON body')
 
-    def _send_json(self, status: int, data: dict):
+    def _send_json(self, status: int, data: dict, retry_after: float | None = None):
+        """Send a JSON response.
+
+        When *retry_after* is not ``None``, a ``Retry-After`` header is emitted,
+        serialised as ``str(int(math.ceil(retry_after)))`` so the client is never
+        told to retry sooner than the upstream asked.  A 429 the proxy originates
+        itself (a locally raised ``AnthropicRequestError``) has ``retry_after=None``
+        and therefore omits the header.  The streaming error path
+        (``_send_sse_error``) never emits the header because response headers are
+        already committed by the time an in-stream error is detected.
+        """
         body = json.dumps(data).encode('utf-8')
         try:
             self.send_response(status)
             self.send_header('Content-Type', 'application/json')
             self.send_header('Content-Length', str(len(body)))
-            if status == 429:
-                self.send_header('Retry-After', '1')
+            if retry_after is not None:
+                self.send_header('Retry-After', str(int(math.ceil(retry_after))))
             self.end_headers()
             self.wfile.write(body)
         except _CLIENT_DISCONNECT:

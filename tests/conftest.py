@@ -37,6 +37,7 @@ class _FakeUpstream(BaseHTTPRequestHandler):
     received: list = []
     status = 200
     json_body: dict = {}
+    extra_headers: dict = {}
 
     def do_POST(self):
         body = self.rfile.read(int(self.headers.get('Content-Length', 0)))
@@ -53,6 +54,8 @@ class _FakeUpstream(BaseHTTPRequestHandler):
             self.send_response(type(self).status)
             self.send_header('Content-Type', 'application/json')
             self.send_header('Content-Length', str(len(data)))
+            for name, value in type(self).extra_headers.items():
+                self.send_header(name, value)
             self.end_headers()
             self.wfile.write(data)
             return
@@ -96,6 +99,7 @@ def upstream():
         'usage': {'input_tokens': 100, 'output_tokens': 7,
                   'cache_read_input_tokens': 900},
     }
+    _FakeUpstream.extra_headers = {}
     server = ThreadingHTTPServer(('127.0.0.1', 0), _FakeUpstream)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     yield server

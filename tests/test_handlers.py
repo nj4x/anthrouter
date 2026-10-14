@@ -909,3 +909,71 @@ def test_unlocked_fail_closed_keeps_the_client_model(proxy, monkeypatch, case):
     # Nothing was rewritten, so the response echoes the upstream's resolved model,
     # which is identical to the client's model.
     assert body['model'] == resolve_model(client_model)
+
+
+# ---------------------------------------------------------------------------
+# Ticket #34 — Truthful Retry-After on outbound 429
+# ---------------------------------------------------------------------------
+
+def _post_expect_error(server, status_code):
+    """POST to /v1/messages and return the HTTPError (non-2xx)."""
+    import urllib.error
+    request = urllib.request.Request(
+        server.base_url + '/v1/messages',
+        data=json.dumps({'model': 'sonnet',
+                         'messages': [{'role': 'user', 'content': 'hi'}]}).encode(),
+        headers={'Content-Type': 'application/json', 'x-api-key': 'k'},
+        method='POST')
+    with pytest.raises(urllib.error.HTTPError) as exc_info:
+        urllib.request.urlopen(request)
+    assert exc_info.value.code == status_code
+    return exc_info.value
+
+
+def test_retry_after_omitted_when_upstream_sent_none(proxy, monkeypatch):
+    """429 with no upstream Retry-After header omits Retry-After in the response."""
+    monkeypatch.setattr('anthrouter.transport.time.sleep', lambda _s: None)
+    _FakeUpstream.status = 429
+    server = proxy()
+    err = _post_expect_error(server, 429)
+    assert err.headers.get('Retry-After') is None
+
+
+def test_retry_after_echoed_as_integer_seconds(proxy, monkeypatch):
+    """upstream Retry-After: 5 is echoed as '5'."""
+    monkeypatch.setattr('anthrouter.transport.time.sleep', lambda _s: None)
+    _FakeUpstream.status = 429
+    _FakeUpstream.extra_headers = {'Retry-After': '5'}
+    server = proxy()
+    err = _post_expect_error(server, 429)
+    assert err.headers.get('Retry-After') == '5'
+
+
+def test_retry_after_zero_echoed_not_omitted(proxy, monkeypatch):
+    """upstream Retry-After: 0 is echoed as '0', not omitted."""
+    monkeypatch.setattr('anthrouter.transport.time.sleep', lambda _s: None)
+    _FakeUpstream.status = 429
+    _FakeUpstream.extra_headers = {'Retry-After': '0'}
+    server = proxy()
+    err = _post_expect_error(server, 429)
+    assert err.headers.get('Retry-After') == '0'
+
+
+def test_retry_after_ms_rounded_up(proxy, monkeypatch):
+    """upstream retry-after-ms: 1500 (stored as 1.5s) is echoed as '2' (ceiling)."""
+    monkeypatch.setattr('anthrouter.transport.time.sleep', lambda _s: None)
+    _FakeUpstream.status = 429
+    _FakeUpstream.extra_headers = {'retry-after-ms': '1500'}
+    server = proxy()
+    err = _post_expect_error(server, 429)
+    assert err.headers.get('Retry-After') == '2'
+
+
+def test_5xx_produces_502_without_retry_after(proxy, monkeypatch):
+    """A 5xx from the upstream produces a 502 with no Retry-After header."""
+    monkeypatch.setattr('anthrouter.transport.time.sleep', lambda _s: None)
+    _FakeUpstream.status = 500
+    server = proxy()
+    err = _post_expect_error(server, 502)
+    assert err.headers.get('Retry-After') is None
+
