@@ -1632,6 +1632,7 @@ def route_model(
     config = target.config
 
     raw_model = payload.get('model')
+    raw_model_str = str(raw_model) if isinstance(raw_model, str) else repr(raw_model)
 
     # Apply baseline_model lock at input: substitute the client's model with the
     # locked baseline so all downstream paths (classifier, routing summary, cache)
@@ -1639,33 +1640,36 @@ def route_model(
     if baseline_model:
         payload['model'] = baseline_model
 
+    # When a baseline_model lock is active, routing decisions (tier caps, classifier
+    # log context) operate against the locked baseline rather than the client's
+    # arbitrary model.  The client-sent model is preserved in `requested` for
+    # response echoing, the `applied` flag, and ModelRoutingDecision.requested_model.
+    # The disabled, model_not_eligible, and classifier fail-closed returns below report
+    # this value, so the model a fail-closed path dispatches is the model it records (ADR-0016).
+    routing_baseline = baseline_model if baseline_model else raw_model_str
+
     if not config.auto_model_routing:
         return ModelRoutingDecision(
-            requested_model=str(raw_model) if isinstance(raw_model, str) else repr(raw_model),
-            routed_model=str(raw_model) if isinstance(raw_model, str) else repr(raw_model),
+            requested_model=raw_model_str,
+            routed_model=routing_baseline,
             classification=None,
-            applied=False,
+            applied=(routing_baseline != raw_model_str),
             reason_code='disabled',
         )
 
     # Any non-empty string model value is eligible
     if not is_model_auto_routable(raw_model):
         return ModelRoutingDecision(
-            requested_model=str(raw_model) if isinstance(raw_model, str) else repr(raw_model),
-            routed_model=str(raw_model) if isinstance(raw_model, str) else repr(raw_model),
+            requested_model=raw_model_str,
+            routed_model=routing_baseline,
             classification=None,
-            applied=False,
+            applied=(routing_baseline != raw_model_str),
             reason_code='model_not_eligible',
         )
 
-    # Capture the actual incoming model string; fail-closed branches return this.
+    # Capture the actual incoming model string; every return reports it as
+    # requested_model.  Fail-closed branches route to routing_baseline.
     requested = raw_model  # guaranteed str and non-empty by is_model_auto_routable
-
-    # When a baseline_model lock is active, routing decisions (tier caps, classifier
-    # log context) operate against the locked baseline rather than the client's
-    # arbitrary model.  The client-sent model is preserved in `requested` for
-    # response echoing, the `applied` flag, and ModelRoutingDecision.requested_model.
-    routing_baseline = baseline_model if baseline_model else requested
 
     # --- Long-context size floor (deterministic, pre-classifier).  When the
     # estimated total request size is near the 200K window, force the long-context
@@ -2013,14 +2017,15 @@ def route_model(
     )
 
     if score_or_label_or_tier is None:
-        # Fail-closed: keep the originally requested model.
+        # Fail-closed: keep routing_baseline, which payload['model'] already holds
+        # (the client's model unless a baseline lock is active; ADR-0016).
         # Classifier fields carry evidence when an LLM call ran (failed, invalid);
         # they stay None/0 for rules, no-signal and other non-LLM paths.
         return ModelRoutingDecision(
             requested_model=requested,
-            routed_model=requested,
+            routed_model=routing_baseline,
             classification=None,
-            applied=False,
+            applied=(routing_baseline != requested),
             reason_code=dispatch_reason,  # type: ignore[arg-type]
             estimated_input_tokens=est_tokens,
             classifier_mode=effective_mode,

@@ -843,3 +843,61 @@ def test_failed_classifier_row_with_unpriced_model_leaves_overhead_null(proxy, m
     assert row['reason_code'] == 'classifier_failed'
     assert row['classifier_model'] == 'unpriced-model'
     assert row['classifier_overhead_usd'] is None
+
+
+# ---------------------------------------------------------------------------
+# Fail-closed paths record the model they dispatch (ADR-0016)
+# ---------------------------------------------------------------------------
+
+def _fail_closed_case(proxy, monkeypatch, case, **overrides):
+    """Build a proxy that fails closed with ``case``; return it and the client model."""
+    if case == 'classifier_failed':
+        _classifier_calls_raise(monkeypatch, RuntimeError('boom'))
+        return proxy(auto_model_routing=True, auto_model_routing_mode='classifier',
+                     **overrides), 'haiku'
+    if case == 'disabled':
+        return proxy(auto_model_routing=False, **overrides), 'haiku'
+    return proxy(auto_model_routing=True, auto_model_routing_mode='rules',
+                 **overrides), ''
+
+
+_FAIL_CLOSED_CASES = ['classifier_failed', 'disabled', 'model_not_eligible']
+
+
+@pytest.mark.parametrize('case', _FAIL_CLOSED_CASES)
+def test_locked_fail_closed_records_the_model_it_dispatches(proxy, monkeypatch, case):
+    server, client_model = _fail_closed_case(
+        proxy, monkeypatch, case, lock_requested_model='sonnet')
+
+    body = post(server, '/v1/messages', {
+        'model': client_model, 'metadata': {'user_id': SESSION},
+        'messages': [{'role': 'user', 'content': 'fix the failing auth test'}]})
+    row = db_rows(server)[0]
+
+    assert row['reason_code'] == case
+    assert _FakeUpstream.received[-1]['payload']['model'] == resolve_model('sonnet')
+    assert row['routed_model'] == 'sonnet'
+    assert row['requested_model'] == client_model
+    assert row['applied']
+    assert body['model'] == client_model
+
+
+# 'model_not_eligible' is absent: without a lock its ineligible model (empty or
+# non-string) never reaches the upstream — the mapper rejects it with a 400.
+@pytest.mark.parametrize('case', ['classifier_failed', 'disabled'])
+def test_unlocked_fail_closed_keeps_the_client_model(proxy, monkeypatch, case):
+    server, client_model = _fail_closed_case(proxy, monkeypatch, case)
+
+    body = post(server, '/v1/messages', {
+        'model': client_model, 'metadata': {'user_id': SESSION},
+        'messages': [{'role': 'user', 'content': 'fix the failing auth test'}]})
+    row = db_rows(server)[0]
+
+    assert row['reason_code'] == case
+    assert _FakeUpstream.received[-1]['payload']['model'] == resolve_model(client_model)
+    assert row['routed_model'] == client_model
+    assert row['requested_model'] == client_model
+    assert not row['applied']
+    # Nothing was rewritten, so the response echoes the upstream's resolved model,
+    # which is identical to the client's model.
+    assert body['model'] == resolve_model(client_model)
