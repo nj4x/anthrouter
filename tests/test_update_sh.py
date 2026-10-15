@@ -610,3 +610,20 @@ def test_temp_clone_dir_cleaned(tmp_path):
     assert result.returncode != 0
     # Lock should be cleaned up
     assert not (anthrouter_dir / "update.lock").exists()
+
+
+def test_stop_matches_anthrouter_by_command_line(tmp_path):
+    """The proxy runs as `python -m anthrouter`; its comm is just the interpreter."""
+    proc = subprocess.Popen(
+        ["python3", "-c", "import time; time.sleep(60)", "anthrouter"],
+    )
+    try:
+        home, anthrouter_dir, _, _ = _setup_fake_install(
+            tmp_path, manifest_extra={"pid": proc.pid}
+        )
+        result = _run_update(home, anthrouter_dir)
+        assert f"Sending SIGTERM to pid {proc.pid}" in result.stdout, result.stdout
+        assert proc.wait(timeout=15) is not None
+    finally:
+        proc.kill()
+        proc.wait()

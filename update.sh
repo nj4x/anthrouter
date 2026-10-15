@@ -175,8 +175,9 @@ PID=""
 PID="$(MANIFEST_PATH="$MANIFEST" python3 -c 'import json, os; print(json.load(open(os.environ["MANIFEST_PATH"])).get("pid", ""))')" || true
 
 if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
-  # Verify process name matches anthrouter
-  PROC_NAME="$(ps -p "$PID" -o comm= 2>/dev/null || true)"
+  # Full command line, not comm=: the proxy runs as `python -m anthrouter`, so comm= is
+  # only the interpreter path (e.g. Homebrew's Python.app) and never matches.
+  PROC_NAME="$(ps -p "$PID" -o command= 2>/dev/null || true)"
   if [[ "$PROC_NAME" == *"anthrouter"* ]]; then
     say "Sending SIGTERM to pid $PID..."
     kill "$PID" 2>/dev/null || true
@@ -196,7 +197,7 @@ if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
       sleep 0.5
     fi
   else
-    say "Process $PID not named anthrouter (name: $PROC_NAME) — skipping stop"
+    say "Process $PID not anthrouter (command: $PROC_NAME) — skipping stop"
   fi
 else
   say "No running process found at pid $PID — skipping stop"
