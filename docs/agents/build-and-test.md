@@ -16,7 +16,7 @@ make ui-test        # cd anthrouter/ui && npm run lint (oxlint) && npm test (vit
 make ui-build       # cd anthrouter/ui && npm run build — rebuild anthrouter/ui/dist
 ```
 
-`anthrouter/ui/dist` is checked in and must be rebuilt and committed after any change under `anthrouter/ui/src`. See the root `CLAUDE.md` § Core commands for the full constraint — that is the authoritative copy.
+`anthrouter/ui/dist` is checked in and must be rebuilt and committed after any change under `anthrouter/ui/src`. See the root `AGENTS.md` § Core commands for the full constraint — that is the authoritative copy.
 
 ## Live UI development
 
