@@ -647,11 +647,20 @@ class TestSecurityMonitorPassthrough:
         assert row['reason_code'] == 'security_monitor_passthrough'
         assert row['routed_model'] == 'claude-sonnet-5'
 
-    def test_monitor_request_is_still_sanitized(self, proxy):
+    def test_monitor_request_forwards_system_unsanitized(self, proxy):
         server = proxy()
         payload = _monitor_payload()
         post(server, '/v1/messages', payload)
-        assert _FakeUpstream.received[0]['payload']['system'] == [payload['system'][1]]
+        assert _FakeUpstream.received[0]['payload']['system'] == payload['system']
+
+    def test_monitor_request_makes_no_volatility_observation(self, proxy, monkeypatch):
+        import anthrouter.sanitizer as sanitizer
+        seen = []
+        monkeypatch.setattr(sanitizer.TRACKER, 'observe',
+                            lambda sid, system: seen.append(sid) or [])
+        server = proxy()
+        post(server, '/v1/messages', _monitor_payload())
+        assert seen == []
 
     def test_streaming_reply_passes_through_unrewritten(self, proxy):
         server = proxy(lock_requested_model='sonnet')

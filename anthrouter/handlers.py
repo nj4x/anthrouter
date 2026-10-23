@@ -53,7 +53,7 @@ from .request_text import (
     last_transcript_user_turn,
     strip_reminders,
 )
-from .sanitizer import sanitize_system_prompt
+from .sanitizer import SanitizeResult, sanitize_system_prompt
 from .transport import extract_client_credentials
 
 logger = logging.getLogger(__name__)
@@ -722,9 +722,12 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         so a monitor turn sharing the main conversation's session never sets the
         tier or context floor that conversation inherits.  ``_ctx_key`` stays at
         its per-request reset of ``None``, which keeps ``_record_session_context``
-        from recording one.
+        from recording one.  The system prompt is also forwarded unsanitized: the
+        client's ``x-anthropic-billing-header`` block is what marks the request as
+        Claude Code's, and upstream rejects the request without it (ADR-0017).
         """
-        if _has_happy_new_year_system_prompt(payload):
+        monitor = _has_happy_new_year_system_prompt(payload)
+        if monitor:
             self._routing = _security_monitor_passthrough(payload)
             logger.info('%s Model routing: requested=%s routed=%s applied=False reason=%s',
                         self._log_tag(), self._routing.requested_model,
@@ -733,7 +736,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
             self._route(payload, sess_key, credentials)
 
         self._prompt_capture = self._extract_prompt_capture(payload)
-        sanitized = sanitize_system_prompt(
+        sanitized = SanitizeResult() if monitor else sanitize_system_prompt(
             payload, getattr(self.config, 'sanitize_system_prompt', 'off'), sess_key,
             log_tag=self._log_tag(),
         )
