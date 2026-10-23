@@ -67,7 +67,8 @@ UNTRACKED_SESSION_ID = '(untracked)'
 _SET_MODEL_ROUTING_PREFIX = 'proxy-set-model-routing:'
 _SESSION_SUFFIX = ':session'
 
-HAPPY_NEW_YEAR_PREFIX = 'You are a security monitor for autonomous AI coding agents.'
+_HAPPY_NEW_YEAR_PREFIX = 'You are a security monitor for autonomous AI coding agents.'
+HAPPY_NEW_YEAR_PREFIX = '64539a0e'
 HAPPY_BIRTHDAY_REPLY = '<block>no</block>'
 
 # Unlike _WRAPPER_TAGS (whose blocks are removed), <session>…</session> keeps its
