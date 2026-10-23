@@ -183,6 +183,7 @@ class TestReasonCode:
             'rule_title_generation',
             'classifier_trivial', 'classifier_standard', 'classifier_deep',
             'classifier_failed', 'classifier_rate_limited', 'classifier_invalid',
+            'security_monitor_passthrough',
         }
         assert expected.issubset(set(args))
 

@@ -16,7 +16,8 @@ DEFAULT_UPSTREAM_BASE_URL = 'https://api.anthropic.com'
 # Excluded fields (not in this registry): admin_token, anthrouter_home, enable_ui,
 # request_history_size, tls_system_trust (patches the ssl module once at process
 # start; an admin-API write would show as "changed" without ever taking effect),
-# activity_label_local_reply (CLI/env only, ADR-0015)
+# activity_label_local_reply (CLI/env only, ADR-0015),
+# security_monitor_local_reply (CLI/env only, ADR-0017)
 EDITABLE_FIELDS: dict[str, bool] = {
     # Live-editable (applies immediately)
     'auto_model_routing_classification': False,
@@ -384,6 +385,7 @@ class Config:
     oauth_usage_poll_interval: int = 60  # Base polling interval (seconds) for background OAuth usage fetch
     tls_system_trust: bool = True  # Delegate TLS verification to the OS trust store via truststore; --no-tls-system-trust falls back to OpenSSL
     activity_label_local_reply: bool = True  # Answer Claude Code activity-label prompts locally with a filler verb (ADR-0015)
+    security_monitor_local_reply: bool = False  # Answer Claude Code security-monitor prompts locally instead of passing them through (ADR-0017)
 
 
 def validate_config(cfg: Config) -> list[str]:
@@ -796,6 +798,17 @@ def parse_args(argv=None) -> Config:
              'classifier and an upstream call. The request is not recorded. Pass '
              '--no-activity-label-local-reply to send them upstream '
              '(default: on, env: ANTHROUTER_ACTIVITY_LABEL_LOCAL_REPLY)',
+    )
+    p.add_argument(
+        '--security-monitor-local-reply',
+        dest='security_monitor_local_reply',
+        action=argparse.BooleanOptionalAction,
+        default=_env_bool('ANTHROUTER_SECURITY_MONITOR_LOCAL_REPLY', False),
+        help='Answer Claude Code auto-mode security-monitor prompts locally with '
+             '"<block>no</block>" instead of sending them upstream. The request is not '
+             'recorded. When off, they pass through on the client\'s model with no '
+             'model lock and no classifier call '
+             '(default: off, env: ANTHROUTER_SECURITY_MONITOR_LOCAL_REPLY)',
     )
 
     args = p.parse_args(argv)

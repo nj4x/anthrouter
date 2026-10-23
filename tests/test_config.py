@@ -75,6 +75,20 @@ def test_activity_label_local_reply_env_disables(monkeypatch):
     assert parse_args([]).activity_label_local_reply is False
 
 
+def test_security_monitor_local_reply_defaults_to_false(monkeypatch):
+    monkeypatch.delenv('ANTHROUTER_SECURITY_MONITOR_LOCAL_REPLY', raising=False)
+    assert parse_args([]).security_monitor_local_reply is False
+    assert Config().security_monitor_local_reply is False
+    assert 'security_monitor_local_reply' not in EDITABLE_FIELDS
+
+
+def test_security_monitor_local_reply_flag_and_env(monkeypatch):
+    assert parse_args(['--security-monitor-local-reply']).security_monitor_local_reply is True
+    monkeypatch.setenv('ANTHROUTER_SECURITY_MONITOR_LOCAL_REPLY', '1')
+    assert parse_args([]).security_monitor_local_reply is True
+    assert parse_args(['--no-security-monitor-local-reply']).security_monitor_local_reply is False
+
+
 def test_env_overrides(monkeypatch):
     monkeypatch.setenv('ANTHROUTER_PORT', '9001')
     monkeypatch.setenv('ANTHROUTER_AUTO_MODEL_ROUTING', '1')

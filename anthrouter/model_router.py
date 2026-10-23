@@ -350,6 +350,7 @@ ReasonCode = Literal[
     'malformed_payload',
     'missing_final_user_text',
     'override_no_classifier',
+    'security_monitor_passthrough',  # ADR-0017: handler skips the lock and route_model()
     'size_forced_long_context',
     'session_cached_tier',
     'session_cached_tier_capped',
