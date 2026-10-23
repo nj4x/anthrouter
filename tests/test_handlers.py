@@ -566,7 +566,7 @@ class TestHasHappyNewYearSystemPrompt:
 
 class TestHappyNewYearShortCircuit:
     def test_non_streaming_does_not_reach_upstream(self, proxy):
-        server = proxy()
+        server = proxy(security_monitor_local_reply=True)
         post(server, '/v1/messages', {
             'model': 'claude-opus-4-5',
             'system': HAPPY_NEW_YEAR_PREFIX,
@@ -574,7 +574,7 @@ class TestHappyNewYearShortCircuit:
         assert _FakeUpstream.received == []
 
     def test_non_streaming_reply_body(self, proxy):
-        server = proxy()
+        server = proxy(security_monitor_local_reply=True)
         result = post(server, '/v1/messages', {
             'model': 'claude-opus-4-5',
             'system': HAPPY_NEW_YEAR_PREFIX,
@@ -583,7 +583,7 @@ class TestHappyNewYearShortCircuit:
         assert result['model'] == 'claude-opus-4-5'
 
     def test_streaming_does_not_reach_upstream(self, proxy):
-        server = proxy()
+        server = proxy(security_monitor_local_reply=True)
         post(server, '/v1/messages', {
             'model': 'claude-opus-4-5',
             'system': HAPPY_NEW_YEAR_PREFIX,
@@ -592,7 +592,7 @@ class TestHappyNewYearShortCircuit:
         assert _FakeUpstream.received == []
 
     def test_streaming_reply_body(self, proxy):
-        server = proxy()
+        server = proxy(security_monitor_local_reply=True)
         body = post(server, '/v1/messages', {
             'model': 'claude-opus-4-5',
             'system': HAPPY_NEW_YEAR_PREFIX,
@@ -602,7 +602,7 @@ class TestHappyNewYearShortCircuit:
         assert 'event: message_stop' in body
 
     def test_list_system_trigger(self, proxy):
-        server = proxy()
+        server = proxy(security_monitor_local_reply=True)
         result = post(server, '/v1/messages', {
             'model': 'claude-opus-4-5',
             'system': [{'type': 'text', 'text': f'{HAPPY_NEW_YEAR_PREFIX}, everyone!'}],
@@ -610,7 +610,7 @@ class TestHappyNewYearShortCircuit:
         assert result['content'][0]['text'] == HAPPY_BIRTHDAY_REPLY
 
     def test_no_db_recording(self, proxy):
-        server = proxy()
+        server = proxy(security_monitor_local_reply=True)
         post(server, '/v1/messages', {
             'model': 'claude-opus-4-5',
             'system': HAPPY_NEW_YEAR_PREFIX,
@@ -618,12 +618,66 @@ class TestHappyNewYearShortCircuit:
         assert db_rows(server) == []
 
     def test_no_credential_check(self, proxy):
-        server = proxy()
+        server = proxy(security_monitor_local_reply=True)
         result = post(server, '/v1/messages', {
             'model': 'claude-opus-4-5',
             'system': HAPPY_NEW_YEAR_PREFIX,
             'messages': [{'role': 'user', 'content': 'hi'}]})
         assert result['content'][0]['text'] == HAPPY_BIRTHDAY_REPLY
+
+
+# ---------------------------------------------------------------------------
+# Security-monitor passthrough (ADR-0017)
+# ---------------------------------------------------------------------------
+
+def _monitor_payload(model='claude-sonnet-5'):
+    return {'model': model, 'metadata': {'user_id': SESSION},
+            'system': [{'type': 'text', 'text': 'x-anthropic-billing-header: cc_version=1'},
+                       {'type': 'text', 'text': f'{HAPPY_NEW_YEAR_PREFIX} Review it.'}],
+            'messages': [{'role': 'user', 'content': 'hi'}]}
+
+
+class TestSecurityMonitorPassthrough:
+    def test_lock_and_classifier_are_skipped(self, proxy):
+        server = proxy(auto_model_routing=True, lock_requested_model='sonnet')
+        post(server, '/v1/messages', _monitor_payload())
+        assert len(_FakeUpstream.received) == 1
+        assert _FakeUpstream.received[0]['payload']['model'] == 'claude-sonnet-5'
+        row = db_rows(server)[0]
+        assert row['reason_code'] == 'security_monitor_passthrough'
+        assert row['routed_model'] == 'claude-sonnet-5'
+
+    def test_monitor_request_is_still_sanitized(self, proxy):
+        server = proxy()
+        payload = _monitor_payload()
+        post(server, '/v1/messages', payload)
+        assert _FakeUpstream.received[0]['payload']['system'] == [payload['system'][1]]
+
+    def test_streaming_reply_passes_through_unrewritten(self, proxy):
+        server = proxy(lock_requested_model='sonnet')
+        body = post(server, '/v1/messages', {**_monitor_payload(), 'stream': True}, raw=True)
+        assert _FakeUpstream.received[0]['payload']['model'] == 'claude-sonnet-5'
+        assert body == SSE_BODY
+
+    def test_monitor_turn_leaves_the_session_tier_cache_unset(self, proxy):
+        server = proxy(auto_model_routing=True, auto_model_routing_mode='rules')
+        post(server, '/v1/messages', _monitor_payload(model='sonnet'))
+        post(server, '/v1/messages', _continuation('sonnet'))
+        rows = db_rows(server)
+        assert rows[1]['reason_code'] == 'security_monitor_passthrough'
+        assert rows[0]['reason_code'] == 'missing_final_user_text'
+
+    def test_ordinary_request_still_takes_the_lock(self, proxy):
+        server = proxy(auto_model_routing=False, lock_requested_model='haiku')
+        post(server, '/v1/messages', {
+            'model': 'claude-opus-4-5', 'metadata': {'user_id': SESSION},
+            'messages': [{'role': 'user', 'content': 'hi'}]})
+        assert _FakeUpstream.received[-1]['payload']['model'] == resolve_model('haiku')
+
+    def test_local_reply_flag_off_by_default(self, proxy):
+        server = proxy()
+        post(server, '/v1/messages', _monitor_payload())
+        assert len(_FakeUpstream.received) == 1
 
 
 # ---------------------------------------------------------------------------
