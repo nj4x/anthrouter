@@ -128,6 +128,27 @@ if [ "$COMPLETED" != "True" ]; then
   die "Install not completed (completed=$COMPLETED) — run install.sh first"
 fi
 
+# Desktop proxy wiring (ADR-0019) is install-only (ADR-0006); an install that
+# predates it gets a hint, never the wiring. ANTHROUTER_UNAME /
+# ANTHROUTER_DESKTOP_APPS mirror install.sh's test overrides.
+desktop_app_present() {
+  [ "${ANTHROUTER_UNAME:-$(uname -s)}" = "Darwin" ] || return 1
+  local app _old_ifs="$IFS"
+  IFS=':'
+  for app in ${ANTHROUTER_DESKTOP_APPS:-/Applications/Claude.app:$HOME/Applications/Claude.app}; do
+    if [ -d "$app" ]; then
+      IFS="$_old_ifs"
+      return 0
+    fi
+  done
+  IFS="$_old_ifs"
+  return 1
+}
+HAS_DESKTOP_FIELD="$(MANIFEST_PATH="$MANIFEST" python3 -c 'import json, os; print("desktopProxy" in json.load(open(os.environ["MANIFEST_PATH"])))' 2>/dev/null || echo True)"
+if [ "$HAS_DESKTOP_FIELD" = "False" ] && desktop_app_present; then
+  say "Claude Desktop found, but this install predates Desktop proxy wiring — to add it, run $HOME_DIR/uninstall.sh, then install.sh."
+fi
+
 # Check upstreamUrl present
 UPSTREAM_URL=""
 UPSTREAM_URL="$(MANIFEST_PATH="$MANIFEST" python3 -c 'import json, os; d = json.load(open(os.environ["MANIFEST_PATH"])); print(d.get("upstreamUrl", ""))')" || {

@@ -20,6 +20,8 @@ import math
 import mimetypes
 import random
 import re
+import socket
+import ssl
 import threading
 import time
 import urllib.parse
@@ -28,7 +30,7 @@ from dataclasses import replace
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 
-from . import admin
+from . import admin, interception
 from .db import compute_cost
 from .mapper import (
     CLASSIFIER_SENTINEL_KEY,
@@ -550,11 +552,17 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
     transport = None
     sessions = None
     request_db = None   # RequestDB, or None when DB recording is disabled
+    interception_context = None  # server-side SSLContext for api.anthropic.com, set when connect_proxy is on
+    # True only on an instance serving the decrypted api.anthropic.com leg
+    # (ADR-0018); set per instance before __init__, never on the class.
+    intercepted = False
 
     def do_POST(self):
         self._reset_request_state()
         path = self.path.split('?')[0].rstrip('/')
-        if path == '/v1/messages':
+        if self.intercepted:
+            self._handle_intercepted_post(path)
+        elif path == '/v1/messages':
             self._handle_messages()
         elif path == '/v1/messages/count_tokens':
             self._handle_count_tokens()
@@ -565,6 +573,9 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         self._reset_request_state()
+        if self.intercepted:
+            self._passthrough()
+            return
         raw_path, _, query_string = self.path.partition('?')
         path = raw_path.rstrip('/')
         if path == '/health':
@@ -589,6 +600,112 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         except Exception:
             logger.exception('%s Admin GET failed', self._log_tag())
             self._send_json(500, anthropic_error_payload('api_error', 'Admin handler failed'))
+
+    def _other_method(self):
+        self._reset_request_state()
+        if self.intercepted:
+            self._passthrough()
+        else:
+            self.send_error(501, f'Unsupported method ({self.command!r})')
+
+    do_PUT = do_PATCH = do_DELETE = do_HEAD = do_OPTIONS = _other_method
+
+    # -- host interception (ADR-0018) -----------------------------------------
+
+    def do_CONNECT(self):
+        self._reset_request_state()
+        self.close_connection = True
+        if not self.config.connect_proxy or self.intercepted:
+            self._send_json(405, anthropic_error_payload('invalid_request_error',
+                                                         'CONNECT is not enabled'))
+            return
+        target = interception.parse_connect_target(self.path)
+        if target is None:
+            self._send_json(400, anthropic_error_payload('invalid_request_error',
+                                                         'Malformed CONNECT target'))
+            return
+        host, port = target
+        host = interception.normalize_host(host)
+        if port != interception.CONNECT_PORT or interception.is_ip_literal(host):
+            self._send_json(403, anthropic_error_payload(
+                'permission_error', 'CONNECT is allowed only to a host name on port 443'))
+            return
+        if host == interception.INTERCEPT_HOST:
+            self._intercept()
+        else:
+            self._tunnel(host)
+
+    def _accept_connect(self) -> bytes:
+        """Answer 200 to the CONNECT and return any bytes the client sent before seeing it.
+
+        The peek runs before the 200: after it, a prompt ClientHello would be
+        read as plaintext sent ahead of the handshake.
+        """
+        pending = interception.take_buffered(self.rfile, self.connection)
+        self.send_response_only(200, 'Connection Established')
+        self.end_headers()
+        self.wfile.flush()
+        return pending
+
+    def _tunnel(self, host: str) -> None:
+        try:
+            upstream = socket.create_connection((host, interception.CONNECT_PORT),
+                                                timeout=interception.CONNECT_TIMEOUT)
+        except OSError as exc:
+            logger.debug('%s tunnel connect to %s failed: %s', self._log_tag(), host, exc)
+            self._send_json(502, anthropic_error_payload('api_error', f'Could not reach {host}'),
+                            extra_headers={interception.ERROR_HEADER: interception.UPSTREAM_CONNECT})
+            return
+        with upstream:
+            upstream.settimeout(None)
+            pending = self._accept_connect()
+            logger.debug('%s tunnel open to %s', self._log_tag(), host)
+            try:
+                if pending:
+                    upstream.sendall(pending)
+            except OSError:
+                return
+            reason = interception.splice(self.connection, upstream,
+                                         self.config.tunnel_idle_timeout)
+            logger.debug('%s tunnel to %s ended (%s)', self._log_tag(), host, reason)
+
+    def _intercept(self) -> None:
+        if self._accept_connect():
+            # Bytes sent before the 200 cannot be fed into the TLS layer.
+            logger.warning('%s client sent data before the TLS handshake; closing',
+                           self._log_tag())
+            return
+        self.connection.settimeout(interception.CONNECT_TIMEOUT)
+        try:
+            tls = self.interception_context.wrap_socket(self.connection, server_side=True)
+        except (OSError, ssl.SSLError) as exc:
+            logger.warning('%s TLS handshake for %s failed: %s', self._log_tag(),
+                           interception.INTERCEPT_HOST, exc)
+            return
+        with tls:
+            tls.settimeout(self.config.tunnel_idle_timeout or None)
+            cls = type(self)
+            inner = cls.__new__(cls)
+            inner.intercepted = True
+            try:
+                cls.__init__(inner, tls, self.client_address, self.server)
+            except OSError as exc:
+                logger.info('%s decrypted connection ended: %s', self._log_tag(), exc)
+
+    def _handle_intercepted_post(self, path: str) -> None:
+        if path not in ('/v1/messages', '/v1/messages/count_tokens'):
+            self._passthrough()
+        elif self.config.interception_target:
+            interception.forward(self, self.config.interception_target,
+                                 interception.TARGET_UNREACHABLE)
+        elif path == '/v1/messages':
+            self._handle_messages()
+        else:
+            self._handle_count_tokens()
+
+    def _passthrough(self) -> None:
+        interception.forward(self, interception.INTERCEPT_UPSTREAM,
+                             interception.UPSTREAM_CONNECT)
 
     def _handle_admin_config_post(self):
         if not self.config.enable_ui:
@@ -1310,7 +1427,8 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         except (json.JSONDecodeError, ValueError):
             raise AnthropicRequestError('Malformed JSON body')
 
-    def _send_json(self, status: int, data: dict, retry_after: float | None = None):
+    def _send_json(self, status: int, data: dict, retry_after: float | None = None,
+                   extra_headers: dict[str, str] | None = None):
         """Send a JSON response.
 
         When *retry_after* is not ``None``, a ``Retry-After`` header is emitted,
@@ -1328,6 +1446,8 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
             self.send_header('Content-Length', str(len(body)))
             if retry_after is not None and math.isfinite(retry_after):
                 self.send_header('Retry-After', str(int(math.ceil(retry_after))))
+            for name, value in (extra_headers or {}).items():
+                self.send_header(name, value)
             self.end_headers()
             self.wfile.write(body)
         except _CLIENT_DISCONNECT:
@@ -1460,4 +1580,11 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         self.wfile.flush()
 
     def log_message(self, format, *args):
-        logger.info('%s ' + format, self._log_tag(), *args)
+        # A CONNECT request line names the tunnel host, which ADR-0018 keeps at
+        # DEBUG. The raw line is checked too: one that fails to parse leaves
+        # command unset but is still logged by send_error.
+        words = getattr(self, 'requestline', '').split(None, 1)
+        is_connect = (getattr(self, 'command', None) == 'CONNECT'
+                      or (words and words[0].upper() == 'CONNECT'))
+        level = logging.DEBUG if is_connect else logging.INFO
+        logger.log(level, '%s ' + format, self._log_tag(), *args)

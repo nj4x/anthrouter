@@ -16,6 +16,7 @@ PURGE=0
 ANTHROUTER_URL="http://127.0.0.1:8083"
 ANTHROUTER_HOSTPORT="127.0.0.1:8083"
 BACKUP_KEY="ANTHROPIC_BASE_URL_ANTHROUTER_BACKUP"
+NODE_CA_BACKUP_KEY="NODE_EXTRA_CA_CERTS_ANTHROUTER_BACKUP"
 BLOCK_BEGIN="# >>> anthrouter >>>"
 BLOCK_END="# <<< anthrouter <<<"
 
@@ -113,6 +114,108 @@ print(result)
 PY
   RESULT="$(cat "$STEP_OUT")"
   [ -n "$RESULT" ] && say "$SETTINGS: ANTHROPIC_BASE_URL $RESULT"
+fi
+
+# ------------------------------------------- desktop proxy wiring (ADR-0019) ---
+
+# Each key is removed or restored only while it still holds the value install
+# wrote; a value the user changed since is left alone with a warning.
+HTTPS_PROXY_SLOT="$(mf_get httpsProxy)"
+NODE_CA_SLOT="$(mf_get nodeExtraCaCerts)"
+TLS_DIR="$(mf_get tlsDir)"
+if [ -n "$SETTINGS" ] && [ -f "$SETTINGS" ] \
+   && { [ -n "$HTTPS_PROXY_SLOT" ] || [ -n "$NODE_CA_SLOT" ]; }; then
+  SETTINGS_PATH="$SETTINGS" python3 - "$ANTHROUTER_URL" "$HTTPS_PROXY_SLOT" "$NODE_CA_SLOT" \
+    "${TLS_DIR:-$HOME_DIR/tls}" "$NODE_CA_BACKUP_KEY" > "$STEP_OUT" <<'PY'
+import json, os, sys
+
+path = os.environ['SETTINGS_PATH']
+our_url, proxy_slot, ca_slot, tls_dir, backup_key = sys.argv[1:6]
+ca, bundle = tls_dir + '/ca.pem', tls_dir + '/ca-bundle.pem'
+with open(path) as fh:
+    data = json.load(fh)
+env = data.get('env', {})
+out, changed = [], False
+
+if proxy_slot == 'created' and 'HTTPS_PROXY' in env:
+    if env['HTTPS_PROXY'] == our_url:
+        env.pop('HTTPS_PROXY')
+        out.append('ok HTTPS_PROXY removed')
+        changed = True
+    else:
+        out.append(f"warn HTTPS_PROXY is now {env['HTTPS_PROXY']!r}, not {our_url!r} - left in place")
+
+live = env.get('NODE_EXTRA_CA_CERTS')
+if ca_slot == 'created' and live is not None:
+    if live == ca:
+        env.pop('NODE_EXTRA_CA_CERTS')
+        out.append('ok NODE_EXTRA_CA_CERTS removed')
+        changed = True
+    else:
+        out.append(f'warn NODE_EXTRA_CA_CERTS is now {live!r}, not {ca!r} - left in place')
+elif ca_slot == 'backed_up' and backup_key in env:
+    if live == bundle:
+        env['NODE_EXTRA_CA_CERTS'] = env.pop(backup_key)
+        out.append('ok NODE_EXTRA_CA_CERTS restored ' + env['NODE_EXTRA_CA_CERTS'])
+        changed = True
+    else:
+        out.append(f'warn NODE_EXTRA_CA_CERTS is now {live!r}, not {bundle!r} - '
+                   f'left in place, and {backup_key} kept')
+elif ca_slot == 'backed_up' and live == bundle:
+    out.append(f'warn NODE_EXTRA_CA_CERTS still names {bundle!r} but {backup_key} is gone - '
+               'left in place; set NODE_EXTRA_CA_CERTS by hand')
+
+if changed:
+    tmp = path + '.tmp'
+    with open(tmp, 'w') as fh:
+        json.dump(data, fh, indent=2)
+        fh.write('\n')
+    os.replace(tmp, path)
+print('\n'.join(out))
+PY
+  while IFS= read -r line; do
+    case "$line" in
+      ok\ *)   say "$SETTINGS: ${line#ok }" ;;
+      warn\ *) say "warning: $SETTINGS: ${line#warn } (changed after install)" >&2 ;;
+    esac
+  done < "$STEP_OUT"
+fi
+
+if [ "$(mf_get configEnvDesktopBlock)" = "True" ] && [ -f "$HOME_DIR/config.env" ]; then
+  CONFIG_PATH="$HOME_DIR/config.env" python3 - "$BLOCK_BEGIN desktop-proxy" "$BLOCK_END desktop-proxy" > "$STEP_OUT" <<'PY'
+import os, sys
+path = os.environ['CONFIG_PATH']
+begin, end = sys.argv[1], sys.argv[2]
+with open(path) as fh:
+    lines = fh.read().splitlines()
+removed = False
+while begin in lines and end in lines[lines.index(begin):]:
+    i = lines.index(begin)
+    j = lines.index(end, i)
+    del lines[i:j + 1]
+    removed = True
+if not removed:
+    raise SystemExit(0)
+tmp = path + '.tmp'
+with open(tmp, 'w') as fh:
+    fh.write('\n'.join(lines) + '\n' if lines else '')
+os.replace(tmp, path)
+print('removed')
+PY
+  [ -n "$(cat "$STEP_OUT")" ] && say "$HOME_DIR/config.env: CONNECT proxy settings removed"
+fi
+
+if [ -n "$TLS_DIR" ]; then
+  # The manifest path feeds rm -rf; only the directory install creates is
+  # ever deleted.
+  if [ "$TLS_DIR" = "$HOME_DIR/tls" ]; then
+    if [ -d "$TLS_DIR" ]; then
+      rm -rf "$TLS_DIR"
+      say "removed $TLS_DIR"
+    fi
+  else
+    say "warning: manifest tlsDir $TLS_DIR is not $HOME_DIR/tls — not deleting it" >&2
+  fi
 fi
 
 # -------------------------------------------------------------- caveman.yaml ---

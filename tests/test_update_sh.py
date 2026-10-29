@@ -627,3 +627,52 @@ def test_stop_matches_anthrouter_by_command_line(tmp_path):
     finally:
         proc.kill()
         proc.wait()
+
+
+def _run_update_desktop(home, anthrouter_dir, app_dir, uname="Darwin"):
+    env = {
+        **os.environ,
+        "HOME": str(home),
+        "ANTHROUTER_HOME": str(anthrouter_dir),
+        "ANTHROUTER_UNAME": uname,
+        "ANTHROUTER_DESKTOP_APPS": str(app_dir),
+    }
+    return subprocess.run(
+        ["bash", str(Path(__file__).parent.parent / "update.sh")],
+        capture_output=True, text=True, env=env,
+    )
+
+
+DESKTOP_HINT = "predates Desktop proxy wiring"
+
+
+def test_desktop_hint_when_manifest_lacks_desktop_proxy(tmp_path):
+    """ADR-0019 step 10: Desktop present, no desktopProxy field -> one-line hint."""
+    # The lock makes update.sh stop right after pre-flight, before any real work.
+    home, anthrouter_dir, _, _ = _setup_fake_install(tmp_path, with_lock=True)
+    app = tmp_path / "Claude.app"
+    app.mkdir()
+    result = _run_update_desktop(home, anthrouter_dir, app)
+    hint = [line for line in result.stdout.splitlines() if DESKTOP_HINT in line]
+    assert len(hint) == 1
+    assert "uninstall.sh" in hint[0] and "install.sh" in hint[0]
+
+
+def test_no_desktop_hint_when_field_present_or_app_absent(tmp_path):
+    home, anthrouter_dir, _, _ = _setup_fake_install(
+        tmp_path, with_lock=True, manifest_extra={"desktopProxy": False}
+    )
+    app = tmp_path / "Claude.app"
+    app.mkdir()
+    assert DESKTOP_HINT not in _run_update_desktop(home, anthrouter_dir, app).stdout
+
+    manifest_path = anthrouter_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    del manifest["desktopProxy"]
+    manifest_path.write_text(json.dumps(manifest))
+    assert DESKTOP_HINT not in _run_update_desktop(
+        home, anthrouter_dir, tmp_path / "missing.app"
+    ).stdout
+    assert DESKTOP_HINT not in _run_update_desktop(
+        home, anthrouter_dir, app, uname="Linux"
+    ).stdout
