@@ -629,13 +629,14 @@ def test_stop_matches_anthrouter_by_command_line(tmp_path):
         proc.wait()
 
 
-def _run_update_desktop(home, anthrouter_dir, app_dir, uname="Darwin"):
+def _run_update_desktop(home, anthrouter_dir, app_dir, uname="Darwin", launchctl=None):
     env = {
         **os.environ,
         "HOME": str(home),
         "ANTHROUTER_HOME": str(anthrouter_dir),
         "ANTHROUTER_UNAME": uname,
         "ANTHROUTER_DESKTOP_APPS": str(app_dir),
+        "ANTHROUTER_LAUNCHCTL": str(launchctl or "/nonexistent/launchctl"),
     }
     return subprocess.run(
         ["bash", str(Path(__file__).parent.parent / "update.sh")],
@@ -676,3 +677,55 @@ def test_no_desktop_hint_when_field_present_or_app_absent(tmp_path):
     assert DESKTOP_HINT not in _run_update_desktop(
         home, anthrouter_dir, app, uname="Linux"
     ).stdout
+
+
+CA_HINT = "certificate authority without a name constraint"
+
+
+def _fake_launchctl(tmp_path, node_ca_value):
+    launchctl = tmp_path / "launchctl"
+    launchctl.write_text(
+        "#!/usr/bin/env bash\n"
+        f'[ "$1" = getenv ] && [ "$2" = NODE_EXTRA_CA_CERTS ] && printf %s "{node_ca_value}"\n'
+        "exit 0\n"
+    )
+    launchctl.chmod(0o755)
+    return launchctl
+
+
+def test_ca_hint_for_desktop_install_without_name_constraint(tmp_path):
+    """ADR-0020 step 9: desktopProxy true, no caNameConstrained -> re-install hint."""
+    home, anthrouter_dir, _, _ = _setup_fake_install(
+        tmp_path, with_lock=True, manifest_extra={"desktopProxy": True}
+    )
+    result = _run_update_desktop(home, anthrouter_dir, tmp_path / "missing.app")
+    hint = [line for line in result.stdout.splitlines() if CA_HINT in line]
+    assert len(hint) == 1, result.stdout
+    assert "uninstall.sh" in hint[0] and "install.sh" in hint[0]
+    assert "launchctl unsetenv" not in result.stdout
+
+
+def test_ca_hint_names_launchctl_unsetenv_when_launchd_sets_the_variable(tmp_path):
+    home, anthrouter_dir, _, _ = _setup_fake_install(
+        tmp_path, with_lock=True, manifest_extra={"desktopProxy": True}
+    )
+    launchctl = _fake_launchctl(tmp_path, "/corp/bundle.pem")
+    result = _run_update_desktop(home, anthrouter_dir, tmp_path / "missing.app",
+                                 launchctl=launchctl)
+    assert CA_HINT in result.stdout
+    assert "launchctl unsetenv NODE_EXTRA_CA_CERTS" in result.stdout
+
+
+def test_no_ca_hint_when_constrained_or_no_desktop_proxy(tmp_path):
+    home, anthrouter_dir, _, _ = _setup_fake_install(
+        tmp_path, with_lock=True,
+        manifest_extra={"desktopProxy": True, "caNameConstrained": True},
+    )
+    app = tmp_path / "missing.app"
+    assert CA_HINT not in _run_update_desktop(home, anthrouter_dir, app).stdout
+    manifest_path = anthrouter_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest.update(desktopProxy=False)
+    del manifest["caNameConstrained"]
+    manifest_path.write_text(json.dumps(manifest))
+    assert CA_HINT not in _run_update_desktop(home, anthrouter_dir, app).stdout

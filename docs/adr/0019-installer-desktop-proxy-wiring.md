@@ -3,7 +3,7 @@ artifact-type: adr
 lineage-rules: root
 ---
 
-**Status**: Accepted
+**Status**: Accepted. Superseded in part by ADR-0020, for installs made under ADR-0020: step 4, the Consequence "Nothing else trusts it" and the step-11 "new Code tab session" message, all three only when ADR-0020's profile block is written; and always, the `NODE_EXTRA_CA_CERTS` part of step 7, the `nodeExtraCaCerts` rules of step 8, the final "Then delete `~/.anthrouter/tls/`" bullet of step 8, and the Consequences "The CA bundle is a snapshot" and "uninstall deletes it".
 
 # Installer wires `HTTPS_PROXY` and `NODE_EXTRA_CA_CERTS` for Claude Desktop
 
@@ -52,7 +52,7 @@ ADR-0018 lets anthrouter act as Claude Code's HTTPS proxy and decrypt `api.anthr
 ## Consequences
 
 - **The CA bundle is a snapshot.** When `NODE_EXTRA_CA_CERTS` was already set, later edits to the user's original file do not reach `ca-bundle.pem` until the user runs uninstall and then install. The installer prints this when it takes the `backed_up` path.
-- **The CA private key on disk can impersonate `api.anthropic.com`** to any Claude Code process that reads this `settings.json`. Nothing else trusts it (step 4). The key is mode 0600 in a 0700 directory, outside the repo, and uninstall deletes it.
+- **The CA private key on disk can impersonate any host** to any Claude Code process that reads this `settings.json`, not only `api.anthropic.com`: the CA has no name constraint (corrected by ADR-0020, which adds one). Nothing else trusts it (step 4). The key is mode 0600 in a 0700 directory, outside the repo, and uninstall deletes it.
 - **`HTTPS_PROXY` also covers the terminal CLI.** The CLI's model traffic uses its `http://` base URL, so that path does not change. The CLI's own calls to `api.anthropic.com` on other paths (OAuth, feature flags) are decrypted and pass through under ADR-0018 step 8. They are not opaque tunnels. Its calls to other hosts (MCP, WebFetch) are opaque tunnels.
 - **The leaf is valid for 10 years.** When it expires, `api.anthropic.com` traffic through the proxy fails: all Desktop model calls, and the CLI's non-Messages calls to that host. Opaque tunnels to other hosts keep working. To fix it, run `uninstall.sh` and then `install.sh`. If a future Claude Code build applies the 398-day rule to private certificate authorities, this decision must change.
 - **Linux and Windows get no wiring.** Claude Desktop has no Linux build, so Linux has no client that needs it. `install.sh` is a bash script with no native Windows path, so Windows is out of the installer's reach.

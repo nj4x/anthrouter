@@ -149,6 +149,24 @@ if [ "$HAS_DESKTOP_FIELD" = "False" ] && desktop_app_present; then
   say "Claude Desktop found, but this install predates Desktop proxy wiring — to add it, run $HOME_DIR/uninstall.sh, then install.sh."
 fi
 
+# An install made under ADR-0019 alone holds a CA key with no name constraint:
+# it can sign for any host Claude Code reaches. A hint only, no shell probe,
+# never an abort (ADR-0020 step 9).
+NEEDS_CA_REINSTALL="$(MANIFEST_PATH="$MANIFEST" python3 -c 'import json, os; d = json.load(open(os.environ["MANIFEST_PATH"])); print(d.get("desktopProxy") is True and not d.get("caNameConstrained"))' 2>/dev/null || echo False)"
+if [ "$NEEDS_CA_REINSTALL" = "True" ]; then
+  _launchctl_bin="${ANTHROUTER_LAUNCHCTL:-launchctl}"
+  _launchd_ca=""
+  if command -v "$_launchctl_bin" >/dev/null 2>&1; then
+    _launchd_ca="$("$_launchctl_bin" getenv NODE_EXTRA_CA_CERTS 2>/dev/null || true)"
+  fi
+  if [ -n "$_launchd_ca" ]; then
+    say "This Desktop proxy install has a certificate authority without a name constraint — it can sign for any host. To replace it, run launchctl unsetenv NODE_EXTRA_CA_CERTS (set to $_launchd_ca; install.sh refuses while it is set), then $HOME_DIR/uninstall.sh, then install.sh."
+  else
+    say "This Desktop proxy install has a certificate authority without a name constraint — it can sign for any host. To replace it, run $HOME_DIR/uninstall.sh, then install.sh."
+  fi
+  unset _launchctl_bin _launchd_ca
+fi
+
 # Check upstreamUrl present
 UPSTREAM_URL=""
 UPSTREAM_URL="$(MANIFEST_PATH="$MANIFEST" python3 -c 'import json, os; d = json.load(open(os.environ["MANIFEST_PATH"])); print(d.get("upstreamUrl", ""))')" || {
