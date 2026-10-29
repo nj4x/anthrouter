@@ -520,3 +520,132 @@ def test_other_request_lines_stay_at_info(proxy, caplog):
         _read_all(sock)
     hits = [r for r in caplog.records if 'GET /health' in r.getMessage()]
     assert hits and all(r.levelno == logging.INFO for r in hits)
+
+
+# -- combined CA bundle (ADR-0020 step 2) -------------------------------------
+
+def _pem(tag: str) -> str:
+    """A syntactically valid one-certificate PEM whose body encodes *tag*."""
+    import base64
+    return ('-----BEGIN CERTIFICATE-----\n'
+            + base64.b64encode(b'\x30' + tag.encode() * 4).decode() + '\n'
+            '-----END CERTIFICATE-----\n')
+
+
+@pytest.fixture
+def bundle_dir(tmp_path):
+    d = tmp_path / 'tls'
+    d.mkdir()
+    (d / 'ca.pem').write_text(_pem('ours'))
+    return d
+
+
+def test_ca_sources_not_set_is_none_and_set_empty_is_an_empty_tuple(monkeypatch):
+    monkeypatch.delenv('ANTHROUTER_INTERCEPTION_CA_SOURCES', raising=False)
+    assert parse_args([]).interception_ca_sources is None
+    monkeypatch.setenv('ANTHROUTER_INTERCEPTION_CA_SOURCES', '')
+    assert parse_args([]).interception_ca_sources == ()
+
+
+def test_ca_sources_split_on_colons_and_keep_spaces(monkeypatch):
+    monkeypatch.setenv('ANTHROUTER_INTERCEPTION_CA_SOURCES',
+                       '/Library/Application Support/x.pem:/etc/corp.pem')
+    assert parse_args([]).interception_ca_sources == (
+        '/Library/Application Support/x.pem', '/etc/corp.pem')
+    assert parse_args(['--interception-ca-sources', '/a.pem']).interception_ca_sources == (
+        '/a.pem',)
+
+
+def test_ca_sources_are_not_admin_editable():
+    from anthrouter.config import EDITABLE_FIELDS
+    assert 'interception_ca_sources' not in EDITABLE_FIELDS
+
+
+def test_bundle_is_sources_in_order_deduped_then_ca_pem(bundle_dir, tmp_path):
+    a, b = tmp_path / 'a.pem', tmp_path / 'b.pem'
+    a.write_text(_pem('a').rstrip('\n'))  # no final newline: the next block must still split
+    b.write_text(_pem('b'))
+    interception.rebuild_ca_bundle(str(bundle_dir), (str(a), str(b), str(a)))
+    assert (bundle_dir / 'ca-bundle.pem').read_text() == _pem('a') + _pem('b') + _pem('ours')
+    assert sorted(p.name for p in bundle_dir.iterdir()) == ['ca-bundle.pem', 'ca.pem']
+
+
+def test_empty_sources_bundle_is_ca_pem_alone(bundle_dir):
+    interception.rebuild_ca_bundle(str(bundle_dir), ())
+    assert (bundle_dir / 'ca-bundle.pem').read_text() == _pem('ours')
+
+
+def test_sources_not_set_never_creates_or_rebuilds(bundle_dir):
+    interception.rebuild_ca_bundle(str(bundle_dir), None)
+    assert not (bundle_dir / 'ca-bundle.pem').exists()
+    (bundle_dir / 'ca-bundle.pem').write_text('ADR-0019 snapshot\n')
+    interception.rebuild_ca_bundle(str(bundle_dir), None)
+    assert (bundle_dir / 'ca-bundle.pem').read_text() == 'ADR-0019 snapshot\n'
+
+
+def test_rebuild_picks_up_a_changed_source(bundle_dir, tmp_path):
+    src = tmp_path / 'corp.pem'
+    src.write_text(_pem('old'))
+    interception.rebuild_ca_bundle(str(bundle_dir), (str(src),))
+    src.write_text(_pem('rotated'))
+    interception.rebuild_ca_bundle(str(bundle_dir), (str(src),))
+    assert (bundle_dir / 'ca-bundle.pem').read_text() == _pem('rotated') + _pem('ours')
+
+
+@pytest.mark.parametrize('content', [
+    None,                                               # missing file
+    '',                                                 # empty
+    'not a certificate\n',                              # no PEM block
+    _pem('x') + '-----BEGIN CERTIFICATE-----\nAAAA\n',  # ends inside a PEM block
+])
+def test_unreadable_source_keeps_the_existing_bundle_with_a_warning(
+        bundle_dir, tmp_path, caplog, content):
+    src = tmp_path / 'corp.pem'
+    if content is not None:
+        src.write_text(content)
+    (bundle_dir / 'ca-bundle.pem').write_text('previous bundle\n')
+    caplog.set_level(logging.WARNING, logger='anthrouter.interception')
+    interception.rebuild_ca_bundle(str(bundle_dir), (str(src),))
+    assert (bundle_dir / 'ca-bundle.pem').read_text() == 'previous bundle\n'
+    assert any(r.levelno == logging.WARNING and str(src) in r.getMessage()
+               for r in caplog.records)
+
+
+def test_first_build_skips_an_unreadable_source_with_a_warning(bundle_dir, tmp_path, caplog):
+    good, bad = tmp_path / 'good.pem', tmp_path / 'missing.pem'
+    good.write_text(_pem('good'))
+    caplog.set_level(logging.WARNING, logger='anthrouter.interception')
+    interception.rebuild_ca_bundle(str(bundle_dir), (str(bad), str(good)))
+    assert (bundle_dir / 'ca-bundle.pem').read_text() == _pem('good') + _pem('ours')
+    assert any(r.levelno == logging.WARNING and str(bad) in r.getMessage()
+               for r in caplog.records)
+
+
+def test_failed_write_keeps_the_existing_bundle_with_a_warning(
+        bundle_dir, monkeypatch, caplog):
+    (bundle_dir / 'ca-bundle.pem').write_text('previous bundle\n')
+
+    def fail(*_a, **_k):
+        raise OSError('disk full')
+    monkeypatch.setattr(interception.os, 'replace', fail)
+    caplog.set_level(logging.WARNING, logger='anthrouter.interception')
+    interception.rebuild_ca_bundle(str(bundle_dir), ())
+    assert (bundle_dir / 'ca-bundle.pem').read_text() == 'previous bundle\n'
+    assert [p.name for p in bundle_dir.iterdir() if p.name.endswith('.tmp')] == []
+    assert any(r.levelno == logging.WARNING for r in caplog.records)
+
+
+def test_failed_first_build_logs_an_error_and_does_not_raise(tmp_path, caplog):
+    missing_dir = tmp_path / 'no-such-tls'
+    caplog.set_level(logging.WARNING, logger='anthrouter.interception')
+    interception.rebuild_ca_bundle(str(missing_dir), ())
+    errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
+    assert errors and 'NODE_EXTRA_CA_CERTS' in errors[0]
+    assert str(missing_dir / 'ca-bundle.pem') in errors[0]
+
+
+def test_create_server_rebuilds_the_bundle_with_connect_proxy_off(bundle_dir):
+    server = create_server(Config(port=0, interception_tls_dir=str(bundle_dir),
+                                  interception_ca_sources=()))
+    server.server_close()
+    assert (bundle_dir / 'ca-bundle.pem').read_text() == _pem('ours')

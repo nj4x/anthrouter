@@ -42,7 +42,10 @@ CAVEMAN_CONFIG_FILE="${CAVEMAN_CONFIG:-$HOME/.caveman/caveman.yaml}"
 
 PID=""
 MUTATING=0
-DESKTOP_CA_STATE=""
+SHELL_CA_VALUE=""
+SETTINGS_CA_VALUE=""
+CA_SOURCES=""
+CA_PROFILE_WRITTEN=0
 HOME_PREEXISTED=0
 [ -d "$HOME_DIR" ] && HOME_PREEXISTED=1
 # bash 3.2 (the macOS system bash, and what `curl | bash` runs) cannot parse a
@@ -58,10 +61,11 @@ die() {
 }
 
 # Paths flow into python argv and generated shell files; a quote or backslash
-# would corrupt the shim and the manifest.
+# would corrupt the shim and the manifest, and a $ or backtick would expand in
+# the double-quoted shell-profile export (ADR-0020).
 for _pv in "HOME=$HOME" "ANTHROUTER_HOME=$HOME_DIR" "CLAUDE_DIR=$CLAUDE_DIR"; do
   case "${_pv#*=}" in
-    *\"*|*\\*|*\'*) die "${_pv%%=*} contains a quote or backslash — unsupported path: ${_pv#*=}" ;;
+    *\"*|*\\*|*\'*|*\$*|*\`*) die "${_pv%%=*} contains a quote, backslash, \$ or backtick — unsupported path: ${_pv#*=}" ;;
   esac
 done
 unset _pv
@@ -113,6 +117,103 @@ desktop_app_present() {
   return 1
 }
 
+desktop_shell_probe() {  # sets SHELL_PROBE_VALUE: the NODE_EXTRA_CA_CERTS a login, interactive $SHELL ends with
+  # ANTHROUTER_SHELL_PROBE / ANTHROUTER_SHELL_PROBE_TIMEOUT exist so tests can
+  # stand in a shell; they are not user-facing knobs.
+  local shell="${ANTHROUTER_SHELL_PROBE:-${SHELL:-/bin/sh}}" timeout="${ANTHROUTER_SHELL_PROBE_TIMEOUT:-10}" kind
+  python3 - "$shell" "$timeout" > "$STEP_OUT" <<'PY' || die "could not run the login-shell probe ($shell -ilc)"
+import os, signal, subprocess, sys
+shell, timeout = sys.argv[1], int(sys.argv[2])
+begin, end = 'ANTHROUTER_PROBE_BEGIN', 'ANTHROUTER_PROBE_END'
+# Only the profile may set it: Desktop starts from launchd's environment (checked
+# on its own in pre-flight), not from the shell that runs this installer.
+env = {k: v for k, v in os.environ.items() if k != 'NODE_EXTRA_CA_CERTS'}
+cmd = f"printf '%s%s%s' {begin} \"$NODE_EXTRA_CA_CERTS\" {end}"
+# stdin from /dev/null: under `curl | bash` an interactive shell would read the
+# rest of this script. A new session keeps it off the terminal's job control.
+proc = subprocess.Popen([shell, '-ilc', cmd], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE, env=env, start_new_session=True)
+try:
+    out, err = proc.communicate(timeout=timeout)
+except subprocess.TimeoutExpired:
+    os.killpg(proc.pid, signal.SIGKILL)
+    try:
+        proc.communicate(timeout=2)
+    except subprocess.TimeoutExpired:
+        pass
+    print('timeout')
+    raise SystemExit(0)
+text = out.decode('utf-8', 'replace')
+raw = (text + err.decode('utf-8', 'replace')).replace(begin, '').replace(end, '')
+i = text.rfind(begin)
+j = text.find(end, i + len(begin)) if i >= 0 else -1
+if proc.returncode != 0:
+    print(f'exit {proc.returncode}\n{raw}')
+elif j < 0:
+    print(f'nosentinel\n{raw}')
+else:
+    sys.stdout.write('ok\n' + text[i + len(begin):j])
+PY
+  kind="$(head -1 "$STEP_OUT")"
+  case "$kind" in
+    ok) SHELL_PROBE_VALUE="$(tail -n +2 "$STEP_OUT")" ;;
+    timeout) die "the login-shell probe ($shell -ilc) did not finish within $timeout s. Nothing was changed. Fix the shell profile, or re-run with --no-desktop-proxy." ;;
+    exit\ *) die "the login-shell probe ($shell -ilc) exited with status ${kind#exit }. Nothing was changed. Its output:
+$(tail -n +2 "$STEP_OUT")" ;;
+    *) die "the login-shell probe ($shell -ilc) printed no value markers. Nothing was changed. Its output:
+$(tail -n +2 "$STEP_OUT")" ;;
+  esac
+}
+
+desktop_ca_source_check() {  # desktop_ca_source_check label path — abort unless path is a usable bundle source
+  # The same readable test anthrouter applies at each bundle rebuild
+  # (interception.pem_problem); tests hold the two in step.
+  python3 - "$2" > "$STEP_OUT" <<'PY' || die "could not check $1 ($2)"
+import base64, binascii, re, sys
+path = sys.argv[1]
+if ':' in path:
+    print("contains ':', which separates the bundle sources")
+    raise SystemExit(0)
+if "'" in path or '\n' in path:
+    print('contains a quote or newline')
+    raise SystemExit(0)
+try:
+    data = open(path, 'rb').read()
+except OSError as exc:
+    print(f'cannot be read ({exc.strerror})')
+    raise SystemExit(0)
+begin = re.compile(r'-----BEGIN ([A-Z0-9 ]+)-----')
+label, body, certs, problem = None, [], 0, None
+for raw in data.decode('latin-1').splitlines():
+    line = raw.strip()
+    if label is None:
+        m = begin.fullmatch(line)
+        if m:
+            label, body = m.group(1), []
+    elif line == f'-----END {label}-----':
+        if label == 'CERTIFICATE':
+            try:
+                der = base64.b64decode(''.join(body), validate=True)
+            except (binascii.Error, ValueError):
+                problem = 'a CERTIFICATE block is not valid base64'
+                break
+            if not der.startswith(b'\x30'):
+                problem = 'a CERTIFICATE block is not a DER certificate'
+                break
+            certs += 1
+        label = None
+    else:
+        body.append(line)
+if problem is None and label is not None:
+    problem = f'it ends inside a {label} block'
+if problem is None and not certs:
+    problem = 'it holds no PEM certificate'
+if problem:
+    print(f'cannot be read as a CA bundle: {problem}')
+PY
+  [ ! -s "$STEP_OUT" ] || die "$1 is '$2', which $(cat "$STEP_OUT"). Nothing was changed. Fix or remove it, or re-run with --no-desktop-proxy."
+}
+
 desktop_proxy_preflight() {  # desktop_proxy_preflight settings-path tls-dir
   local settings="$1" tls_dir="$2" var val launchctl_bin
   # A proxy already in force means the network may need it, and anthrouter
@@ -128,6 +229,10 @@ desktop_proxy_preflight() {  # desktop_proxy_preflight settings-path tls-dir
       val="$("$launchctl_bin" getenv "$var" 2>/dev/null || true)"
       [ -z "$val" ] || die "$var is set in launchctl's environment ($val). anthrouter's Desktop proxy dials direct and cannot chain behind another proxy. Nothing was changed. Clear it (launchctl unsetenv $var), or re-run with --no-desktop-proxy."
     done
+    # A launchd value is assumed not to reach the shell probe, so no profile
+    # block would override it and the TLS failure would return unseen (ADR-0020).
+    val="$("$launchctl_bin" getenv NODE_EXTRA_CA_CERTS 2>/dev/null || true)"
+    [ -z "$val" ] || die "NODE_EXTRA_CA_CERTS is set in launchctl's environment ($val). Claude Desktop would keep that value and never trust anthrouter's certificate authority. Nothing was changed. Run: launchctl unsetenv NODE_EXTRA_CA_CERTS (move the value to your shell profile if you still need it), or re-run with --no-desktop-proxy."
   fi
   SETTINGS_PATH="$settings" python3 - "$NODE_CA_BACKUP_KEY" > "$STEP_OUT" <<'PY' || die "could not read $settings — is it valid JSON?"
 import json, os, sys
@@ -142,11 +247,7 @@ for key in ('HTTPS_PROXY', 'https_proxy'):
 if backup_key in env:
     print('orphan')
     raise SystemExit(0)
-ca = env.get('NODE_EXTRA_CA_CERTS')
-if ca not in (None, '') and not (os.path.isfile(ca) and os.access(ca, os.R_OK)):
-    print('unreadable\n' + ca)
-    raise SystemExit(0)
-print('ok')
+print('ok\n' + str(env.get('NODE_EXTRA_CA_CERTS') or ''))
 PY
   local verdict kind
   verdict="$(cat "$STEP_OUT")"
@@ -160,14 +261,29 @@ PY
     orphan)
       die "$settings holds $NODE_CA_BACKUP_KEY but no install manifest exists at $MANIFEST. A prior install was interrupted — restore its value to NODE_EXTRA_CA_CERTS by hand, remove the backup key, and re-run."
       ;;
-    unreadable)
-      die "$settings sets env.NODE_EXTRA_CA_CERTS to $(printf '%s\n' "$verdict" | tail -n +2), which cannot be read. Nothing was changed. Fix or remove that key, then re-run."
-      ;;
   esac
+  SETTINGS_CA_VALUE="$(printf '%s\n' "$verdict" | tail -n +2)"
+  [ -z "$SETTINGS_CA_VALUE" ] \
+    || desktop_ca_source_check "$settings env.NODE_EXTRA_CA_CERTS" "$SETTINGS_CA_VALUE"
   [ ! -e "$tls_dir" ] \
     || die "$tls_dir already exists. It is left over from an earlier install; remove it and re-run."
   command -v openssl >/dev/null 2>&1 \
     || die "openssl not found on PATH (needed to create the Desktop proxy certificates). Install it, or re-run with --no-desktop-proxy."
+  # Desktop starts Code tab sessions with the shell's environment, and Bun reads
+  # NODE_EXTRA_CA_CERTS only at start, so a shell value beats settings.json.
+  desktop_shell_probe
+  SHELL_CA_VALUE="$SHELL_PROBE_VALUE"
+  if [ -n "$SHELL_CA_VALUE" ]; then
+    case "${SHELL:-}" in
+      */zsh|*/bash) ;;
+      *) die "unsupported shell: ${SHELL:-unset}. Your login shell sets NODE_EXTRA_CA_CERTS ($SHELL_CA_VALUE), and anthrouter can override it only in a bash or zsh profile. Nothing was changed. Re-run with --no-desktop-proxy." ;;
+    esac
+    desktop_ca_source_check "NODE_EXTRA_CA_CERTS from your login shell" "$SHELL_CA_VALUE"
+  fi
+  CA_SOURCES="$SHELL_CA_VALUE"
+  if [ -n "$SETTINGS_CA_VALUE" ]; then
+    CA_SOURCES="${CA_SOURCES:+$CA_SOURCES:}$SETTINGS_CA_VALUE"
+  fi
 }
 
 desktop_proxy_make_certs() {  # desktop_proxy_make_certs tls-dir
@@ -186,6 +302,7 @@ CN = anthrouter
 [v3_ca]
 basicConstraints = critical,CA:TRUE,pathlen:0
 keyUsage = critical,keyCertSign,cRLSign
+nameConstraints = critical,permitted;DNS:api.anthropic.com
 subjectKeyIdentifier = hash
 [v3_leaf]
 basicConstraints = critical,CA:FALSE
@@ -215,6 +332,59 @@ CNF
     || return 1
   rm -f "$dir/leaf.csr" "$dir/openssl.cnf"
   chmod 644 "$dir/ca.pem" "$dir/leaf.pem" || return 1
+}
+
+desktop_proxy_config_block() {  # prints the config.env desktop-proxy block
+  echo "$BLOCK_BEGIN desktop-proxy"
+  echo "ANTHROUTER_CONNECT_PROXY=1"
+  if [ "$TOPOLOGY" = "chained" ]; then
+    echo "ANTHROUTER_INTERCEPTION_TARGET=$CAVEMAN_URL"
+  fi
+  if [ "$HOME_DIR" != "$HOME/.anthrouter" ]; then
+    echo "ANTHROUTER_INTERCEPTION_TLS_DIR=$TLS_DIR"
+  fi
+  # Always written, empty included: present means anthrouter rebuilds
+  # ca-bundle.pem at every start (ADR-0020 step 2). Single quotes keep paths
+  # with spaces whole; pre-flight refuses a quote in a source.
+  echo "ANTHROUTER_INTERCEPTION_CA_SOURCES='$CA_SOURCES'"
+  echo "$BLOCK_END desktop-proxy"
+}
+
+desktop_ca_bundle_check() {  # desktop_ca_bundle_check tls-dir — anthrouter built the bundle, ending with ca.pem
+  python3 - "$1/ca-bundle.pem" "$1/ca.pem" <<'PY'
+import sys
+try:
+    bundle, ca = (open(p, 'rb').read() for p in sys.argv[1:3])
+except OSError:
+    raise SystemExit(1)
+raise SystemExit(0 if ca and bundle.endswith(ca) else 1)
+PY
+}
+
+desktop_ca_profile_write() {  # desktop_ca_profile_write profile-file tls-dir
+  # Called as `... || die`, which suspends set -e inside, so every step
+  # returns explicitly on failure.
+  local profile="$1" tls_dir="$2"
+  mf_set caBundleProfileFile "$profile" || return 1
+  touch "$profile" || return 1
+  if [ -s "$profile" ] && [ -n "$(tail -c 1 "$profile")" ]; then
+    echo >> "$profile" || return 1
+  fi
+  {
+    echo "$BLOCK_BEGIN ca-bundle"
+    echo "export NODE_EXTRA_CA_CERTS=\"$tls_dir/ca-bundle.pem\""
+    echo "$BLOCK_END ca-bundle"
+  } >> "$profile" || return 1
+}
+
+desktop_ca_profile_verify() {  # desktop_ca_profile_verify bundle-path — the block must win
+  local hint=""
+  desktop_shell_probe
+  [ "$SHELL_PROBE_VALUE" = "$1" ] && return 0
+  case "${SHELL:-}" in
+    */bash) hint=" On bash a login shell reads ~/.bash_profile, which must source ~/.bashrc: add '. ~/.bashrc' to ~/.bash_profile and re-run." ;;
+  esac
+  die "after the profile block was written, a login shell still sets NODE_EXTRA_CA_CERTS to '$SHELL_PROBE_VALUE', not $1. A later export wins (for example in ~/.zlogin); remove it and re-run.$hint"
 }
 
 desktop_proxy_probe() {  # desktop_proxy_probe proxy-url ca-file method url [json-body]
@@ -283,35 +453,25 @@ PY
   else
     mf_set nodeExtraCaCerts backed_up || return 1
   fi
-  SETTINGS_PATH="$settings" python3 - "$state" "$tls_dir/ca.pem" "$tls_dir/ca-bundle.pem" "$NODE_CA_BACKUP_KEY" <<'PY' || return 1
+  # Both paths install the bundle anthrouter builds (ADR-0020 step 1); the
+  # original value is one of its sources.
+  mf_set nodeExtraCaCertsValue "$tls_dir/ca-bundle.pem" || return 1
+  SETTINGS_PATH="$settings" python3 - "$state" "$tls_dir/ca-bundle.pem" "$NODE_CA_BACKUP_KEY" <<'PY' || return 1
 import json, os, sys
 path = os.environ['SETTINGS_PATH']
-state, ca, bundle, backup_key = sys.argv[1:5]
+state, bundle, backup_key = sys.argv[1:4]
 with open(path) as fh:
     data = json.load(fh)
 env = data.setdefault('env', {})
-if state == 'absent':
-    env['NODE_EXTRA_CA_CERTS'] = ca
-else:
-    original = env['NODE_EXTRA_CA_CERTS']
-    with open(original, 'rb') as fh:
-        theirs = fh.read()
-    with open(ca, 'rb') as fh:
-        ours = fh.read()
-    if theirs and not theirs.endswith(b'\n'):
-        theirs += b'\n'
-    with open(bundle + '.tmp', 'wb') as fh:
-        fh.write(theirs + ours)
-    os.replace(bundle + '.tmp', bundle)
-    env[backup_key] = original
-    env['NODE_EXTRA_CA_CERTS'] = bundle
+if state == 'present':
+    env[backup_key] = env['NODE_EXTRA_CA_CERTS']
+env['NODE_EXTRA_CA_CERTS'] = bundle
 tmp = path + '.tmp'
 with open(tmp, 'w') as fh:
     json.dump(data, fh, indent=2)
     fh.write('\n')
 os.replace(tmp, path)
 PY
-  DESKTOP_CA_STATE="$state"
 }
 
 # ---------------------------------------------------------------- rollback ---
@@ -500,6 +660,8 @@ mf_write tlsDir null
 mf_write configEnvDesktopBlock null
 mf_write httpsProxy null
 mf_write nodeExtraCaCerts null
+mf_write nodeExtraCaCertsValue null
+mf_write caBundleProfileFile null
 mf_write pid null
 mf_write completed false
 
@@ -536,6 +698,7 @@ if [ "$DESKTOP_PROXY" = "true" ]; then
   say "Creating interception certificates in $TLS_DIR..."
   mf_set tlsDir "$TLS_DIR"
   desktop_proxy_make_certs "$TLS_DIR" || die "openssl could not create the certificates in $TLS_DIR"
+  mf_write caNameConstrained true
 
   # A marked block, appended even to a kept config.env, so uninstall can take
   # it out again: left behind, it would make the next start abort on the
@@ -546,17 +709,7 @@ if [ "$DESKTOP_PROXY" = "true" ]; then
   if [ -s "$CONFIG_ENV" ] && [ -n "$(tail -c 1 "$CONFIG_ENV")" ]; then
     echo >> "$CONFIG_ENV"
   fi
-  {
-    echo "$BLOCK_BEGIN desktop-proxy"
-    echo "ANTHROUTER_CONNECT_PROXY=1"
-    if [ "$TOPOLOGY" = "chained" ]; then
-      echo "ANTHROUTER_INTERCEPTION_TARGET=$CAVEMAN_URL"
-    fi
-    if [ "$HOME_DIR" != "$HOME/.anthrouter" ]; then
-      echo "ANTHROUTER_INTERCEPTION_TLS_DIR=$TLS_DIR"
-    fi
-    echo "$BLOCK_END desktop-proxy"
-  } >> "$CONFIG_ENV"
+  desktop_proxy_config_block >> "$CONFIG_ENV"
 fi
 
 say "Installing launcher shim at $SHIM..."
@@ -603,6 +756,9 @@ if [ "$DESKTOP_PROXY" = "true" ]; then
     INTERCEPTION_HINT=" (chained topology: decrypted Messages requests go to caveman at $CAVEMAN_URL; is caveman running?)"
   fi
   desktop_proxy_health_check "$ANTHROUTER_URL" "$TLS_DIR/ca.pem"
+  # anthrouter is the one bundle builder; its first start must have produced it.
+  desktop_ca_bundle_check "$TLS_DIR" \
+    || die "anthrouter did not build $TLS_DIR/ca-bundle.pem ending with ca.pem — see $HOME_DIR/anthrouter.log"
 fi
 
 # ------------------------------------------------------------- config wiring ---
@@ -750,6 +906,14 @@ PY
   fi
 fi
 
+if [ "$DESKTOP_PROXY" = "true" ] && [ -n "$SHELL_CA_VALUE" ]; then
+  # The login shell's own export would beat settings.json (ADR-0020 step 4).
+  say "Overriding NODE_EXTRA_CA_CERTS in $PROFILE_FILE with $TLS_DIR/ca-bundle.pem..."
+  desktop_ca_profile_write "$PROFILE_FILE" "$TLS_DIR" || die "could not write the ca-bundle block to $PROFILE_FILE"
+  CA_PROFILE_WRITTEN=1
+  desktop_ca_profile_verify "$TLS_DIR/ca-bundle.pem"
+fi
+
 if [ "$DESKTOP_PROXY" = "true" ]; then
   say "Pointing $SETTINGS HTTPS_PROXY and NODE_EXTRA_CA_CERTS at anthrouter..."
   desktop_proxy_wire_settings "$SETTINGS" "$TLS_DIR" || die "could not update $SETTINGS for the Desktop proxy"
@@ -790,11 +954,19 @@ else
   say "Restart Claude Code so it picks up the new ANTHROPIC_BASE_URL."
 fi
 if [ "$DESKTOP_PROXY" = "true" ]; then
-  say "Claude Desktop: open a NEW Code tab session — existing sessions keep their old environment."
+  if [ "$CA_PROFILE_WRITTEN" = "1" ]; then
+    say "Claude Desktop: QUIT and reopen it, so new Code tab sessions get the new NODE_EXTRA_CA_CERTS from $PROFILE_FILE."
+    say "Every Node and Bun process started from your shell now trusts anthrouter's CA, for api.anthropic.com only."
+    case "${SHELL:-}" in
+      */bash) say "bash: the check ran a login shell (~/.bash_profile, which sources ~/.bashrc); the block is in ~/.bashrc. If Desktop reads only one of the two, it may miss the block." ;;
+    esac
+  else
+    say "Claude Desktop: open a NEW Code tab session — existing sessions keep their old environment."
+  fi
   say "All Claude Code HTTPS traffic now goes through anthrouter; if anthrouter stops, it fails."
   say "$HOME_DIR/uninstall.sh reverses the Desktop proxy wiring."
-  if [ "$DESKTOP_CA_STATE" = "present" ]; then
-    say "note: $TLS_DIR/ca-bundle.pem is a snapshot of your NODE_EXTRA_CA_CERTS file plus anthrouter's CA; later edits to your file need uninstall.sh, then install.sh."
+  if [ -n "$CA_SOURCES" ]; then
+    say "note: anthrouter rebuilds $TLS_DIR/ca-bundle.pem from $CA_SOURCES plus its CA at every start; a rotated source reaches it on the next restart."
   fi
 fi
 

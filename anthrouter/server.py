@@ -8,7 +8,7 @@ from http.server import ThreadingHTTPServer
 from .config import Config
 from .db import RequestDB
 from .handlers import ProxyRequestHandler
-from .interception import build_server_context
+from .interception import build_server_context, rebuild_ca_bundle
 from .oauth_usage import OAuthUsageCache
 from .session_state import SessionState
 from .transport import AnthropicTransport
@@ -51,6 +51,8 @@ def create_server(config: Config) -> ThreadingHTTPServer:
     )
 
     handler_class = make_handler_class(config, transport, sessions, request_db, oauth_cache)
+    # Whatever connect_proxy says: the shell-profile export names the bundle either way (ADR-0020).
+    rebuild_ca_bundle(config.interception_tls_dir, config.interception_ca_sources)
     if config.connect_proxy:
         # Loaded before bind so a missing leaf fails startup (ADR-0018 step 6).
         handler_class.interception_context = build_server_context(config.interception_tls_dir)

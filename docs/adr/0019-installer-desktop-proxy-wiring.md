@@ -3,7 +3,7 @@ artifact-type: adr
 lineage-rules: root
 ---
 
-**Status**: Accepted. Superseded in part by ADR-0020, for installs made under ADR-0020, once ADR-0020 is accepted: step 4, the Consequence "Nothing else trusts it" and the step-11 "new Code tab session" message, all three only when ADR-0020's profile block is written; and always, the `NODE_EXTRA_CA_CERTS` part of step 7, the `nodeExtraCaCerts` rules of step 8, the final "Then delete `~/.anthrouter/tls/`" bullet of step 8, and the Consequences "The CA bundle is a snapshot" and "uninstall deletes it".
+**Status**: Accepted. Superseded in part by ADR-0020, for installs made under ADR-0020: step 4, the Consequence "Nothing else trusts it" and the step-11 "new Code tab session" message, all three only when ADR-0020's profile block is written; and always, the `NODE_EXTRA_CA_CERTS` part of step 7, the `nodeExtraCaCerts` rules of step 8, the final "Then delete `~/.anthrouter/tls/`" bullet of step 8, and the Consequences "The CA bundle is a snapshot" and "uninstall deletes it".
 
 # Installer wires `HTTPS_PROXY` and `NODE_EXTRA_CA_CERTS` for Claude Desktop
 

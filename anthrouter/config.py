@@ -25,7 +25,9 @@ CONNECT_PROXY_HOSTS = frozenset({'127.0.0.1', '::1', 'localhost'})
 # security_monitor_local_reply (CLI/env only, ADR-0017),
 # connect_proxy, interception_target, interception_tls_dir, tunnel_idle_timeout
 # (CLI/env only, ADR-0018: a runtime toggle that opens a tunnel endpoint does
-# not belong behind the admin token)
+# not belong behind the admin token),
+# interception_ca_sources (CLI/env only, ADR-0020: an admin-API write must not
+# add trust roots that every Node process in the shell then accepts)
 EDITABLE_FIELDS: dict[str, bool] = {
     # Live-editable (applies immediately)
     'auto_model_routing_classification': False,
@@ -398,6 +400,7 @@ class Config:
     interception_target: str = ''  # Where decrypted Messages requests go; '' handles them in-process (ADR-0018)
     interception_tls_dir: str = ''  # Holds leaf.pem/leaf.key; '' resolves to <anthrouter_home>/tls
     tunnel_idle_timeout: int = 600  # Close a CONNECT tunnel after this many idle seconds; 0 never closes
+    interception_ca_sources: tuple[str, ...] | None = None  # Bundles merged into <tls dir>/ca-bundle.pem at start; None never builds it (ADR-0020)
 
 
 def validate_config(cfg: Config) -> list[str]:
@@ -880,6 +883,16 @@ def parse_args(argv=None) -> Config:
              'is closed; 0 never closes (default: 600, env: ANTHROUTER_TUNNEL_IDLE_TIMEOUT)',
     )
 
+    p.add_argument(
+        '--interception-ca-sources',
+        dest='interception_ca_sources',
+        default=os.environ.get('ANTHROUTER_INTERCEPTION_CA_SOURCES'),
+        help='CA bundle files, separated by ":", merged with ca.pem into '
+             '<--interception-tls-dir>/ca-bundle.pem at every start. Empty builds the '
+             'bundle from ca.pem alone; unset never creates or rebuilds it '
+             '(default: unset, env: ANTHROUTER_INTERCEPTION_CA_SOURCES)',
+    )
+
     args = p.parse_args(argv)
 
     # Resolve here, not at first use: an unusable zone must be fatal at startup, and
@@ -901,6 +914,11 @@ def parse_args(argv=None) -> Config:
     args.lock_requested_model = (args.lock_requested_model or '').strip() or 'off'
     args.upstream_base_url = (args.upstream_base_url or '').strip().rstrip('/')
     args.interception_target = (args.interception_target or '').strip().rstrip('/')
+    # None (not set) and () (set but empty) differ: only the first leaves an
+    # existing bundle alone (ADR-0020 step 2).
+    if args.interception_ca_sources is not None:
+        args.interception_ca_sources = tuple(
+            path for path in args.interception_ca_sources.split(':') if path)
     if not args.upstream_base_url:
         p.error('--upstream-base-url must be a non-empty URL')
 

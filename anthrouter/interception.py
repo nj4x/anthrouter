@@ -7,13 +7,17 @@ unchanged; forwarded requests change only ``Host``, hop-by-hop headers and
 chunked framing.
 """
 
+import base64
+import binascii
 import http.client
 import ipaddress
 import logging
+import os
 import re
 import selectors
 import socket
 import ssl
+import tempfile
 from pathlib import Path
 
 from .http_util import DEFAULT_TIMEOUT, UpstreamTarget
@@ -52,6 +56,10 @@ _HOP_BY_HOP = frozenset({
 })
 
 
+BUNDLE_NAME = 'ca-bundle.pem'
+_PEM_BEGIN = re.compile(r'-----BEGIN ([A-Z0-9 ]+)-----')
+
+
 class LeafLoadError(RuntimeError):
     """The interception leaf or its key could not be loaded."""
 
@@ -72,6 +80,110 @@ def build_server_context(tls_dir: str) -> ssl.SSLContext:
         raise LeafLoadError(f'cannot load leaf.pem/leaf.key from {tls_dir}: {exc}') from exc
     ctx.set_alpn_protocols(['http/1.1'])
     return ctx
+
+
+def pem_problem(data: bytes) -> str | None:
+    """Return why *data* is not a usable CA bundle, or ``None`` when it is.
+
+    Usable means at least one complete PEM certificate and no PEM block left open
+    at the end. A copy cut off mid-certificate is caught; one cut off exactly
+    between certificates is not (ADR-0020 step 2).
+    """
+    open_label, body, certs = None, [], 0
+    for raw in data.decode('latin-1').splitlines():
+        line = raw.strip()
+        if open_label is None:
+            m = _PEM_BEGIN.fullmatch(line)
+            if m:
+                open_label, body = m.group(1), []
+        elif line == f'-----END {open_label}-----':
+            if open_label == 'CERTIFICATE':
+                try:
+                    der = base64.b64decode(''.join(body), validate=True)
+                except (binascii.Error, ValueError):
+                    return 'a CERTIFICATE block is not valid base64'
+                # A DER certificate is a SEQUENCE; Node stops at a block that is
+                # not one and silently drops every root after it, ca.pem included.
+                if not der.startswith(b'\x30'):
+                    return 'a CERTIFICATE block is not a DER certificate'
+                certs += 1
+            open_label = None
+        else:
+            body.append(line)
+    if open_label is not None:
+        return f'it ends inside a {open_label} block'
+    if not certs:
+        return 'it holds no PEM certificate'
+    return None
+
+
+def _read_source(path: str) -> tuple[bytes | None, str]:
+    try:
+        data = Path(path).read_bytes()
+    except OSError as exc:
+        return None, str(exc)
+    problem = pem_problem(data)
+    return (None, problem) if problem else (data, '')
+
+
+def rebuild_ca_bundle(tls_dir: str, sources: tuple[str, ...] | None) -> None:
+    """Write ``<tls_dir>/ca-bundle.pem``: each source in order, deduplicated, then ``ca.pem``.
+
+    The shell-profile export and ``settings.json`` both name this file
+    (ADR-0020), so it is replaced atomically and never left partial or missing
+    when an older copy exists. ``None`` (the key is not set) leaves any bundle
+    alone, since installs made under ADR-0019 alone own theirs. A failure never
+    raises: aborting startup would take down the tunnels the rest of Claude Code
+    traffic needs.
+    """
+    if sources is None:
+        return
+    bundle = Path(tls_dir) / BUNDLE_NAME
+    ca = Path(tls_dir) / 'ca.pem'
+    try:
+        exists = bundle.exists()
+    except OSError:
+        exists = False
+    skip = {os.path.realpath(bundle), os.path.realpath(ca)}
+    parts, unreadable = [], []
+    for source in sources:
+        key = os.path.realpath(source)
+        if key in skip:
+            continue
+        skip.add(key)
+        data, problem = _read_source(source)
+        if data is None:
+            unreadable.append(f'{source} ({problem})')
+        else:
+            parts.append(data if data.endswith(b'\n') else data + b'\n')
+    if unreadable and exists:
+        logger.warning('CA bundle %s kept as it was: cannot read source %s',
+                       bundle, '; '.join(unreadable))
+        return
+    for item in unreadable:
+        logger.warning('CA bundle %s built without unreadable source %s', bundle, item)
+    tmp = None
+    try:
+        parts.append(ca.read_bytes())
+        fd, tmp = tempfile.mkstemp(dir=tls_dir, prefix=f'.{BUNDLE_NAME}.', suffix='.tmp')
+        with os.fdopen(fd, 'wb') as fh:
+            fh.write(b''.join(parts))
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, bundle)
+        tmp = None
+    except OSError as exc:
+        if exists:
+            logger.warning('CA bundle %s kept as it was: rebuild failed: %s', bundle, exc)
+        else:
+            logger.error('CA bundle %s could not be created (%s). NODE_EXTRA_CA_CERTS '
+                         'exports that name it point at a missing file, so Node and Bun '
+                         'processes drop those roots; fix the cause and restart anthrouter.',
+                         bundle, exc)
+        return
+    finally:
+        if tmp is not None:
+            Path(tmp).unlink(missing_ok=True)
+    logger.info('CA bundle %s rebuilt from %d source(s) plus ca.pem', bundle, len(parts) - 1)
 
 
 def parse_connect_target(authority: str) -> tuple[str, int] | None:

@@ -118,20 +118,66 @@ fi
 
 # ------------------------------------------- desktop proxy wiring (ADR-0019) ---
 
-# Each key is removed or restored only while it still holds the value install
-# wrote; a value the user changed since is left alone with a warning.
 HTTPS_PROXY_SLOT="$(mf_get httpsProxy)"
 NODE_CA_SLOT="$(mf_get nodeExtraCaCerts)"
+NODE_CA_VALUE="$(mf_get nodeExtraCaCertsValue)"
 TLS_DIR="$(mf_get tlsDir)"
+CA_PROFILE="$(mf_get caBundleProfileFile)"
+
+# The profile export goes first, and tls/ last: any other order could leave the
+# export naming a deleted bundle, which breaks TLS for every Node tool in the
+# shell (ADR-0020 step 8). The file is the one install recorded, whatever $SHELL
+# is now.
+if [ -n "$CA_PROFILE" ] && [ -f "$CA_PROFILE" ]; then
+  PROFILE_PATH="$CA_PROFILE" python3 - "$BLOCK_BEGIN ca-bundle" "$BLOCK_END ca-bundle" \
+    "export NODE_EXTRA_CA_CERTS=\"${TLS_DIR:-$HOME_DIR/tls}/ca-bundle.pem\"" > "$STEP_OUT" <<'PY'
+import os, shutil, sys
+# Bytes, not text: the profile may hold any encoding, and every line other than
+# the block must come back byte for byte. The real path keeps a symlinked
+# dotfile linked, and copymode keeps its permissions.
+path = os.path.realpath(os.environ['PROFILE_PATH'])
+begin, end, export = (arg.encode() for arg in sys.argv[1:4])
+block = [begin, export, end]
+with open(path, 'rb') as fh:
+    lines = fh.read().split(b'\n')
+# Only the exact three lines install wrote: with an edited marker or export, a
+# wider match would delete the user's lines. A line left behind that names the
+# bundle is caught by the tls/ guard below.
+kept, i, removed = [], 0, False
+while i < len(lines):
+    if [line.rstrip(b'\r') for line in lines[i:i + 3]] == block:
+        i += 3
+        removed = True
+        continue
+    kept.append(lines[i])
+    i += 1
+if not removed:
+    raise SystemExit(0)
+tmp = path + '.anthrouter-tmp'
+with open(tmp, 'wb') as fh:
+    fh.write(b'\n'.join(kept))
+shutil.copymode(path, tmp)
+os.replace(tmp, path)
+print('removed')
+PY
+  [ -n "$(cat "$STEP_OUT")" ] && say "$CA_PROFILE: NODE_EXTRA_CA_CERTS override removed"
+fi
+
+# Each key is removed or restored only while it still holds the value install
+# wrote; a value the user changed since is left alone with a warning.
 if [ -n "$SETTINGS" ] && [ -f "$SETTINGS" ] \
    && { [ -n "$HTTPS_PROXY_SLOT" ] || [ -n "$NODE_CA_SLOT" ]; }; then
   SETTINGS_PATH="$SETTINGS" python3 - "$ANTHROUTER_URL" "$HTTPS_PROXY_SLOT" "$NODE_CA_SLOT" \
-    "${TLS_DIR:-$HOME_DIR/tls}" "$NODE_CA_BACKUP_KEY" > "$STEP_OUT" <<'PY'
+    "${TLS_DIR:-$HOME_DIR/tls}" "$NODE_CA_BACKUP_KEY" "$NODE_CA_VALUE" > "$STEP_OUT" <<'PY'
 import json, os, sys
 
 path = os.environ['SETTINGS_PATH']
-our_url, proxy_slot, ca_slot, tls_dir, backup_key = sys.argv[1:6]
+our_url, proxy_slot, ca_slot, tls_dir, backup_key, installed = sys.argv[1:7]
 ca, bundle = tls_dir + '/ca.pem', tls_dir + '/ca-bundle.pem'
+# Installs made under ADR-0020 record the installed value; older ones used
+# ca.pem for `created` and the bundle for `backed_up` (ADR-0019).
+if installed:
+    ca = bundle = installed
 with open(path) as fh:
     data = json.load(fh)
 env = data.get('env', {})
@@ -205,7 +251,25 @@ PY
   [ -n "$(cat "$STEP_OUT")" ] && say "$HOME_DIR/config.env: CONNECT proxy settings removed"
 fi
 
+# A line still naming the bundle (markers the user edited) would point every new
+# shell at a deleted file, so tls/ and the manifest stay until it is gone.
+KEEP_TLS=0
 if [ -n "$TLS_DIR" ]; then
+  for _pf in "$CA_PROFILE" "$HOME/.zshrc" "$HOME/.bashrc"; do
+    [ -n "$_pf" ] && [ -f "$_pf" ] || continue
+    _hit="$(grep -nF "$TLS_DIR/ca-bundle.pem" "$_pf" | grep -vE '^[0-9]+:[[:space:]]*#' | head -1 || true)"
+    if [ -n "$_hit" ]; then
+      KEEP_TLS=1
+      say "warning: $_pf:${_hit%%:*} still names $TLS_DIR/ca-bundle.pem:" >&2
+      echo "    ${_hit#*:}" >&2
+    fi
+  done
+  unset _pf _hit
+fi
+
+if [ "$KEEP_TLS" = "1" ]; then
+  say "warning: kept $TLS_DIR and $MANIFEST. Remove the line(s) above, then run $HOME_DIR/uninstall.sh again to finish." >&2
+elif [ -n "$TLS_DIR" ]; then
   # The manifest path feeds rm -rf; only the directory install creates is
   # ever deleted.
   if [ "$TLS_DIR" = "$HOME_DIR/tls" ]; then
@@ -352,6 +416,10 @@ if [ -n "$SHIM" ] && [ -f "$SHIM" ] && grep -q "$HOME_DIR" "$SHIM"; then
 fi
 
 rm -rf "$HOME_DIR/venv" "$HOME_DIR/src" "$HOME_DIR/backup"
+if [ "$KEEP_TLS" = "1" ]; then
+  # Not purged either: the re-run needs the manifest to find tls/.
+  exit 1
+fi
 rm -f "$MANIFEST"
 
 if [ "$PURGE" = "1" ]; then
