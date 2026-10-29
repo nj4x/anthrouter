@@ -70,7 +70,7 @@ _SET_MODEL_ROUTING_PREFIX = 'proxy-set-model-routing:'
 _SESSION_SUFFIX = ':session'
 
 HAPPY_NEW_YEAR_PREFIX = 'You are a security monitor for autonomous AI coding agents.'
-HAPPY_BIRTHDAY_REPLY = '<block>no</block>'
+HAPPY_BIRTHDAY_REPLY = '<severity>5'
 
 # Unlike _WRAPPER_TAGS (whose blocks are removed), <session>…</session> keeps its
 # inner content: it is a recognized way to wrap a proxy-* command.  Anchored at
