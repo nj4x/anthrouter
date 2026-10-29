@@ -3,12 +3,17 @@ import dataclasses
 import logging
 import os
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from .pace import resolve_timezone
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_UPSTREAM_BASE_URL = 'https://api.anthropic.com'
+
+# Bind addresses that keep the CONNECT relay off the network (ADR-0018). '' is
+# absent on purpose: it binds every interface.
+CONNECT_PROXY_HOSTS = frozenset({'127.0.0.1', '::1', 'localhost'})
 
 # EDITABLE_FIELDS: registry of config fields that can be edited via admin API
 # True = file-editable (restart required for changes to apply)
@@ -17,7 +22,10 @@ DEFAULT_UPSTREAM_BASE_URL = 'https://api.anthropic.com'
 # request_history_size, tls_system_trust (patches the ssl module once at process
 # start; an admin-API write would show as "changed" without ever taking effect),
 # activity_label_local_reply (CLI/env only, ADR-0015),
-# security_monitor_local_reply (CLI/env only, ADR-0017)
+# security_monitor_local_reply (CLI/env only, ADR-0017),
+# connect_proxy, interception_target, interception_tls_dir, tunnel_idle_timeout
+# (CLI/env only, ADR-0018: a runtime toggle that opens a tunnel endpoint does
+# not belong behind the admin token)
 EDITABLE_FIELDS: dict[str, bool] = {
     # Live-editable (applies immediately)
     'auto_model_routing_classification': False,
@@ -386,6 +394,10 @@ class Config:
     tls_system_trust: bool = True  # Delegate TLS verification to the OS trust store via truststore; --no-tls-system-trust falls back to OpenSSL
     activity_label_local_reply: bool = True  # Answer Claude Code activity-label prompts locally with a filler verb (ADR-0015)
     security_monitor_local_reply: bool = False  # Answer Claude Code security-monitor prompts locally instead of passing them through (ADR-0017)
+    connect_proxy: bool = False  # Answer CONNECT and decrypt api.anthropic.com (Host interception, ADR-0018)
+    interception_target: str = ''  # Where decrypted Messages requests go; '' handles them in-process (ADR-0018)
+    interception_tls_dir: str = ''  # Holds leaf.pem/leaf.key; '' resolves to <anthrouter_home>/tls
+    tunnel_idle_timeout: int = 600  # Close a CONNECT tunnel after this many idle seconds; 0 never closes
 
 
 def validate_config(cfg: Config) -> list[str]:
@@ -505,6 +517,28 @@ def validate_config(cfg: Config) -> list[str]:
     if trivial_t >= standard_t:
         errors.append(f'auto_model_routing_trivial_threshold must be < auto_model_routing_standard_threshold, got {trivial_t} >= {standard_t}')
     
+    if cfg.tunnel_idle_timeout < 0:
+        errors.append(f'tunnel_idle_timeout must be >= 0, got {cfg.tunnel_idle_timeout}')
+
+    if cfg.connect_proxy and cfg.host not in CONNECT_PROXY_HOSTS:
+        errors.append(
+            f'connect_proxy requires a loopback host ({", ".join(sorted(CONNECT_PROXY_HOSTS))}), '
+            f'got {cfg.host!r}: a CONNECT relay on the network forwards any caller\'s traffic'
+        )
+
+    if cfg.interception_target:
+        parts = urlsplit(cfg.interception_target)
+        try:
+            parts.port
+            port_ok = True
+        except ValueError:
+            port_ok = False
+        if parts.scheme not in ('http', 'https') or not parts.hostname or not port_ok:
+            errors.append(
+                f'interception_target must be an http or https URL with a host, '
+                f'got {cfg.interception_target!r}'
+            )
+
     return errors
 
 
@@ -811,6 +845,41 @@ def parse_args(argv=None) -> Config:
              '(default: off, env: ANTHROUTER_SECURITY_MONITOR_LOCAL_REPLY)',
     )
 
+    p.add_argument(
+        '--connect-proxy',
+        dest='connect_proxy',
+        action=argparse.BooleanOptionalAction,
+        default=_env_bool('ANTHROUTER_CONNECT_PROXY', False),
+        help='Answer HTTP CONNECT so Claude Code can use anthrouter as HTTPS_PROXY. '
+             'api.anthropic.com is decrypted with the leaf in --interception-tls-dir and '
+             'its two Messages endpoints take the same path as a plain request; other '
+             'hosts on port 443 get an opaque tunnel. Requires a loopback --host '
+             '(default: off, env: ANTHROUTER_CONNECT_PROXY)',
+    )
+    p.add_argument(
+        '--interception-target',
+        dest='interception_target',
+        default=os.environ.get('ANTHROUTER_INTERCEPTION_TARGET', ''),
+        help='Base URL that decrypted POST /v1/messages and /v1/messages/count_tokens '
+             'requests are forwarded to, e.g. a caveman URL in a chained setup. Empty '
+             'handles them in-process (default: empty, env: ANTHROUTER_INTERCEPTION_TARGET)',
+    )
+    p.add_argument(
+        '--interception-tls-dir',
+        dest='interception_tls_dir',
+        default=os.environ.get('ANTHROUTER_INTERCEPTION_TLS_DIR', ''),
+        help='Directory holding leaf.pem and leaf.key for api.anthropic.com '
+             '(default: <anthrouter home>/tls, env: ANTHROUTER_INTERCEPTION_TLS_DIR)',
+    )
+    p.add_argument(
+        '--tunnel-idle-timeout',
+        dest='tunnel_idle_timeout',
+        type=int,
+        default=int(os.environ.get('ANTHROUTER_TUNNEL_IDLE_TIMEOUT', '600')),
+        help='Seconds a CONNECT tunnel or decrypted connection may stay idle before it '
+             'is closed; 0 never closes (default: 600, env: ANTHROUTER_TUNNEL_IDLE_TIMEOUT)',
+    )
+
     args = p.parse_args(argv)
 
     # Resolve here, not at first use: an unusable zone must be fatal at startup, and
@@ -831,6 +900,7 @@ def parse_args(argv=None) -> Config:
     )
     args.lock_requested_model = (args.lock_requested_model or '').strip() or 'off'
     args.upstream_base_url = (args.upstream_base_url or '').strip().rstrip('/')
+    args.interception_target = (args.interception_target or '').strip().rstrip('/')
     if not args.upstream_base_url:
         p.error('--upstream-base-url must be a non-empty URL')
 
@@ -843,6 +913,8 @@ def parse_args(argv=None) -> Config:
         p.error('\n'.join(validation_errors))
 
     cfg.anthrouter_home = _resolve_home(cfg.anthrouter_home)
+    if not cfg.interception_tls_dir.strip():
+        cfg.interception_tls_dir = str(Path(cfg.anthrouter_home) / 'tls')
     if cfg.enable_ui and cfg.db_path is None:
         cfg.db_path = str(Path(cfg.anthrouter_home) / 'anthrouter.db')
 

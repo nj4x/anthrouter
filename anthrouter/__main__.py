@@ -3,6 +3,7 @@ import sys
 from pathlib import Path
 
 from .config import parse_args
+from .interception import LeafLoadError
 from .server import create_server
 
 
@@ -54,7 +55,11 @@ def main(argv=None) -> int:
     if cfg.db_path:
         Path(cfg.db_path).parent.mkdir(parents=True, exist_ok=True)
 
-    server = create_server(cfg)
+    try:
+        server = create_server(cfg)
+    except LeafLoadError as exc:
+        logger.error('Host interception: %s', exc)
+        return 1
     logger.info('anthrouter listening on %s:%d, forwarding to %s',
                 cfg.host, cfg.port, cfg.upstream_base_url)
     try:

@@ -18,6 +18,11 @@ _Avoid_: Ranker, scorer
 **Walk-back**: Replaying the session's last classified tier for a text-less continuation turn instead of reclassifying boilerplate.
 _Avoid_: Cache replay, tier replay
 
+### Host interception
+
+**Host interception**: anthrouter acting as the client's HTTPS proxy and decrypting traffic for `api.anthropic.com` only, so that a client which ignores the base-URL setting still takes the same proxy chain as one that honours it. Traffic to every other host on port 443 passes through as an opaque tunnel; other ports and IP addresses are refused.
+_Avoid_: MITM, desktop proxy
+
 ### OAuth usage metering
 
 **Usage period**: The billing cycle for an OAuth quota — anchored to UTC midnight at the calendar month boundary (which equals 17:00 PDT).

@@ -8,6 +8,7 @@ from http.server import ThreadingHTTPServer
 from .config import Config
 from .db import RequestDB
 from .handlers import ProxyRequestHandler
+from .interception import build_server_context
 from .oauth_usage import OAuthUsageCache
 from .session_state import SessionState
 from .transport import AnthropicTransport
@@ -50,6 +51,11 @@ def create_server(config: Config) -> ThreadingHTTPServer:
     )
 
     handler_class = make_handler_class(config, transport, sessions, request_db, oauth_cache)
+    if config.connect_proxy:
+        # Loaded before bind so a missing leaf fails startup (ADR-0018 step 6).
+        handler_class.interception_context = build_server_context(config.interception_tls_dir)
+        logger.info('Host interception on: CONNECT accepted, api.anthropic.com decrypted, '
+                    'Messages requests to %s', config.interception_target or 'this process')
     server = ThreadingHTTPServer((config.host, config.port), handler_class)
     if config.enable_ui and config.host not in _LOOPBACK:
         logger.warning(

@@ -22,6 +22,7 @@ ANTHROUTER_URL="http://127.0.0.1:8083"
 ANTHROUTER_HOSTPORT="127.0.0.1:8083"
 CAVEMAN_URL="http://127.0.0.1:8787/w/claude"
 BACKUP_KEY="ANTHROPIC_BASE_URL_ANTHROUTER_BACKUP"
+NODE_CA_BACKUP_KEY="NODE_EXTRA_CA_CERTS_ANTHROUTER_BACKUP"
 REPO_URL="https://github.com/nj4x/anthrouter.git"
 BLOCK_BEGIN="# >>> anthrouter >>>"
 BLOCK_END="# <<< anthrouter <<<"
@@ -31,6 +32,7 @@ BACKUP_DIR="$HOME_DIR/backup"
 MANIFEST="$HOME_DIR/manifest.json"
 VENV="$HOME_DIR/venv"
 CONFIG_ENV="$HOME_DIR/config.env"
+TLS_DIR="$HOME_DIR/tls"
 SRC_DIR="$HOME_DIR/src"
 SHIM_DIR="${ANTHROUTER_SHIM_DIR:-$HOME/.local/bin}"
 SHIM="$SHIM_DIR/anthrouter"
@@ -40,6 +42,7 @@ CAVEMAN_CONFIG_FILE="${CAVEMAN_CONFIG:-$HOME/.caveman/caveman.yaml}"
 
 PID=""
 MUTATING=0
+DESKTOP_CA_STATE=""
 HOME_PREEXISTED=0
 [ -d "$HOME_DIR" ] && HOME_PREEXISTED=1
 # bash 3.2 (the macOS system bash, and what `curl | bash` runs) cannot parse a
@@ -86,6 +89,229 @@ PY
 
 mf_set() {  # mf_set key string-value
   mf_write "$1" "$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$2")"
+}
+
+# ------------------------------------------------------ desktop proxy (ADR-0019) ---
+#
+# Helpers for wiring Claude Desktop's Code tab through anthrouter's CONNECT
+# proxy. Each is a self-contained function so tests can exercise it without a
+# full install run (which forks the server).
+
+desktop_app_present() {
+  # ANTHROUTER_UNAME / ANTHROUTER_DESKTOP_APPS exist so tests can simulate a
+  # Mac with Claude.app on any machine; they are not user-facing knobs.
+  [ "${ANTHROUTER_UNAME:-$(uname -s)}" = "Darwin" ] || return 1
+  local app _old_ifs="$IFS"
+  IFS=':'
+  for app in ${ANTHROUTER_DESKTOP_APPS:-/Applications/Claude.app:$HOME/Applications/Claude.app}; do
+    if [ -d "$app" ]; then
+      IFS="$_old_ifs"
+      return 0
+    fi
+  done
+  IFS="$_old_ifs"
+  return 1
+}
+
+desktop_proxy_preflight() {  # desktop_proxy_preflight settings-path tls-dir
+  local settings="$1" tls_dir="$2" var val launchctl_bin
+  # A proxy already in force means the network may need it, and anthrouter
+  # dials direct (ADR-0018 Context); settings.json would also silently
+  # override it.
+  for var in HTTPS_PROXY https_proxy; do
+    val="$(printenv "$var" 2>/dev/null || true)"
+    [ -z "$val" ] || die "$var is set in this shell's environment ($val). anthrouter's Desktop proxy dials direct and cannot chain behind another proxy. Nothing was changed. Unset it, or re-run with --no-desktop-proxy."
+  done
+  launchctl_bin="${ANTHROUTER_LAUNCHCTL:-launchctl}"
+  if command -v "$launchctl_bin" >/dev/null 2>&1; then
+    for var in HTTPS_PROXY https_proxy; do
+      val="$("$launchctl_bin" getenv "$var" 2>/dev/null || true)"
+      [ -z "$val" ] || die "$var is set in launchctl's environment ($val). anthrouter's Desktop proxy dials direct and cannot chain behind another proxy. Nothing was changed. Clear it (launchctl unsetenv $var), or re-run with --no-desktop-proxy."
+    done
+  fi
+  SETTINGS_PATH="$settings" python3 - "$NODE_CA_BACKUP_KEY" > "$STEP_OUT" <<'PY' || die "could not read $settings — is it valid JSON?"
+import json, os, sys
+backup_key = sys.argv[1]
+with open(os.environ['SETTINGS_PATH']) as fh:
+    data = json.load(fh)
+env = data.get('env', {})
+for key in ('HTTPS_PROXY', 'https_proxy'):
+    if key in env:
+        print('proxy\n' + key + '\n' + str(env[key]))
+        raise SystemExit(0)
+if backup_key in env:
+    print('orphan')
+    raise SystemExit(0)
+ca = env.get('NODE_EXTRA_CA_CERTS')
+if ca not in (None, '') and not (os.path.isfile(ca) and os.access(ca, os.R_OK)):
+    print('unreadable\n' + ca)
+    raise SystemExit(0)
+print('ok')
+PY
+  local verdict kind
+  verdict="$(cat "$STEP_OUT")"
+  kind="$(printf '%s\n' "$verdict" | head -1)"
+  case "$kind" in
+    proxy)
+      echo "[anthrouter] error: $settings already sets env.$(printf '%s\n' "$verdict" | sed -n 2p) to:" >&2
+      echo "    $(printf '%s\n' "$verdict" | tail -n +3)" >&2
+      die "anthrouter's Desktop proxy cannot chain behind another proxy. Nothing was changed. Remove that key, or re-run with --no-desktop-proxy."
+      ;;
+    orphan)
+      die "$settings holds $NODE_CA_BACKUP_KEY but no install manifest exists at $MANIFEST. A prior install was interrupted — restore its value to NODE_EXTRA_CA_CERTS by hand, remove the backup key, and re-run."
+      ;;
+    unreadable)
+      die "$settings sets env.NODE_EXTRA_CA_CERTS to $(printf '%s\n' "$verdict" | tail -n +2), which cannot be read. Nothing was changed. Fix or remove that key, then re-run."
+      ;;
+  esac
+  [ ! -e "$tls_dir" ] \
+    || die "$tls_dir already exists. It is left over from an earlier install; remove it and re-run."
+  command -v openssl >/dev/null 2>&1 \
+    || die "openssl not found on PATH (needed to create the Desktop proxy certificates). Install it, or re-run with --no-desktop-proxy."
+}
+
+desktop_proxy_make_certs() {  # desktop_proxy_make_certs tls-dir
+  # Called as `... || die`, which suspends set -e inside, so every step
+  # returns explicitly on failure.
+  local dir="$1" serial
+  # umask 077 so no key is ever world-readable, not even between write and chmod.
+  ( umask 077 && mkdir -p "$dir" ) || return 1
+  chmod 700 "$dir" || return 1
+  cat > "$dir/openssl.cnf" <<'CNF' || return 1
+[req]
+distinguished_name = dn
+prompt = no
+[dn]
+CN = anthrouter
+[v3_ca]
+basicConstraints = critical,CA:TRUE,pathlen:0
+keyUsage = critical,keyCertSign,cRLSign
+subjectKeyIdentifier = hash
+[v3_leaf]
+basicConstraints = critical,CA:FALSE
+keyUsage = critical,digitalSignature
+extendedKeyUsage = serverAuth
+subjectAltName = DNS:api.anthropic.com
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid
+CNF
+  ( umask 077 && openssl ecparam -name prime256v1 -genkey -noout -out "$dir/ca.key" ) >/dev/null 2>&1 \
+    || return 1
+  chmod 600 "$dir/ca.key" || return 1
+  openssl req -x509 -new -key "$dir/ca.key" -sha256 -days 3650 \
+    -config "$dir/openssl.cnf" -extensions v3_ca \
+    -subj "/CN=anthrouter local interception CA" -out "$dir/ca.pem" >/dev/null 2>&1 \
+    || return 1
+  ( umask 077 && openssl ecparam -name prime256v1 -genkey -noout -out "$dir/leaf.key" ) >/dev/null 2>&1 \
+    || return 1
+  chmod 600 "$dir/leaf.key" || return 1
+  openssl req -new -key "$dir/leaf.key" -config "$dir/openssl.cnf" \
+    -subj "/CN=api.anthropic.com" -out "$dir/leaf.csr" >/dev/null 2>&1 \
+    || return 1
+  serial="0x$(openssl rand -hex 16)" || return 1
+  openssl x509 -req -in "$dir/leaf.csr" -CA "$dir/ca.pem" -CAkey "$dir/ca.key" \
+    -set_serial "$serial" -days 3650 -sha256 \
+    -extfile "$dir/openssl.cnf" -extensions v3_leaf -out "$dir/leaf.pem" >/dev/null 2>&1 \
+    || return 1
+  rm -f "$dir/leaf.csr" "$dir/openssl.cnf"
+  chmod 644 "$dir/ca.pem" "$dir/leaf.pem" || return 1
+}
+
+desktop_proxy_probe() {  # desktop_proxy_probe proxy-url ca-file method url [json-body]
+  local proxy="$1" cacert="$2" method="$3" url="$4" body="${5:-}" hdr code
+  hdr="$(mktemp -t anthrouter-probe)"
+  # --noproxy '' stops a NO_PROXY in the environment from bypassing -x.
+  if [ -n "$body" ]; then
+    code="$(curl -sS -o /dev/null -D "$hdr" -w '%{http_code}' --max-time 20 \
+      --noproxy '' -x "$proxy" --cacert "$cacert" -X "$method" \
+      -H 'content-type: application/json' -H 'anthropic-version: 2023-06-01' \
+      --data "$body" "$url" 2>&1)" || { echo "$code"; rm -f "$hdr"; return 1; }
+  else
+    code="$(curl -sS -o /dev/null -D "$hdr" -w '%{http_code}' --max-time 20 \
+      --noproxy '' -x "$proxy" --cacert "$cacert" -X "$method" \
+      -H 'anthropic-version: 2023-06-01' "$url" 2>&1)" || { echo "$code"; rm -f "$hdr"; return 1; }
+  fi
+  if grep -qi '^x-anthrouter-error:' "$hdr"; then
+    echo "HTTP $code, $(grep -i '^x-anthrouter-error:' "$hdr" | head -1 | tr -d '\r')"
+    rm -f "$hdr"
+    return 1
+  fi
+  rm -f "$hdr"
+  case "$code" in
+    [1-5][0-9][0-9]) echo "HTTP $code" ;;
+    *) echo "no HTTP response (code $code)"; return 1 ;;
+  esac
+}
+
+desktop_proxy_health_check() {  # desktop_proxy_health_check proxy-url ca-file
+  local out
+  out="$(desktop_proxy_probe "$1" "$2" GET https://api.anthropic.com/v1/models)" \
+    || die "proxy check GET https://api.anthropic.com/v1/models through $1 failed: $out"
+  say "proxy check GET /v1/models: $out"
+  out="$(desktop_proxy_probe "$1" "$2" POST https://api.anthropic.com/v1/messages/count_tokens \
+    '{"model":"claude-sonnet-4-5","messages":[{"role":"user","content":"ping"}]}')" \
+    || die "proxy check POST https://api.anthropic.com/v1/messages/count_tokens through $1 failed: $out${INTERCEPTION_HINT:-}"
+  say "proxy check POST /v1/messages/count_tokens: $out"
+}
+
+desktop_proxy_wire_settings() {  # desktop_proxy_wire_settings settings-path tls-dir
+  # Called as `... || die`, which suspends set -e inside, so every step
+  # returns explicitly on failure.
+  local settings="$1" tls_dir="$2" state
+  mf_set httpsProxy created || return 1
+  SETTINGS_PATH="$settings" python3 - "$ANTHROUTER_URL" <<'PY' || return 1
+import json, os, sys
+path = os.environ['SETTINGS_PATH']
+with open(path) as fh:
+    data = json.load(fh)
+data.setdefault('env', {})['HTTPS_PROXY'] = sys.argv[1]
+tmp = path + '.tmp'
+with open(tmp, 'w') as fh:
+    json.dump(data, fh, indent=2)
+    fh.write('\n')
+os.replace(tmp, path)
+PY
+  SETTINGS_PATH="$settings" python3 - > "$STEP_OUT" <<'PY' || return 1
+import json, os
+with open(os.environ['SETTINGS_PATH']) as fh:
+    env = json.load(fh).get('env', {})
+print('present' if env.get('NODE_EXTRA_CA_CERTS') not in (None, '') else 'absent')
+PY
+  state="$(cat "$STEP_OUT")"
+  if [ "$state" = "absent" ]; then
+    mf_set nodeExtraCaCerts created || return 1
+  else
+    mf_set nodeExtraCaCerts backed_up || return 1
+  fi
+  SETTINGS_PATH="$settings" python3 - "$state" "$tls_dir/ca.pem" "$tls_dir/ca-bundle.pem" "$NODE_CA_BACKUP_KEY" <<'PY' || return 1
+import json, os, sys
+path = os.environ['SETTINGS_PATH']
+state, ca, bundle, backup_key = sys.argv[1:5]
+with open(path) as fh:
+    data = json.load(fh)
+env = data.setdefault('env', {})
+if state == 'absent':
+    env['NODE_EXTRA_CA_CERTS'] = ca
+else:
+    original = env['NODE_EXTRA_CA_CERTS']
+    with open(original, 'rb') as fh:
+        theirs = fh.read()
+    with open(ca, 'rb') as fh:
+        ours = fh.read()
+    if theirs and not theirs.endswith(b'\n'):
+        theirs += b'\n'
+    with open(bundle + '.tmp', 'wb') as fh:
+        fh.write(theirs + ours)
+    os.replace(bundle + '.tmp', bundle)
+    env[backup_key] = original
+    env['NODE_EXTRA_CA_CERTS'] = bundle
+tmp = path + '.tmp'
+with open(tmp, 'w') as fh:
+    json.dump(data, fh, indent=2)
+    fh.write('\n')
+os.replace(tmp, path)
+PY
+  DESKTOP_CA_STATE="$state"
 }
 
 # ---------------------------------------------------------------- rollback ---
@@ -137,9 +363,11 @@ fi
 # --------------------------------------------------------- argument parsing ---
 
 BROWSER_OPEN=1
+DESKTOP_PROXY_OPT=1
 while [ $# -gt 0 ]; do
   case "$1" in
     --no-browser) BROWSER_OPEN=0 ;;
+    --no-desktop-proxy) DESKTOP_PROXY_OPT=0 ;;
     *) die "unknown argument: $1" ;;
   esac
   shift
@@ -207,6 +435,17 @@ if [ "$TOPOLOGY" = "chained" ]; then
     || die "unsupported shell: ${SHELL:-unset}. The chained install edits CAVE_SSRF_ALLOWLIST in a bash or zsh profile; add $ANTHROUTER_HOSTPORT to that variable by hand for other shells."
 fi
 
+# Desktop proxy wiring (ADR-0019): macOS with Claude Desktop installed, unless
+# opted out. Its pre-flight runs here, before the fork, like the topology check.
+DESKTOP_PROXY=false
+if [ "$DESKTOP_PROXY_OPT" = "1" ] && desktop_app_present; then
+  DESKTOP_PROXY=true
+  say "Claude Desktop found — wiring its Code tab through anthrouter (--no-desktop-proxy skips this)"
+  desktop_proxy_preflight "$SETTINGS" "$TLS_DIR"
+elif [ "$DESKTOP_PROXY_OPT" = "0" ]; then
+  say "Desktop proxy wiring skipped (--no-desktop-proxy)"
+fi
+
 python3 - "$ANTHROUTER_HOSTPORT" <<'PY' || die "port 8083 is already in use — stop whatever is listening on $ANTHROUTER_HOSTPORT and re-run"
 import socket, sys
 host, port = sys.argv[1].split(':')
@@ -256,6 +495,11 @@ mf_write cavemanPreviousUrl null
 mf_write profileFile null
 mf_write allowlistInstallPath null
 mf_write shimPath null
+mf_write desktopProxy "$DESKTOP_PROXY"
+mf_write tlsDir null
+mf_write configEnvDesktopBlock null
+mf_write httpsProxy null
+mf_write nodeExtraCaCerts null
 mf_write pid null
 mf_write completed false
 
@@ -284,6 +528,35 @@ ANTHROUTER_ARGS="--enable-ui"
 CONF
 else
   say "Keeping existing config at $CONFIG_ENV"
+fi
+
+if [ "$DESKTOP_PROXY" = "true" ]; then
+  # The leaf must exist before the fork: anthrouter refuses to start with
+  # CONNECT on and no leaf (ADR-0018 step 6).
+  say "Creating interception certificates in $TLS_DIR..."
+  mf_set tlsDir "$TLS_DIR"
+  desktop_proxy_make_certs "$TLS_DIR" || die "openssl could not create the certificates in $TLS_DIR"
+
+  # A marked block, appended even to a kept config.env, so uninstall can take
+  # it out again: left behind, it would make the next start abort on the
+  # deleted certificates.
+  say "Enabling CONNECT proxy in $CONFIG_ENV..."
+  mf_write configEnvDesktopBlock true
+  # A kept config.env without a final newline would glue the marker onto its last line.
+  if [ -s "$CONFIG_ENV" ] && [ -n "$(tail -c 1 "$CONFIG_ENV")" ]; then
+    echo >> "$CONFIG_ENV"
+  fi
+  {
+    echo "$BLOCK_BEGIN desktop-proxy"
+    echo "ANTHROUTER_CONNECT_PROXY=1"
+    if [ "$TOPOLOGY" = "chained" ]; then
+      echo "ANTHROUTER_INTERCEPTION_TARGET=$CAVEMAN_URL"
+    fi
+    if [ "$HOME_DIR" != "$HOME/.anthrouter" ]; then
+      echo "ANTHROUTER_INTERCEPTION_TLS_DIR=$TLS_DIR"
+    fi
+    echo "$BLOCK_END desktop-proxy"
+  } >> "$CONFIG_ENV"
 fi
 
 say "Installing launcher shim at $SHIM..."
@@ -321,6 +594,16 @@ for _ in $(seq 1 20); do
 done
 [ "$HEALTHY" = "1" ] || die "anthrouter did not answer $ANTHROUTER_URL/health within 10s — see $HOME_DIR/anthrouter.out"
 say "anthrouter is healthy (pid $PID)"
+
+if [ "$DESKTOP_PROXY" = "true" ]; then
+  # Before any settings.json write, so a broken CONNECT path rolls back with
+  # Claude Code still untouched.
+  say "Checking the CONNECT proxy path to api.anthropic.com..."
+  if [ "$TOPOLOGY" = "chained" ]; then
+    INTERCEPTION_HINT=" (chained topology: decrypted Messages requests go to caveman at $CAVEMAN_URL; is caveman running?)"
+  fi
+  desktop_proxy_health_check "$ANTHROUTER_URL" "$TLS_DIR/ca.pem"
+fi
 
 # ------------------------------------------------------------- config wiring ---
 
@@ -467,6 +750,11 @@ PY
   fi
 fi
 
+if [ "$DESKTOP_PROXY" = "true" ]; then
+  say "Pointing $SETTINGS HTTPS_PROXY and NODE_EXTRA_CA_CERTS at anthrouter..."
+  desktop_proxy_wire_settings "$SETTINGS" "$TLS_DIR" || die "could not update $SETTINGS for the Desktop proxy"
+fi
+
 # The direct topology does not put caveman in the routing path, so its SSRF
 # allowlist is irrelevant.
 if [ "$TOPOLOGY" = "direct" ]; then
@@ -500,6 +788,14 @@ if [ "$TOPOLOGY" = "chained" ]; then
   say "Restart your shell (or re-source $PROFILE_FILE) so caveman picks up the allowlist, then restart caveman."
 else
   say "Restart Claude Code so it picks up the new ANTHROPIC_BASE_URL."
+fi
+if [ "$DESKTOP_PROXY" = "true" ]; then
+  say "Claude Desktop: open a NEW Code tab session — existing sessions keep their old environment."
+  say "All Claude Code HTTPS traffic now goes through anthrouter; if anthrouter stops, it fails."
+  say "$HOME_DIR/uninstall.sh reverses the Desktop proxy wiring."
+  if [ "$DESKTOP_CA_STATE" = "present" ]; then
+    say "note: $TLS_DIR/ca-bundle.pem is a snapshot of your NODE_EXTRA_CA_CERTS file plus anthrouter's CA; later edits to your file need uninstall.sh, then install.sh."
+  fi
 fi
 
 if [ "$BROWSER_OPEN" = "1" ]; then
