@@ -1579,12 +1579,12 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(chunk.encode('utf-8'))
         self.wfile.flush()
 
-    def log_request(self, code='-', size='-'):
-        if self.command == 'CONNECT':
-            # The request line names the tunnel host, which ADR-0018 keeps at DEBUG.
-            logger.debug('%s "%s" %s %s', self._log_tag(), self.requestline, code, size)
-            return
-        super().log_request(code, size)
-
     def log_message(self, format, *args):
-        logger.info('%s ' + format, self._log_tag(), *args)
+        # A CONNECT request line names the tunnel host, which ADR-0018 keeps at
+        # DEBUG. The raw line is checked too: one that fails to parse leaves
+        # command unset but is still logged by send_error.
+        words = getattr(self, 'requestline', '').split(None, 1)
+        is_connect = (getattr(self, 'command', None) == 'CONNECT'
+                      or (words and words[0].upper() == 'CONNECT'))
+        level = logging.DEBUG if is_connect else logging.INFO
+        logger.log(level, '%s ' + format, self._log_tag(), *args)

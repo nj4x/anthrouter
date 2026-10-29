@@ -4,6 +4,7 @@ and where decrypted requests go."""
 import email.message
 import io
 import json
+import logging
 import socket
 import ssl
 import subprocess
@@ -212,6 +213,11 @@ def test_interception_env_vars_are_read(monkeypatch):
     ('api.anth\xadropic.com:443', None),
     ('\xb927.0.0.1:443', None),
     ('127.0.0.1\xad:443', None),
+    ('api.anthropic.com..:443', None),
+    ('api..anthropic.com:443', None),
+    ('.api.anthropic.com:443', None),
+    ('a' * 64 + '.com:443', None),
+    ('a' * 63 + '.com:443', ('a' * 63 + '.com', 443)),
 ])
 def test_parse_connect_target(authority, expected):
     assert interception.parse_connect_target(authority) == expected
@@ -237,7 +243,8 @@ class _BodyOnly:
     def __init__(self, headers: dict, raw: bytes):
         self.headers = email.message.Message()
         for name, value in headers.items():
-            self.headers[name] = value
+            for one in (value if isinstance(value, list) else [value]):
+                self.headers[name] = one
         self.rfile = io.BytesIO(raw)
 
 
@@ -246,10 +253,45 @@ class _BodyOnly:
     ({'Transfer-Encoding': 'chunked'}, b''),
     ({'Transfer-Encoding': 'chunked'}, b'3\r\nabc\r\n0\r\n'),
     ({'Content-Length': '5'}, b'ab'),
+    ({'Transfer-Encoding': 'chunked'}, b'f' * 40 + b'\r\n'),
+    ({'Transfer-Encoding': 'chunked'}, b'1\r\nX' + b'y' * 4096),
+    ({'Transfer-Encoding': 'chunked'}, b'1;' + b'e' * 1022 + b'Z\r\nZ\r\n0\r\n\r\n'),
+    ({'Transfer-Encoding': 'gzip', 'Content-Length': '2'}, b'ab'),
+    ({'Transfer-Encoding': 'gzip, chunked'}, b'0\r\n\r\n'),
+    ({'Transfer-Encoding': ['chunked', 'gzip']}, b'0\r\n\r\n'),
+    ({'Transfer-Encoding': 'chunked'}, b'3\r\nabc\r\n\r\n\r\nGET /x HTTP/1.1\r\n'),
+    ({'Transfer-Encoding': 'chunked'}, b';x\r\n\r\n'),
+    ({'Transfer-Encoding': 'chunked'}, b'  \r\n\r\n'),
 ])
-def test_truncated_bodies_raise(headers, raw):
+def test_malformed_or_oversized_bodies_raise(headers, raw):
     with pytest.raises(ValueError):
         interception.read_request_body(_BodyOnly(headers, raw))
+
+
+@pytest.mark.parametrize('length', ['9' * 30, str(interception.MAX_BODY + 1)])
+def test_content_length_over_the_cap_raises(length):
+    with pytest.raises(ValueError, match='body over'):
+        interception.read_request_body(_BodyOnly({'Content-Length': length}, b''))
+
+
+def test_chunked_body_over_the_cap_raises(monkeypatch):
+    monkeypatch.setattr(interception, 'MAX_BODY', 4)
+    with pytest.raises(ValueError, match='body over'):
+        interception.read_request_body(
+            _BodyOnly({'Transfer-Encoding': 'chunked'}, b'3\r\nabc\r\n2\r\nde\r\n0\r\n\r\n'))
+
+
+def test_leading_zero_lengths_are_accepted():
+    assert interception.read_request_body(
+        _BodyOnly({'Transfer-Encoding': 'chunked'}, b'0003\r\nabc\r\n0\r\n\r\n')) == b'abc'
+    assert interception.read_request_body(
+        _BodyOnly({'Content-Length': '0000000005'}, b'abcde')) == b'abcde'
+
+
+def test_plain_chunked_body_is_read():
+    body = interception.read_request_body(
+        _BodyOnly({'Transfer-Encoding': 'Chunked'}, b'3\r\nabc\r\n0\r\n\r\n'))
+    assert body == b'abc'
 
 
 def test_host_match_ignores_case_and_one_trailing_dot():
@@ -449,3 +491,32 @@ def test_interception_works_after_truststore_injection(truststore_injected, inte
     server = interceptor()
     reply = _decrypted(server, _tls(server), b'GET /v1/models HTTP/1.1\r\nHost: x\r\n\r\n')
     assert reply.startswith(b'HTTP/1.0 200')
+
+
+@pytest.mark.parametrize('request_line', [
+    b'CONNECT secret.internal:8443 HTTP/1.1\r\n\r\n',
+    b'CONNECT secret.internal:443 HTTP/2.0\r\n\r\n',
+    b'CONNECT\tsecret.internal:8443 HTTP/1.1\r\n\r\n',
+    b' CONNECT secret.internal:8443 HTTP/1.1\r\n\r\n',
+    b'connect secret.internal:8443 HTTP/1.1\r\n\r\n',
+    b'CONNECT secret.internal:8443 x HTTP/1.1\r\n\r\n',
+])
+def test_connect_lines_never_log_the_host_above_debug(interceptor, caplog, request_line):
+    server = interceptor()
+    caplog.set_level(logging.DEBUG, logger='anthrouter.handlers')
+    with socket.create_connection(server.server_address, timeout=5) as sock:
+        sock.sendall(request_line)
+        _read_all(sock)
+    hits = [r for r in caplog.records if 'secret.internal' in r.getMessage()]
+    assert hits
+    assert all(r.levelno == logging.DEBUG for r in hits)
+
+
+def test_other_request_lines_stay_at_info(proxy, caplog):
+    server = proxy()
+    caplog.set_level(logging.DEBUG, logger='anthrouter.handlers')
+    with socket.create_connection(server.server_address, timeout=5) as sock:
+        sock.sendall(b'GET /health HTTP/1.1\r\n\r\n')
+        _read_all(sock)
+    hits = [r for r in caplog.records if 'GET /health' in r.getMessage()]
+    assert hits and all(r.levelno == logging.INFO for r in hits)

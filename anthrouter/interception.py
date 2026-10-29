@@ -40,6 +40,12 @@ _BUFFER = 64 * 1024
 _HOST_CHARS = re.compile(r'[A-Za-z0-9._%:-]+')
 _HEX = re.compile(rb'[0-9A-Fa-f]+')
 _DECIMAL = re.compile(r'[0-9]+')
+# The Messages API's own request limit, applied to every forwarded hop (passthrough
+# uploads included); a larger body is refused before it is buffered.
+MAX_BODY = 32 * 1024 * 1024
+# Framing lines (chunk sizes, the CRLF after a chunk, trailers) are short; a
+# bound keeps a line with no newline from buffering past MAX_BODY.
+_MAX_LINE = 1024
 _HOP_BY_HOP = frozenset({
     'connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization',
     'proxy-connection', 'te', 'trailer', 'transfer-encoding', 'upgrade',
@@ -81,6 +87,13 @@ def parse_connect_target(authority: str) -> tuple[str, int] | None:
             return None
     if not _HOST_CHARS.fullmatch(host) or not _DECIMAL.fullmatch(port_text):
         return None
+    # Empty labels ('api.anthropic.com..', '.api') survive the one-dot strip in
+    # normalize_host and resolve past the decrypt match; labels over 63
+    # characters fail later in IDNA encoding. IP literals keep their own form.
+    if not is_ip_literal(host):
+        labels = host[:-1].split('.') if host.endswith('.') else host.split('.')
+        if not all(0 < len(label) <= 63 for label in labels):
+            return None
     port = int(port_text)
     return (host, port) if 0 < port < 65536 else None
 
@@ -147,32 +160,54 @@ def splice(client: socket.socket, upstream: socket.socket, idle_timeout: int) ->
         sel.close()
 
 
+def _framing_line(rfile) -> bytes:
+    line = rfile.readline(_MAX_LINE)
+    if not line.endswith(b'\n'):
+        raise ValueError('framing line too long or body cut off')
+    return line
+
+
+def _check_size(total: int) -> None:
+    if total > MAX_BODY:
+        raise ValueError(f'body over {MAX_BODY} bytes')
+
+
 def read_request_body(handler) -> bytes:
     """Read the request body, de-chunking it so the forwarded request carries a length.
 
-    Raises ``ValueError`` on a malformed chunk size or ``Content-Length``.
+    Raises ``ValueError`` on malformed framing, a body over ``MAX_BODY``, or a
+    ``Transfer-Encoding`` other than plain ``chunked``: the header is hop-by-hop
+    and dropped on forward, so any other coding would be lost.
     """
-    if 'chunked' in handler.headers.get('Transfer-Encoding', '').lower():
-        parts = []
+    codings = [c.strip().lower()
+               for value in handler.headers.get_all('Transfer-Encoding', [])
+               for c in value.split(',') if c.strip()]
+    if codings and codings != ['chunked']:
+        raise ValueError(f'unsupported Transfer-Encoding {", ".join(codings)!r}')
+    if codings:
+        body, total = bytearray(), 0
         while True:
-            size_text = handler.rfile.readline().split(b';', 1)[0].strip()
+            size_text = _framing_line(handler.rfile).split(b';', 1)[0].strip()
             if not _HEX.fullmatch(size_text):
-                raise ValueError(f'bad chunk size {size_text!r}')
+                raise ValueError(f'bad chunk size {size_text[:16]!r}')
             size = int(size_text, 16)
+            total += size
+            _check_size(total)
             if size == 0:
-                while (line := handler.rfile.readline()) not in (b'\r\n', b'\n'):
-                    if not line:
-                        raise ValueError('body ended inside the chunk trailer')
-                return b''.join(parts)
+                while _framing_line(handler.rfile) not in (b'\r\n', b'\n'):
+                    pass
+                return bytes(body)
             chunk = handler.rfile.read(size)
-            if len(chunk) != size or handler.rfile.readline() not in (b'\r\n', b'\n'):
+            if len(chunk) != size or _framing_line(handler.rfile) not in (b'\r\n', b'\n'):
                 raise ValueError('body ended inside a chunk')
-            parts.append(chunk)
+            body += chunk
     length_text = handler.headers.get('Content-Length', '').strip() or '0'
     if not _DECIMAL.fullmatch(length_text):
-        raise ValueError(f'bad Content-Length {length_text!r}')
-    body = handler.rfile.read(int(length_text))
-    if len(body) != int(length_text):
+        raise ValueError(f'bad Content-Length {length_text[:16]!r}')
+    length = int(length_text)
+    _check_size(length)
+    body = handler.rfile.read(length)
+    if len(body) != length:
         raise ValueError('body shorter than Content-Length')
     return body
 
