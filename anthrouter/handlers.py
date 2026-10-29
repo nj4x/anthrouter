@@ -559,6 +559,8 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         self._reset_request_state()
+        if not self._take_origin_form():
+            return
         path = self.path.split('?')[0].rstrip('/')
         if self.intercepted:
             self._handle_intercepted_post(path)
@@ -575,6 +577,8 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         self._reset_request_state()
         if self.intercepted:
             self._passthrough()
+            return
+        if not self._take_origin_form():
             return
         raw_path, _, query_string = self.path.partition('?')
         path = raw_path.rstrip('/')
@@ -605,8 +609,49 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         self._reset_request_state()
         if self.intercepted:
             self._passthrough()
-        else:
+        elif self._take_origin_form():
             self.send_error(501, f'Unsupported method ({self.command!r})')
+
+    def _take_origin_form(self) -> bool:
+        """Reduce an absolute-form target that names this listener to its path; refuse any other.
+
+        Claude Code 2.1.300 sends its ``http://`` base-URL requests through
+        ``HTTPS_PROXY`` as ``POST http://host:port/path``. One naming this
+        listener is served as the plain path. Any other host is refused, never
+        forwarded: anthrouter is not a plain-HTTP forward proxy. It gets ``502``
+        with ``X-Anthrouter-Error``, not ``404``, which Claude Code reports as an
+        unknown model and so hides the cause. Returns ``False`` when answered.
+        """
+        if self.intercepted or not self.path.lower().startswith(('http://', 'https://')):
+            return True
+        target = urllib.parse.urlsplit(self.path)
+        try:
+            port = target.port or (443 if target.scheme.lower() == 'https' else 80)
+        except ValueError:
+            port = None
+        own_hosts = {(self.config.host or '').lower(), '127.0.0.1', 'localhost', '::1'}
+        if target.scheme.lower() == 'http' and (target.hostname or '') in own_hosts \
+                and port == self.server.server_address[1]:
+            self.path = (target.path or '/') + (f'?{target.query}' if target.query else '')
+            return True
+        logger.warning('%s refused absolute-form request for %s: not a forward proxy; '
+                       'the client needs that host in NO_PROXY',
+                       self._log_tag(), target.hostname or '?')
+        self.close_connection = True
+        # Unread body bytes would make the kernel reset the connection when it
+        # closes, and the client would lose this answer.
+        try:
+            self.rfile.read(min(int(self.headers.get('Content-Length') or 0), interception.MAX_BODY))
+        except (ValueError, OSError):
+            pass
+        self._send_json(
+            502, anthropic_error_payload(
+                'api_error',
+                f'anthrouter is not an HTTP forward proxy; add {target.hostname or "this host"} '
+                'to NO_PROXY'),
+            extra_headers={interception.ERROR_HEADER: interception.FORWARD_PROXY_UNSUPPORTED},
+        )
+        return False
 
     do_PUT = do_PATCH = do_DELETE = do_HEAD = do_OPTIONS = _other_method
 

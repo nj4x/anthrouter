@@ -340,9 +340,12 @@ def test_wire_settings_created_path(tmp_path):
     assert data["env"] == {
         "FOO": "1",
         "HTTPS_PROXY": ANTHROUTER_URL,
+        "NO_PROXY": "127.0.0.1,localhost,::1",
         "NODE_EXTRA_CA_CERTS": bundle,
     }
     assert manifest["httpsProxy"] == "created"
+    assert manifest["noProxy"] == "created"
+    assert manifest["noProxyAdded"] == ["127.0.0.1", "localhost", "::1"]
     assert manifest["nodeExtraCaCerts"] == "created"
     assert manifest["nodeExtraCaCertsValue"] == bundle
     # anthrouter is the one bundle builder (ADR-0020 step 5).
@@ -864,3 +867,58 @@ def test_uninstall_leaves_a_block_whose_export_the_user_edited(tmp_path):
     home, ah, tls, settings, profile = _fake_adr20_install(tmp_path, profile_lines=lines)
     assert _uninstall(home, ah).returncode == 0
     assert profile.read_text() == "\n".join(lines) + "\n"
+
+
+# ------------------------------------------------------------------- NO_PROXY ---
+
+
+def test_wire_settings_merges_into_an_existing_no_proxy(tmp_path):
+    """Claude Code sends http:// base-URL traffic through HTTPS_PROXY too, so loopback must be exempt."""
+    data, manifest, _, _ = _wire(tmp_path, {"env": {"NO_PROXY": "corp.internal, localhost"}})
+    assert data["env"]["NO_PROXY"] == "corp.internal, localhost,127.0.0.1,::1"
+    assert manifest["noProxy"] == "merged"
+    assert manifest["noProxyAdded"] == ["127.0.0.1", "::1"]
+
+
+def test_uninstall_removes_only_the_no_proxy_entries_install_added(tmp_path):
+    home, ah, tls, settings = _fake_installed(tmp_path, {
+        "HTTPS_PROXY": ANTHROUTER_URL,
+        "NO_PROXY": "corp.internal, localhost,127.0.0.1,::1,user.added",
+    }, ca_slot="created")
+    manifest = json.loads((ah / "manifest.json").read_text())
+    manifest.update(noProxy="merged", noProxyAdded=["127.0.0.1", "::1"])
+    (ah / "manifest.json").write_text(json.dumps(manifest))
+    result = _uninstall(home, ah)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(settings.read_text())["env"] == {
+        "NO_PROXY": "corp.internal,localhost,user.added"}
+
+
+def test_uninstall_deletes_a_created_no_proxy_left_empty(tmp_path):
+    home, ah, tls, settings = _fake_installed(tmp_path, {
+        "OTHER": "x",
+        "HTTPS_PROXY": ANTHROUTER_URL,
+        "NO_PROXY": "127.0.0.1,localhost,::1",
+    }, ca_slot="created")
+    manifest = json.loads((ah / "manifest.json").read_text())
+    manifest.update(noProxy="created", noProxyAdded=["127.0.0.1", "localhost", "::1"])
+    (ah / "manifest.json").write_text(json.dumps(manifest))
+    result = _uninstall(home, ah)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(settings.read_text())["env"] == {"OTHER": "x"}
+    assert _uninstall(home, ah).returncode == 0
+
+
+def test_uninstall_survives_a_no_proxy_that_is_no_longer_a_string(tmp_path):
+    home, ah, tls, settings = _fake_installed(tmp_path, {
+        "HTTPS_PROXY": ANTHROUTER_URL,
+        "NO_PROXY": ["127.0.0.1"],
+    }, ca_slot="created")
+    manifest = json.loads((ah / "manifest.json").read_text())
+    manifest.update(noProxy="merged", noProxyAdded=["127.0.0.1"])
+    (ah / "manifest.json").write_text(json.dumps(manifest))
+    result = _uninstall(home, ah)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(settings.read_text())["env"] == {"NO_PROXY": ["127.0.0.1"]}
+    assert not tls.exists()
+    assert "NO_PROXY is now" in result.stderr

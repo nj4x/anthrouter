@@ -121,6 +121,8 @@ fi
 HTTPS_PROXY_SLOT="$(mf_get httpsProxy)"
 NODE_CA_SLOT="$(mf_get nodeExtraCaCerts)"
 NODE_CA_VALUE="$(mf_get nodeExtraCaCertsValue)"
+NO_PROXY_SLOT="$(mf_get noProxy)"
+NO_PROXY_ADDED="$(MF_PATH="$MANIFEST" python3 -c 'import json, os; print(json.dumps(json.load(open(os.environ["MF_PATH"])).get("noProxyAdded") or []))' 2>/dev/null || echo '[]')"
 TLS_DIR="$(mf_get tlsDir)"
 CA_PROFILE="$(mf_get caBundleProfileFile)"
 
@@ -166,13 +168,15 @@ fi
 # Each key is removed or restored only while it still holds the value install
 # wrote; a value the user changed since is left alone with a warning.
 if [ -n "$SETTINGS" ] && [ -f "$SETTINGS" ] \
-   && { [ -n "$HTTPS_PROXY_SLOT" ] || [ -n "$NODE_CA_SLOT" ]; }; then
+   && { [ -n "$HTTPS_PROXY_SLOT" ] || [ -n "$NODE_CA_SLOT" ] || [ -n "$NO_PROXY_SLOT" ]; }; then
   SETTINGS_PATH="$SETTINGS" python3 - "$ANTHROUTER_URL" "$HTTPS_PROXY_SLOT" "$NODE_CA_SLOT" \
-    "${TLS_DIR:-$HOME_DIR/tls}" "$NODE_CA_BACKUP_KEY" "$NODE_CA_VALUE" > "$STEP_OUT" <<'PY'
+    "${TLS_DIR:-$HOME_DIR/tls}" "$NODE_CA_BACKUP_KEY" "$NODE_CA_VALUE" \
+    "$NO_PROXY_SLOT" "$NO_PROXY_ADDED" > "$STEP_OUT" <<'PY'
 import json, os, sys
 
 path = os.environ['SETTINGS_PATH']
-our_url, proxy_slot, ca_slot, tls_dir, backup_key, installed = sys.argv[1:7]
+our_url, proxy_slot, ca_slot, tls_dir, backup_key, installed, no_proxy_slot = sys.argv[1:8]
+no_proxy_added = {e.lower() for e in json.loads(sys.argv[8] or '[]')}
 ca, bundle = tls_dir + '/ca.pem', tls_dir + '/ca-bundle.pem'
 # Installs made under ADR-0020 record the installed value; older ones used
 # ca.pem for `created` and the bundle for `backed_up` (ADR-0019).
@@ -190,6 +194,21 @@ if proxy_slot == 'created' and 'HTTPS_PROXY' in env:
         changed = True
     else:
         out.append(f"warn HTTPS_PROXY is now {env['HTTPS_PROXY']!r}, not {our_url!r} - left in place")
+
+# Only the entries install added go; the user's own entries, and any they
+# added since, stay.
+if no_proxy_added and 'NO_PROXY' in env and not isinstance(env['NO_PROXY'], str):
+    out.append(f"warn NO_PROXY is now {env['NO_PROXY']!r}, not a string - left in place")
+elif no_proxy_added and 'NO_PROXY' in env:
+    entries = [e.strip() for e in env['NO_PROXY'].split(',') if e.strip()]
+    kept = [e for e in entries if e.lower() not in no_proxy_added]
+    if kept != entries or not kept:
+        if kept or no_proxy_slot != 'created':
+            env['NO_PROXY'] = ','.join(kept)
+        else:
+            env.pop('NO_PROXY')
+        out.append('ok NO_PROXY: loopback entries removed')
+        changed = True
 
 live = env.get('NODE_EXTRA_CA_CERTS')
 if ca_slot == 'created' and live is not None:

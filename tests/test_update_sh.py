@@ -729,3 +729,23 @@ def test_no_ca_hint_when_constrained_or_no_desktop_proxy(tmp_path):
     del manifest["caNameConstrained"]
     manifest_path.write_text(json.dumps(manifest))
     assert CA_HINT not in _run_update_desktop(home, anthrouter_dir, app).stdout
+
+
+NO_PROXY_HINT = "sets HTTPS_PROXY without NO_PROXY"
+
+
+def test_no_proxy_hint_for_desktop_install_without_no_proxy(tmp_path):
+    home, anthrouter_dir, _, _ = _setup_fake_install(
+        tmp_path, with_lock=True,
+        manifest_extra={"desktopProxy": True, "caNameConstrained": True},
+    )
+    app = tmp_path / "missing.app"
+    result = _run_update_desktop(home, anthrouter_dir, app)
+    hint = [line for line in result.stdout.splitlines() if NO_PROXY_HINT in line]
+    assert len(hint) == 1, result.stdout
+    assert '"NO_PROXY": "127.0.0.1,localhost,::1"' in hint[0]
+    manifest_path = anthrouter_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["noProxy"] = "created"
+    manifest_path.write_text(json.dumps(manifest))
+    assert NO_PROXY_HINT not in _run_update_desktop(home, anthrouter_dir, app).stdout

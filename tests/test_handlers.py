@@ -1187,3 +1187,59 @@ def test_classifier_retry_with_first_try_upstream_success_records_one(proxy, mon
     assert len(classifier_calls) > 1
     assert row['status'] == 'success'
     assert row['attempt'] == 1
+
+
+# ---------------------------------------------------------------------------
+# Absolute-form request targets (a client that sends http:// traffic through HTTPS_PROXY)
+# ---------------------------------------------------------------------------
+
+def _absolute_form(server, method, target, payload=None, headers=None):
+    import http.client
+    conn = http.client.HTTPConnection('127.0.0.1', server.server_address[1], timeout=10)
+    body = json.dumps(payload).encode() if payload is not None else None
+    conn.request(method, target, body=body,
+                 headers={'Content-Type': 'application/json', 'x-api-key': 'sk-test',
+                          **(headers or {})})
+    resp = conn.getresponse()
+    data = resp.read()
+    conn.close()
+    return resp, data
+
+
+@pytest.mark.parametrize('host', ['127.0.0.1', 'localhost'])
+def test_absolute_form_target_naming_this_proxy_is_served_like_a_path(proxy, upstream, host):
+    server = proxy()
+    port = server.server_address[1]
+    resp, data = _absolute_form(
+        server, 'POST', f'http://{host}:{port}/v1/messages?beta=true',
+        {'model': 'sonnet', 'messages': [{'role': 'user', 'content': 'hi'}]})
+    assert resp.status == 200, data
+    assert len(_FakeUpstream.received) == 1
+    resp, data = _absolute_form(server, 'GET', f'http://{host}:{port}/health')
+    assert resp.status == 200 and json.loads(data)['status'] == 'ok'
+
+
+@pytest.mark.parametrize('method, target', [
+    ('POST', 'http://127.0.0.1:8787/w/claude/v1/messages?beta=true'),
+    ('GET', 'http://example.com/health'),
+    ('DELETE', 'http://127.0.0.1:1/v1/messages'),
+])
+def test_absolute_form_target_for_another_host_is_a_tagged_502_never_a_404(
+        proxy, upstream, method, target):
+    server = proxy()
+    resp, data = _absolute_form(server, method, target,
+                                {} if method == 'POST' else None)
+    assert resp.status == 502
+    assert resp.getheader('X-Anthrouter-Error') == 'forward-proxy-unsupported'
+    error = json.loads(data)['error']
+    assert error['type'] == 'api_error' and 'NO_PROXY' in error['message']
+    assert _FakeUpstream.received == []
+
+
+def test_refused_absolute_form_post_with_a_large_body_still_gets_its_502(proxy, upstream):
+    server = proxy()
+    resp, data = _absolute_form(
+        server, 'POST', 'http://127.0.0.1:8787/w/claude/v1/messages',
+        {'model': 'sonnet', 'pad': 'x' * (4 * 1024 * 1024)})
+    assert resp.status == 502
+    assert resp.getheader('X-Anthrouter-Error') == 'forward-proxy-unsupported'

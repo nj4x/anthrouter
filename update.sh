@@ -149,6 +149,13 @@ if [ "$HAS_DESKTOP_FIELD" = "False" ] && desktop_app_present; then
   say "Claude Desktop found, but this install predates Desktop proxy wiring — to add it, run $HOME_DIR/uninstall.sh, then install.sh."
 fi
 
+# Claude Code sends http:// base-URL traffic through HTTPS_PROXY too, and
+# anthrouter refuses it; an install without NO_PROXY breaks the terminal CLI.
+NEEDS_NO_PROXY="$(MANIFEST_PATH="$MANIFEST" python3 -c 'import json, os; d = json.load(open(os.environ["MANIFEST_PATH"])); print(d.get("desktopProxy") is True and "noProxy" not in d)' 2>/dev/null || echo False)"
+if [ "$NEEDS_NO_PROXY" = "True" ]; then
+  say "This Desktop proxy install sets HTTPS_PROXY without NO_PROXY, so the terminal CLI fails with \"issue with the selected model\". Add \"NO_PROXY\": \"127.0.0.1,localhost,::1\" to env in ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json, or run $HOME_DIR/uninstall.sh, then install.sh."
+fi
+
 # An install made under ADR-0019 alone holds a CA key with no name constraint:
 # it can sign for any host Claude Code reaches. A hint only, no shell probe,
 # never an abort (ADR-0020 step 9).

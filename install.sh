@@ -441,6 +441,37 @@ with open(tmp, 'w') as fh:
     fh.write('\n')
 os.replace(tmp, path)
 PY
+  # Claude Code also sends its http:// base-URL requests (caveman or anthrouter
+  # on loopback) through HTTPS_PROXY, which anthrouter refuses; NO_PROXY keeps
+  # loopback direct. Entries are added to the user's list, never replacing it.
+  SETTINGS_PATH="$settings" python3 - > "$STEP_OUT" <<'PY' || return 1
+import json, os
+with open(os.environ['SETTINGS_PATH']) as fh:
+    env = json.load(fh).get('env', {})
+current = env.get('NO_PROXY')
+have = {e.strip().lower() for e in (current or '').split(',') if e.strip()}
+added = [e for e in ('127.0.0.1', 'localhost', '::1') if e not in have]
+print('created' if current in (None, '') else 'merged')
+print(json.dumps(added))
+PY
+  mf_set noProxy "$(head -1 "$STEP_OUT")" || return 1
+  mf_write noProxyAdded "$(sed -n 2p "$STEP_OUT")" || return 1
+  SETTINGS_PATH="$settings" python3 - "$(sed -n 2p "$STEP_OUT")" <<'PY' || return 1
+import json, os, sys
+path = os.environ['SETTINGS_PATH']
+added = json.loads(sys.argv[1])
+with open(path) as fh:
+    data = json.load(fh)
+env = data.setdefault('env', {})
+if added:
+    current = (env.get('NO_PROXY') or '').rstrip(', ')
+    env['NO_PROXY'] = ','.join(([current] if current else []) + added)
+    tmp = path + '.tmp'
+    with open(tmp, 'w') as fh:
+        json.dump(data, fh, indent=2)
+        fh.write('\n')
+    os.replace(tmp, path)
+PY
   SETTINGS_PATH="$settings" python3 - > "$STEP_OUT" <<'PY' || return 1
 import json, os
 with open(os.environ['SETTINGS_PATH']) as fh:
@@ -659,6 +690,8 @@ mf_write desktopProxy "$DESKTOP_PROXY"
 mf_write tlsDir null
 mf_write configEnvDesktopBlock null
 mf_write httpsProxy null
+mf_write noProxy null
+mf_write noProxyAdded null
 mf_write nodeExtraCaCerts null
 mf_write nodeExtraCaCertsValue null
 mf_write caBundleProfileFile null
@@ -915,7 +948,7 @@ if [ "$DESKTOP_PROXY" = "true" ] && [ -n "$SHELL_CA_VALUE" ]; then
 fi
 
 if [ "$DESKTOP_PROXY" = "true" ]; then
-  say "Pointing $SETTINGS HTTPS_PROXY and NODE_EXTRA_CA_CERTS at anthrouter..."
+  say "Pointing $SETTINGS HTTPS_PROXY and NODE_EXTRA_CA_CERTS at anthrouter, loopback in NO_PROXY..."
   desktop_proxy_wire_settings "$SETTINGS" "$TLS_DIR" || die "could not update $SETTINGS for the Desktop proxy"
 fi
 

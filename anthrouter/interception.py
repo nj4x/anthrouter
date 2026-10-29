@@ -37,6 +37,7 @@ CONNECT_TIMEOUT = 10
 ERROR_HEADER = 'X-Anthrouter-Error'
 TARGET_UNREACHABLE = 'interception-target-unreachable'
 UPSTREAM_CONNECT = 'upstream-connect'
+FORWARD_PROXY_UNSUPPORTED = 'forward-proxy-unsupported'
 
 _BUFFER = 64 * 1024
 # ASCII only: getaddrinfo IDNA-folds other characters (a soft hyphen vanishes),
