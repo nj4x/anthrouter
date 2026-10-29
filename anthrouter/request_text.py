@@ -82,6 +82,19 @@ _AFFIRMATION_PHRASES = frozenset({
 })
 # Trailing punctuation stripped before membership test.
 _AFFIRMATION_TRAILING_PUNCT = '.!?,;: '
+# Closed token set for compound affirmations ("yes please", "ok go ahead"):
+# every whitespace token must come from this set, so short-but-substantive
+# instructions ("do it anyway", "yes park here") still reach the classifier.
+_AFFIRMATION_TOKENS = frozenset({
+    'yes', 'yep', 'yeah', 'ok', 'okay', 'sure', 'please', 'go', 'ahead',
+    'do', 'it', 'continue', 'proceed', 'start',
+})
+_AFFIRMATION_MAX_TOKENS = 4
+# At least one token must carry assent on its own, so filler-only text
+# ("it", "do", "ahead", "please") never counts as an approval.
+_AFFIRMATION_ANCHOR_TOKENS = frozenset({
+    'yes', 'yep', 'yeah', 'ok', 'okay', 'sure', 'go', 'continue', 'proceed',
+})
 
 
 def is_short_affirmation(text: str) -> bool:
@@ -91,11 +104,17 @@ def is_short_affirmation(text: str) -> bool:
     ``_AFFIRMATION_MAX_CHARS`` (so "yes, but also rename the class" never
     matches), then normalizes (lowercase, collapse interior whitespace, strip
     trailing punctuation, drop a single leading "please ") and tests membership
-    against the curated ``_AFFIRMATION_PHRASES`` set.
+    against the curated ``_AFFIRMATION_PHRASES`` set.  Compound affirmations
+    such as "yes please" or "ok go ahead" also match when the normalized text
+    is at most ``_AFFIRMATION_MAX_TOKENS`` whitespace tokens (each stripped of
+    edge punctuation, so "yes, please" counts) and every token
+    belongs to the closed ``_AFFIRMATION_TOKENS`` set, with at least one
+    token from ``_AFFIRMATION_ANCHOR_TOKENS``.
 
     The bare imperative "start" is intentionally excluded — alone it is most
     often a real command ("start the server/migration"); "please start" is kept
-    because the softener makes the imperative reading unlikely.
+    because the softener makes the imperative reading unlikely, and the
+    token-set rule likewise rejects a normalized text of exactly "start".
     """
     if not isinstance(text, str):
         return False
@@ -106,7 +125,16 @@ def is_short_affirmation(text: str) -> bool:
         candidate = normalized[len('please '):].strip()
         if candidate in _AFFIRMATION_PHRASES:
             return True
-    return normalized in _AFFIRMATION_PHRASES
+    if normalized in _AFFIRMATION_PHRASES:
+        return True
+    tokens = [t.strip(_AFFIRMATION_TRAILING_PUNCT) for t in normalized.split()]
+    tokens = [t for t in tokens if t]
+    if not tokens or len(tokens) > _AFFIRMATION_MAX_TOKENS:
+        return False
+    return (
+        all(token in _AFFIRMATION_TOKENS for token in tokens)
+        and any(token in _AFFIRMATION_ANCHOR_TOKENS for token in tokens)
+    )
 
 
 # Title-generation prompts are appended by the Claude Code IDE to ask for a

@@ -1399,17 +1399,19 @@ class TestBuildClassifierPayload:
         parsed = json.loads(cp['messages'][0]['content'])
         assert parsed.get('prior_response_summary') == 'Here is my plan...'
 
-    def test_prior_response_summary_extends_system_prompt(self):
-        cfg = _config(confidence_bump=True)
-        cp_without = build_classifier_payload(self._make_summary(), cfg)
-        cp_with = build_classifier_payload(
-            self._make_summary(), cfg, prior_response_summary='some context'
-        )
-        assert len(cp_with['system']) > len(cp_without['system'])
-        assert 'prior_response_summary' in cp_with['system']
+    def test_prior_response_rule_in_system_prompt_both_formats(self):
+        """The prior-response rule lives in the base prompts, so the system
+        prompt is identical with or without prior context, in both formats."""
+        for bump in (True, False):
+            cfg = _config(confidence_bump=bump)
+            cp_without = build_classifier_payload(self._make_summary(), cfg)
+            cp_with = build_classifier_payload(
+                self._make_summary(), cfg, prior_response_summary='some context'
+            )
+            assert cp_with['system'] == cp_without['system']
+            assert 'prior_response_summary' in cp_with['system']
 
     def test_prior_response_summary_absent_without_confidence_bump(self):
-        # suffix is only appended when use_json (confidence_bump) is True
         cfg = _config(confidence_bump=False)
         cp = build_classifier_payload(
             self._make_summary(), cfg, prior_response_summary='ctx'
@@ -1417,7 +1419,6 @@ class TestBuildClassifierPayload:
         # JSON still injected into message content
         parsed = json.loads(cp['messages'][0]['content'])
         assert parsed.get('prior_response_summary') == 'ctx'
-        # but system prompt unchanged (non-JSON mode has no suffix)
         cp_without = build_classifier_payload(self._make_summary(), cfg)
         assert cp['system'] == cp_without['system']
 
@@ -2502,6 +2503,69 @@ class TestIsShortAffirmation:
         assert is_short_affirmation(None) is False  # type: ignore[arg-type]
 
 
+class TestAffirmationTokenSet:
+    """ADR-0021: short closed-set approvals beyond the exact phrase list."""
+
+    def test_multi_token_approvals_accepted(self):
+        from anthrouter.request_text import is_short_affirmation
+        for text in ('yes please', 'ok do it', 'sure continue', 'yes go ahead', 'Yes Please!',
+                     'yes, please', 'ok, go ahead'):
+            assert is_short_affirmation(text) is True, text
+
+    def test_content_bearing_phrases_rejected(self):
+        from anthrouter.request_text import is_short_affirmation
+        for text in ('do it anyway', 'yes park here', 'yes update handoff please', 'start',
+                     'it', 'do', 'ahead', 'please please', 'start it'):
+            assert is_short_affirmation(text) is False, text
+
+    def test_more_than_four_tokens_rejected(self):
+        from anthrouter.request_text import is_short_affirmation
+        assert is_short_affirmation('yes yes yes yes yes') is False
+
+
+class TestAffirmationReclassify:
+    """ADR-0021: trivial cached tier + prior response re-scores the affirmation."""
+
+    def test_trivial_cache_with_prior_reclassifies_upward(self):
+        backend = MagicMock()
+        del backend.send_classifier_message
+        backend.send_message.return_value = _score_response('standard')
+        target = _target(backend=backend, routing=True)
+        payload = _payload_with_prior('yes please', 'Implement auth middleware. Ready to draft?')
+        decision = route_model(payload, target, {}, cached_session_tier='haiku')
+        backend.send_message.assert_called_once()
+        assert decision.reason_code == 'affirmation_reclassified'
+        assert decision.routed_model == 'sonnet'
+
+    def test_trivial_cache_reclassify_keeps_higher_cached_tier(self):
+        backend = MagicMock()
+        del backend.send_classifier_message
+        backend.send_message.return_value = _score_response('trivial')
+        target = _target(backend=backend, routing=True)
+        payload = _payload_with_prior('yes please', 'Fix the typo. Done?')
+        decision = route_model(payload, target, {}, cached_session_tier='sonnet')
+        assert decision.routed_model == 'sonnet'
+
+    def test_standard_cache_still_inherits_without_call(self):
+        backend = MagicMock()
+        del backend.send_classifier_message
+        target = _target(backend=backend, routing=True)
+        payload = _payload_with_prior('yes please', 'Ready to draft?')
+        decision = route_model(payload, target, {}, cached_session_tier='sonnet')
+        assert decision.reason_code == 'affirmation_inherited'
+        backend.send_message.assert_not_called()
+
+    def test_trivial_cache_classifier_failure_keeps_cached_tier(self):
+        backend = MagicMock()
+        del backend.send_classifier_message
+        backend.send_message.side_effect = RuntimeError('boom')
+        target = _target(backend=backend, routing=True)
+        payload = _payload_with_prior('yes please', 'Ready to draft?')
+        decision = route_model(payload, target, {}, cached_session_tier='haiku')
+        assert decision.routed_model == 'haiku'
+        assert decision.reason_code == 'affirmation_inherited'
+
+
 class TestIsTitleGeneration:
     """Unit tests for the is_title_generation helper in request_text."""
 
@@ -3012,12 +3076,9 @@ class TestAffirmationEnrichment:
 
     def test_confidence_bump_true_uses_json_system_prompt_and_parser(self):
         """When confidence_bump=True, the affirmation classifier call uses
-        _CLASSIFIER_SYSTEM_JSON + _CLASSIFIER_SYSTEM_JSON_PRIOR_SUFFIX and
-        parse_classifier_score_json, not the one-word prompt/parser."""
-        from anthrouter.model_router import (
-            _CLASSIFIER_SYSTEM_JSON,
-            _CLASSIFIER_SYSTEM_JSON_PRIOR_SUFFIX,
-        )
+        _CLASSIFIER_SYSTEM_JSON and parse_classifier_score_json, not the
+        one-word prompt/parser."""
+        from anthrouter.model_router import _CLASSIFIER_SYSTEM_JSON
         backend = MagicMock()
         del backend.send_classifier_message
         backend.send_message.return_value = {
@@ -3037,8 +3098,7 @@ class TestAffirmationEnrichment:
 
         call_args = backend.send_message.call_args[0][0]
         system_used = call_args['system']
-        assert _CLASSIFIER_SYSTEM_JSON in system_used
-        assert _CLASSIFIER_SYSTEM_JSON_PRIOR_SUFFIX in system_used
+        assert system_used == _CLASSIFIER_SYSTEM_JSON
 
     def test_confidence_bump_true_invalid_json_response_falls_to_floor(self):
         """When confidence_bump=True and the classifier returns an invalid JSON

@@ -1,0 +1,142 @@
+[
+  {
+    "id": "ID-001",
+    "group": "B",
+    "claim": "Rejected alternative rests on a false claim, and it contradicts the Decision's own tier logic",
+    "evidence": "Alternatives: \"A standard or deep cache already routes above the cheapest tier, so a re-score can only confirm it or move it down, and higher-of would keep it.\" This is true only for a deep cache. A standard cache re-scored to deep moves UP under the same \"higher of\" rule in Decision 3. Scenario: a standard tier is cached from a mid-size task, the assistant then proposes a large redesign, the user replies \"yes please\"; Decision 3 says \"Standard and deep cached tiers still inherit with no call\", replaying the stale-score failure the ADR fixes for trivial. The rejection must rest on cost or an explicit acceptance of standard under-routing, not on \"can only move it down\".",
+    "severity": "major",
+    "fix": "",
+    "status": "fixed",
+    "introduced_pass": null
+  },
+  {
+    "id": "ID-002",
+    "group": "B",
+    "claim": "Consequences understate cost and the Decision under-describes the record on a reclassify",
+    "evidence": "Consequences: \"One extra classifier call on affirmation turns whose cached tier is trivial.\" Decision 3 says \"call the classifier as the no-cache branch does\"; that branch can also run the weighted system-prompt blend, so a second call may be added. The ADR says only \"Route at the higher of the cached tier and the new result, and write that tier to the cache\" and does not state which label is stored when the routed tier and the new label differ.",
+    "severity": "minor",
+    "fix": "",
+    "status": "fixed",
+    "introduced_pass": null
+  },
+  {
+    "id": "ID-003",
+    "group": "B",
+    "claim": "Hidden assumption about punctuation in the token rule",
+    "evidence": "Decision 2: \"matches text of at most 4 tokens where every token is in a closed set\". Only trailing punctuation is normalized, so the common wording \"yes, please\" gives the token \"yes,\", which is not in the set; that wording still misses the affirmation path. The ADR does not state this limit.",
+    "severity": "minor",
+    "fix": "",
+    "status": "fixed",
+    "introduced_pass": null
+  },
+  {
+    "id": "ID-004",
+    "group": "B",
+    "claim": "Trivial-tier identity is an unstated assumption",
+    "evidence": "Decision 3: \"a cached tier equal to the trivial tier\". The ADR does not say this means the configured trivial model, what happens when a deployment maps trivial and standard to the same model, or how the higher-of result interacts with any baseline cap the no-cache branch applies.",
+    "severity": "minor",
+    "fix": "",
+    "status": "fixed",
+    "introduced_pass": null
+  },
+  {
+    "id": "ID-005",
+    "group": "A",
+    "claim": "The 'higher of' rule in Decision 3 adds a moving part that never changes the outcome",
+    "evidence": "Decision 3 runs only for \"a cached tier equal to the trivial tier\", and trivial is the lowest tier, so \"Route at the higher of the cached tier and the new result\" always routes at the new result. Alternatives admits \"higher-of would keep it\" only for the excluded standard/deep cases.",
+    "severity": "minor",
+    "fix": "",
+    "status": "fixed",
+    "introduced_pass": null
+  },
+  {
+    "id": "ID-006",
+    "group": "A",
+    "claim": "Context puts the blame for the session-wide replay on the wrong path",
+    "evidence": "Context: \"the affirmation path inherits a cached tier without a classifier call, so a trivial score from an earlier answer (#16273, score 18) was replayed to every later turn in the session.\" The same paragraph says the affirmation path \"never ran\" for `yes please`; per the evidence doc the later turns replayed Haiku through the walk-back cache, and the affirmation gap was hypothetical.",
+    "severity": "minor",
+    "fix": "",
+    "status": "fixed",
+    "introduced_pass": null
+  },
+  {
+    "id": "ID-007",
+    "group": "A",
+    "claim": "The ADR does not say why Decision 2 is needed, or that Decision 2 depends on Decision 3",
+    "evidence": "Decision 1 alone sends \"yes please\" to the classifier with prior_response_summary. Decision 2 then routes it into the inherit path, which would replay a trivial cache without Decision 3. The benefit of Decision 2 (skip a call when the cache holds standard or deep) and the ship-together constraint are not stated.",
+    "severity": "minor",
+    "fix": "",
+    "status": "fixed",
+    "introduced_pass": null
+  },
+  {
+    "id": "ID-008",
+    "group": "C",
+    "claim": "Reclassify returning trivial again has no stated steady-state policy",
+    "evidence": "Decision 3: \"Route at the higher of the cached tier and the new result, and write that tier to the cache\". A trivial result re-writes trivial, so each later affirmation repeats the call. Consequences: \"One extra classifier call on affirmation turns whose cached tier is trivial\" does not say whether this repeats on every approval turn in a genuinely trivial session, or that the cost is accepted.",
+    "severity": "minor",
+    "fix": "",
+    "status": "fixed",
+    "introduced_pass": null
+  },
+  {
+    "id": "ID-009",
+    "group": "C",
+    "claim": "Scope of the prompt rule on the main classifier path is not bounded",
+    "evidence": "Decision 1: \"This applies to both the main classifier and the affirmation classifier\", firing \"when `final_user_text` approves, answers or chooses among what the prior response proposed\". Decision 2 limits detection to a closed token set, but nothing bounds which longer non-affirmation replies on the main path are now scored up from the prior response, and the long-context size floor interaction is not stated. Consequences says only \"Scores move on every turn with a prior assistant message.\"",
+    "severity": "minor",
+    "fix": "",
+    "status": "fixed",
+    "introduced_pass": null
+  },
+  {
+    "id": "ID-010",
+    "group": "C",
+    "claim": "Failure policy is stated only for the reclassify branch",
+    "evidence": "the flowchart shows \"Classify with prior_response_summary<br/>affirmation_classified\" for the none-cached branch with no failure edge, while the trivial branch has \"Keep cached tier\". A reader cannot tell what the no-cache branch does when the classifier call fails, or that it differs from the reclassify failure path.",
+    "severity": "minor",
+    "fix": "",
+    "status": "fixed",
+    "introduced_pass": null
+  },
+  {
+    "id": "ID-011",
+    "group": "A",
+    "claim": "The pre-release replay has no named script and no pass/fail criterion",
+    "evidence": "Consequences: \"Stored `classifier_summary_json` rows must be replayed through the new prompt before release. A manual script does this; it is not run in CI.\" No script path, no statement of which prompt format is replayed (Decision 1 changes both), and no result that blocks release or who judges it.",
+    "severity": "minor",
+    "fix": "",
+    "status": "fixed",
+    "introduced_pass": null
+  },
+  {
+    "id": "ID-012",
+    "group": "A",
+    "claim": "Decision 3 is justified only as a companion to Decision 2, but it also closes the same gap for phrases that already match today (a bare `yes` or `go ahead` after a trivial cached turn inherits trivial with no call, and Decision 1 does not reach that path). The ADR understates why Decision 3 is needed and does not weigh shipping without Decision 2, which is only a call-saving optimization.",
+    "evidence": "\"Decision 1 alone fixes #16274.\" and \"Decision 2 saves a classifier call when the cache holds a standard or deep tier. It must ship with Decision 3: without it, an approval that now matches would inherit a trivial cache with no call and replay the #16274 failure.\"",
+    "severity": "minor",
+    "fix": "",
+    "status": "open",
+    "introduced_pass": null
+  },
+  {
+    "id": "ID-013",
+    "group": "B",
+    "claim": "Decision 3 does not say which form of the new result the higher-of rule compares against: the capped tier or the uncapped tier. Read in order, the sentences suggest the capped result; the implementation ranks the uncapped resolved tier against the cached tier and then routes at the capped tier, so with a custom label map where the trivial model ranks between the capped and uncapped results, the code routes below the cached tier.",
+    "evidence": "\"The new result keeps the no-cache branch's baseline cap. Route at the higher of the cached tier and the new result.\"",
+    "severity": "minor",
+    "fix": "",
+    "status": "open",
+    "introduced_pass": null
+  },
+  {
+    "id": "ID-014",
+    "group": "C",
+    "claim": "A failed reclassify is recorded under the same reason code as a no-call inherit, so a failed re-score cannot be told apart from a normal inherit in the DB, while the no-cache branch has its own failure code. Code matches the ADR; this is an observability gap.",
+    "evidence": "\"If the reclassify call fails, keep the cached tier with `affirmation_inherited`.\" vs flowchart \"F -- no --> G[Keep cached tier<br/>affirmation_inherited]\" and \"C -- no --> C2[Standard floor, no cache write<br/>affirmation_classifier_failed]\"",
+    "severity": "minor",
+    "fix": "",
+    "status": "open",
+    "introduced_pass": null
+  }
+]

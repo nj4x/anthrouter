@@ -180,7 +180,7 @@ def _score_to_tier(score: float, trivial_threshold: float, standard_threshold: f
     return 'deep'
 
 
-# Specialized system prompt for system-prompt tier inference (ADR 0012).
+# Specialized system prompt for system-prompt tier inference (anthproxy ADR 0012).
 # Distinct from _CLASSIFIER_SYSTEM (which classifies user prompts) — teaches the
 # classifier to judge role complexity, not task complexity.
 _CLASSIFIER_SYSTEM_PROMPT_TIER = (
@@ -258,11 +258,15 @@ _CLASSIFIER_SYSTEM = (
     'security-sensitive reasoning, '
     'or a task likely to need extended chain-of-thought thinking.\n'
     '\n'
-    'Judge complexity ONLY from the user\'s intent in "final_user_text". The '
-    'other fields (message counts, tool counts, conversation length) describe '
-    'the harness setup and prior context, NOT the difficulty of THIS request — '
-    'never escalate because of them. A short, simple request is low (e.g. 5) '
-    'even inside a long session with many tools.\n'
+    'Judge complexity from the user\'s intent in "final_user_text". Without '
+    '"prior_response_summary", score "final_user_text" alone. With '
+    '"prior_response_summary", when "final_user_text" approves, answers, or '
+    'chooses among what the prior response proposed, score the work being '
+    'approved, not the bare reply. The other fields (message counts, tool '
+    'counts, conversation length) describe the harness setup, NOT the '
+    'difficulty of THIS request — never escalate because of them. A short, '
+    'simple request is low (e.g. 5) even inside a long session with many '
+    'tools.\n'
     '\n'
     'Floor: any request that asks to plan, design, or outline an approach or '
     'implementation is AT LEAST 38, never below that, even when the wording '
@@ -282,6 +286,12 @@ _CLASSIFIER_SYSTEM = (
     '"add cursor-based pagination to the list users API" → 60\n'
     '"redesign the auth layer for SSO and multi-tenant isolation" → 90\n'
     '\n'
+    'Examples with prior_response_summary (final_user_text + prior → score):\n'
+    '"yes please", prior "Ready to draft the 4 files?" → 50\n'
+    '"Q1 ok, Q2 no", prior list of design questions → 45\n'
+    '"thanks, that works", prior closing summary → 5\n'
+    '"yes", prior "Want me to fix the typo?" → 10\n'
+    '\n'
     'Reply with ONLY the integer. No punctuation, no explanation.'
 )
 
@@ -292,8 +302,7 @@ _VALID_LABELS = frozenset({'trivial', 'standard', 'deep'})
 # Confidence-bump JSON classifier prompt (separate path, activated by config)
 # ---------------------------------------------------------------------------
 
-# Used ONLY when config.auto_model_routing_confidence_bump is True.  The
-# existing _CLASSIFIER_SYSTEM / parse_classifier_label pair is never modified.
+# Used ONLY when config.auto_model_routing_confidence_bump is True.
 _CLASSIFIER_SYSTEM_JSON = (
     'You are a numeric complexity classifier for AI coding assistant requests. '
     'Read the JSON summary of the user request and reply ONLY with valid JSON:\n'
@@ -310,11 +319,15 @@ _CLASSIFIER_SYSTEM_JSON = (
     'security-sensitive reasoning, '
     'or a task likely to need extended chain-of-thought thinking.\n'
     '\n'
-    'Judge complexity ONLY from the user\'s intent in "final_user_text". The '
-    'other fields (message counts, tool counts, conversation length) describe '
-    'the harness setup and prior context, NOT the difficulty of THIS request — '
-    'never escalate because of them. A short, simple request is low (e.g. 5) '
-    'even inside a long session with many tools.\n'
+    'Judge complexity from the user\'s intent in "final_user_text". Without '
+    '"prior_response_summary", score "final_user_text" alone. With '
+    '"prior_response_summary", when "final_user_text" approves, answers, or '
+    'chooses among what the prior response proposed, score the work being '
+    'approved, not the bare reply. The other fields (message counts, tool '
+    'counts, conversation length) describe the harness setup, NOT the '
+    'difficulty of THIS request — never escalate because of them. A short, '
+    'simple request is low (e.g. 5) even inside a long session with many '
+    'tools.\n'
     '\n'
     'Floor: any request that asks to plan, design, or outline an approach or '
     'implementation is AT LEAST 38, never below that.\n'
@@ -325,19 +338,18 @@ _CLASSIFIER_SYSTEM_JSON = (
     '"read the first 20 lines of config.py" → {"score":10}\n'
     '"what is the signature of parse_config()?" → {"score":15}\n'
     '\n'
+    'Examples with prior_response_summary (final_user_text + prior → score):\n'
+    '"yes please", prior "Ready to draft the 4 files?" → {"score":50}\n'
+    '"Q1 ok, Q2 no", prior list of design questions → {"score":45}\n'
+    '"thanks, that works", prior closing summary → {"score":5}\n'
+    '"yes", prior "Want me to fix the typo?" → {"score":10}\n'
+    '\n'
     'Reply with ONLY the JSON object. No other text.'
 )
 
 # Ceiling for the JSON-format response.  The JSON payload {"score":42} is ~5
 # tokens; the rest is headroom for thinking tokens, which count against max_tokens.
 _CLASSIFIER_MAX_TOKENS_JSON = 256
-
-# Appended to _CLASSIFIER_SYSTEM_JSON when the classifier payload includes
-# prior_response_summary so the classifier knows to weight that context.
-_CLASSIFIER_SYSTEM_JSON_PRIOR_SUFFIX = (
-    '\n\nWhen prior_response_summary is provided, use it as additional context '
-    'about the ongoing task to inform your complexity assessment.'
-)
 
 # ---------------------------------------------------------------------------
 # Public data types
@@ -361,6 +373,7 @@ ReasonCode = Literal[
     'affirmation_floored_standard',  # retained for old stats rows; retired from affirmation code path
     'affirmation_classified',        # new: no cache, classifier called and succeeded
     'affirmation_classifier_failed', # new: no cache, classifier failed or no prior text
+    'affirmation_reclassified',
     'rule_title_generation',
     'classifier_trivial',
     'classifier_standard',
@@ -437,7 +450,7 @@ class ModelRoutingDecision:
     # The handler writes this (not routed_model) to the tier cache so subsequent
     # turns can apply their own cap.  None on all other paths.
     cache_tier: str | None = None
-    # ADR 0010/0011: weighted system-prompt + user-prompt blend fields.
+    # anthproxy ADR 0010/0011: weighted system-prompt + user-prompt blend fields.
     # All four numeric fields are None when routing is disabled, when a cached
     # tier is inherited (affirmation_inherited path), or when the blend is not
     # applied (rules/tag mode, size floor, early returns).
@@ -476,7 +489,7 @@ class RoutingSummary:
     # routing-internal signals, not classifier complexity signals.
     is_short_affirmation: bool = False
     # SHA-256 of payload['system'] (or None when absent); used as the LRU cache
-    # key for system-prompt tier classification (ADR 0010/0012).  Not a prompt
+    # key for system-prompt tier classification (anthproxy ADR 0010/0012).  Not a prompt
     # content field — just a stable hash for cache lookup and audit queries.
     # Excluded from to_classifier_json() (never sent to the user-prompt classifier).
     system_prompt_sha256: str | None = None
@@ -753,7 +766,7 @@ def build_routing_summary(payload: dict) -> RoutingSummary | None:
             + final_user_text[-tail_len:]
         )
 
-    # Compute system prompt SHA256 for the LRU cache key (ADR 0010).
+    # Compute system prompt SHA256 for the LRU cache key (anthproxy ADR 0010).
     # Uses same serialization as handlers.py _extract_prompt_capture() for consistency.
     # The SHA is a cache key — not prompt content — so it does not violate the
     # classifier-input privacy contract.
@@ -842,14 +855,14 @@ def _extract_prior_response_summary(
 
 
 # ---------------------------------------------------------------------------
-# System-prompt tier classification helpers (ADR 0010 / ADR 0012)
+# System-prompt tier classification helpers (anthproxy ADR 0010 / anthproxy ADR 0012)
 # ---------------------------------------------------------------------------
 
 def _extract_system_prompt_preview(payload: dict, limit: int) -> str:
     """Extract and head-cap system prompt text for the system-prompt classifier.
 
     Returns empty string when no system prompt is present or text is empty.
-    ADR 0012: if system is a str, use directly; if a list, collect 'text' blocks
+    anthproxy ADR 0012: if system is a str, use directly; if a list, collect 'text' blocks
     (with isinstance(dict) guard), concatenate with '\\n', then head-cap to limit.
     """
     system = payload.get('system')
@@ -977,7 +990,7 @@ def _apply_weighted_blend(
     credentials: dict,
     log_tag: str,
 ) -> tuple[str, str, int, int, int, bool]:
-    """Apply weighted system-prompt + user-prompt tier blend (ADR 0010).
+    """Apply weighted system-prompt + user-prompt tier blend (anthproxy ADR 0010).
 
     Returns (final_tier_label, sys_tier, sys_score, user_score, weighted_score, sys_failed).
 
@@ -1035,12 +1048,10 @@ def build_classifier_payload(
     max_tokens ceiling are untouched when confidence bump is off.
 
     When ``prior_response_summary`` is provided it is injected into the routing
-    summary JSON and the system prompt is extended with the prior-context suffix.
+    summary JSON; the base prompts carry the prior-context scoring rule.
     """
     use_json = getattr(config, 'auto_model_routing_confidence_bump', False)
     system = _CLASSIFIER_SYSTEM_JSON if use_json else _CLASSIFIER_SYSTEM
-    if use_json and prior_response_summary is not None:
-        system = system + _CLASSIFIER_SYSTEM_JSON_PRIOR_SUFFIX
     return {
         CLASSIFIER_SENTINEL_KEY: True,
         'model': config.auto_model_routing_classifier_model,
@@ -1845,16 +1856,26 @@ def route_model(
     # prior turns already established.
     #
     # Cached-tier path: inherit the tier immediately (no classifier call).
+    # A cached trivial tier with prior assistant text is the exception: the
+    # stale trivial score is re-scored so an earlier low score cannot be
+    # replayed onto a later "yes please" that greenlights real work (ADR-0021).
     # No-cache path: extract the prior assistant response and call the classifier
     # with enriched input (prior_response_summary) so the turn is routed at the
     # complexity of the work the user agreed to, not the bare "yes".  The result
     # is written to the tier cache (via non-None classification) so subsequent
     # tool-result turns inherit the established tier.  If no text-bearing
     # assistant message exists (critical invariant) or the classifier call fails,
-    # fall back to the standard floor without writing the tier cache.
+    # fall back to the standard floor without writing the tier cache (a failed
+    # reclassify keeps the cached tier instead).
     if (config.auto_model_routing_affirmation_inherit
             and summary.is_short_affirmation):
-        if cached_session_tier is not None:
+        reclassify_cached = (
+            cached_session_tier is not None
+            and cached_session_tier
+            == config.auto_model_routing_classification['trivial']
+            and bool(prior_response_summary)
+        )
+        if cached_session_tier is not None and not reclassify_cached:
             # Cached path: inherit immediately, no classifier call.
             # No cap — affirmations are continuations of the prior task; the
             # baseline_model lock participates in fresh routing decisions but
@@ -1871,8 +1892,21 @@ def route_model(
                 classifier_mode='affirmation',
             )
 
-        # No-cache path: prior_response_summary already extracted above.
+        # No-cache / reclassify path: prior_response_summary already extracted above.
         def _affirmation_floor() -> ModelRoutingDecision:
+            if reclassify_cached and cached_session_tier is not None:
+                # Reclassify failure: keep the cached tier rather than raising
+                # it to the standard floor — the prior classifier result stands.
+                payload['model'] = cached_session_tier
+                return ModelRoutingDecision(
+                    requested_model=requested,
+                    routed_model=cached_session_tier,
+                    classification=None,
+                    applied=(cached_session_tier != requested),
+                    reason_code='affirmation_inherited',
+                    estimated_input_tokens=est_tokens,
+                    classifier_mode='affirmation',
+                )
             standard_tier = config.auto_model_routing_classification['standard']
             _capped = _cap_cached_tier(
                 standard_tier, routing_baseline,
@@ -1924,8 +1958,6 @@ def route_model(
             )
             use_json = getattr(config, 'auto_model_routing_confidence_bump', False)
             aff_system = _CLASSIFIER_SYSTEM_JSON if use_json else _CLASSIFIER_SYSTEM
-            if use_json and prior_response_summary is not None:
-                aff_system = aff_system + _CLASSIFIER_SYSTEM_JSON_PRIOR_SUFFIX
             clf_payload = {
                 CLASSIFIER_SENTINEL_KEY: True,
                 'model': config.auto_model_routing_classifier_model,
@@ -1961,7 +1993,7 @@ def route_model(
                     '%s Model router: affirmation score=%d (tier=%s) (requested=%s)',
                     log_tag, aff_score, aff_user_tier, requested,
                 )
-                # Apply weighted blend (ADR 0010) to produce the final tier.
+                # Apply weighted blend (anthproxy ADR 0010) to produce the final tier.
                 # Mode guard mirrors the main dispatch path: blend only in 'classifier'
                 # mode; 'rules' avoids LLM calls by design, 'tag' uses direct strings.
                 aff_effective_mode = (
@@ -2001,6 +2033,28 @@ def route_model(
                     _affirmation_inflight.discard(ctx_key)
 
         if aff_label is not None:
+            aff_reason: ReasonCode = 'affirmation_classified'
+            if reclassify_cached and cached_session_tier is not None:
+                aff_reason = 'affirmation_reclassified'
+                _LABEL_ORDER = {'trivial': 0, 'standard': 1, 'deep': 2}
+                label_map = config.auto_model_routing_classification
+                tier_ranks: dict[str, int] = {
+                    model: _LABEL_ORDER[label]
+                    for label, model in label_map.items()
+                    if label in _LABEL_ORDER
+                }
+                cached_rank = tier_ranks.get(
+                    cached_session_tier, model_tier_rank(cached_session_tier)
+                )
+                new_rank = (
+                    tier_ranks.get(aff_cache_tier, model_tier_rank(aff_cache_tier))
+                    if aff_cache_tier is not None
+                    else None
+                )
+                if (cached_rank is not None and new_rank is not None
+                        and cached_rank > new_rank):
+                    aff_routed = cached_session_tier
+                    aff_cache_tier = cached_session_tier
             payload['model'] = aff_routed
             return ModelRoutingDecision(
                 requested_model=requested,
@@ -2008,7 +2062,7 @@ def route_model(
                 cache_tier=aff_cache_tier,
                 classification=aff_label,
                 applied=(aff_routed != requested),
-                reason_code='affirmation_classified',
+                reason_code=aff_reason,
                 estimated_input_tokens=est_tokens,
                 classifier_mode='affirmation',
                 classifier_summary_json=aff_summary_json,
@@ -2085,7 +2139,7 @@ def route_model(
             classifier_stop_reason=clf_stop_reason,
         )
 
-    # --- Weighted blend (ADR 0010): applies in 'classifier' mode only.
+    # --- Weighted blend (anthproxy ADR 0010): applies in 'classifier' mode only.
     # For 'rules' mode the system-prompt classifier is not called —
     # 'rules' avoids LLM calls by design.
     blend_sys_tier: str | None = None
