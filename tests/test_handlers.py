@@ -1243,3 +1243,19 @@ def test_refused_absolute_form_post_with_a_large_body_still_gets_its_502(proxy, 
         {'model': 'sonnet', 'pad': 'x' * (4 * 1024 * 1024)})
     assert resp.status == 502
     assert resp.getheader('X-Anthrouter-Error') == 'forward-proxy-unsupported'
+
+
+def test_reclassified_affirmation_caches_the_uncapped_tier_under_a_lock():
+    """ADR-0021: a re-scored affirmation caches cache_tier, not the capped routed model."""
+    from types import SimpleNamespace
+
+    from anthrouter.handlers import ProxyRequestHandler
+
+    sessions = SessionState()
+    handler = SimpleNamespace(sessions=sessions)
+    routing = _decision(
+        requested_model='opus', routed_model='sonnet', classification='deep',
+        cache_tier='opus', reason_code='affirmation_reclassified')
+    tier_key = ('ctx', 'sonnet')
+    ProxyRequestHandler._apply_tier_cache(handler, routing, {}, tier_key, None)
+    assert sessions.routed_tier(tier_key) == 'opus'
