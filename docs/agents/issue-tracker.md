@@ -13,6 +13,8 @@ Issues and PRDs for this repo live as GitHub issues. Use the `gh` CLI for all op
 
 Infer the repo from `git remote -v` — `gh` does this automatically when run inside a clone.
 
+If `GH_HOST` is set to another host (for example an enterprise GitHub), `gh` cannot resolve this repo. Prefix `gh` with `GH_HOST=github.com` and pass `--repo nj4x/anthrouter`. A `git push` that returns 403 may be the same cause (the `gh` credential helper follows `GH_HOST`; unconfirmed): retry it with the prefix.
+
 ## Pull requests as a triage surface
 
 **PRs as a request surface: no.** _(Set to `yes` if this repo treats external PRs as feature requests; `/triage` reads this flag.)_
