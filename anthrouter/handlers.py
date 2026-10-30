@@ -1000,7 +1000,9 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         if routing.classification is not None:
             tier = (
                 routing.cache_tier or routing.routed_model
-                if routing.reason_code == 'affirmation_classified'
+                if routing.reason_code in (
+                    'affirmation_classified', 'affirmation_reclassified',
+                )
                 else routing.routed_model
             )
             self.sessions.set_routed_tier(tier_key, tier)
