@@ -1,10 +1,12 @@
+PYTHON := $(if $(wildcard .venv/bin/python),.venv/bin/python,python)
+
 .PHONY: lint test ui-build ui-test
 
 lint:
-	python -m ruff check .
+	$(PYTHON) -m ruff check .
 
 test:
-	python -m pytest tests/ -v
+	$(PYTHON) -m pytest tests/ -v
 
 ui-build:
 	cd anthrouter/ui && npm run build
