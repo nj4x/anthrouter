@@ -31,6 +31,7 @@ from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 
 from . import admin, interception
+from . import caveman_rewrite as _caveman
 from .db import compute_cost
 from .mapper import (
     CLASSIFIER_SENTINEL_KEY,
@@ -546,6 +547,106 @@ def _parse_query(query_string: str) -> dict:
     }
 
 
+_CAVEMAN_REWRITERS: dict = {}
+_CAVEMAN_REWRITERS_LOCK = threading.Lock()
+
+
+def _caveman_rewriter(config):
+    """One rewriter per (cache dir, timeout); shared across handler threads."""
+    key = (getattr(config, 'caveman_rewrite_dir', '') or '',
+           float(getattr(config, 'caveman_rewrite_timeout', _caveman.DEFAULT_TIMEOUT_SECS)))
+    with _CAVEMAN_REWRITERS_LOCK:
+        rw = _CAVEMAN_REWRITERS.get(key)
+        if rw is None:
+            rw = _caveman.CavemanRewriter(_caveman.RewriteCache(key[0] or None), timeout=key[1])
+            _CAVEMAN_REWRITERS[key] = rw
+        return rw
+
+
+def _system_content_str(system) -> str | None:
+    """Serialize a system prompt the way ``_extract_prompt_capture`` hashes it."""
+    if isinstance(system, str):
+        return system
+    if isinstance(system, list):
+        return json.dumps(system, sort_keys=True, ensure_ascii=False)
+    return None
+
+
+def _rewrite_caveman_system(handler, payload, target, credentials, prompt_capture):
+    """Rewrite contradicting communication guidance for caveman-mode requests (ADR-0022).
+
+    Runs after the sanitizer, on the system prompt and on the opening turn's
+    inline ``role:'system'`` messages as actually dispatched.  A security-monitor
+    request is skipped, like the sanitizer skips it (ADR-0017).  The editor call
+    goes through ``target.backend`` with the client's own credentials.  Never
+    raises: any fault dispatches the prompt unchanged.
+    """
+    handler._caveman_state = None
+    try:
+        config = target.config
+        if (getattr(config, 'caveman_rewrite', 'off') != 'on'
+                or _has_happy_new_year_system_prompt(payload)):
+            return
+        system = payload.get('system')
+        mode = _caveman.detect_mode(payload)
+        if not mode:
+            return
+
+        send_fn = (getattr(target.backend, 'send_classifier_message', None)
+                   or target.backend.send_message)
+
+        def call_model(editor_system, user):
+            response = send_fn({
+                'model': config.caveman_rewrite_model,
+                'max_tokens': _caveman._MAX_TOKENS,
+                'system': editor_system,
+                'messages': [{'role': 'user', 'content': user}],
+                CLASSIFIER_SENTINEL_KEY: True,
+            }, credentials, config)
+            content = response.get('content') if isinstance(response, dict) else None
+            return ''.join(
+                b.get('text', '') for b in (content or [])
+                if isinstance(b, dict) and b.get('type') == 'text'
+            )
+
+        rewriter = _caveman_rewriter(config)
+
+        def run(target_name, value):
+            result = rewriter.rewrite(value, mode, call_model)
+            changed = result.system != value
+            log = (logger.warning if result.outcome in ('error', 'timeout', 'rejected', 'busy')
+                   else logger.info)
+            log('%s Caveman rewrite: mode=%s target=%s outcome=%s edits=%d dispatched=%s',
+                handler._log_tag(), mode, target_name, result.outcome, result.edits,
+                'rewritten' if changed else 'original')
+            return result.system if changed else None
+
+        # Claude Code carries its output style in the opening turn's inline
+        # role:'system' messages, not in the system field.
+        blocks, where = _caveman.opening_system_blocks(payload)
+        new_blocks = run('messages', blocks) if blocks else None
+        handler._caveman_state = 'original'
+        if new_blocks is not None:
+            _caveman.write_opening_system_blocks(payload, where, new_blocks)
+            handler._caveman_state = 'rewritten'
+        new_system = run('system', system) if system else None
+        if new_system is None:
+            return
+        handler._caveman_state = 'rewritten'
+        payload['system'] = new_system
+        content = _system_content_str(new_system)
+        if content is not None:
+            digest = hashlib.sha256(content.encode('utf-8')).hexdigest()
+            # Own column, never the sanitizer's.
+            prompt_capture['system_prompt_caveman_sha256'] = digest
+            entries = prompt_capture.get('prompt_store_entries')
+            if isinstance(entries, dict):
+                entries[digest] = ('system', content)
+    except Exception:
+        logger.warning('%s Caveman rewrite failed; sending prompt unchanged',
+                       handler._log_tag(), exc_info=True)
+
+
 class ProxyRequestHandler(BaseHTTPRequestHandler):
     # Injected by the server factory.
     config = None
@@ -814,6 +915,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         self._routing = None
         self._prompt_capture = {}
         self._sanitizer_events = []
+        self._caveman_state = None
         self._ratelimit = {}
         self._attempt = {}
 
@@ -930,6 +1032,11 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
             }
             for block in sanitized.flagged
         ]
+        if not monitor:
+            _rewrite_caveman_system(
+                self, payload, RoutingTarget(config=self.config, backend=self.transport),
+                credentials, self._prompt_capture,
+            )
 
     def _route(self, payload: dict, sess_key: str | None, credentials: dict) -> None:
         """Apply the model lock, run ``route_model()`` and the session tier cache."""
@@ -1055,9 +1162,11 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
             'cache_read_tokens': usage.get('cache_read_input_tokens', 0),
         }
         self._record_session_context(stats)
+        response_text = _extract_response_text(result)
+        self._record_caveman_prose(response_text)
         self._record_db(
             sid, stats, int((time.monotonic() - start_time) * 1000), 'success',
-            response_text=_extract_response_text(result),
+            response_text=response_text,
         )
 
         routing = self._routing
@@ -1085,7 +1194,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
             'cache_creation_tokens': 0,
             'cache_read_tokens': 0,
         }
-        capture_text = self.request_db is not None
+        capture_text = self.request_db is not None or bool(getattr(self, '_caveman_state', None))
         text_parts: list[str] = []
         errored = False
         # An upstream failure raised out of the stream is delivered by _send_sse
@@ -1123,6 +1232,8 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
             if upstream_error is not None:
                 errored = True
             self._record_session_context(stats)
+            if not errored:
+                self._record_caveman_prose(''.join(text_parts))
             if upstream_error is not None:
                 db_stats: dict = {}
                 db_error: str | None = f'{upstream_error[0]} — {upstream_error[1]}'
@@ -1245,13 +1356,47 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         duration_ms = int((time.monotonic() - self._req_start) * 1000)
         self._record_db(sid, {}, duration_ms, status, error=error)
 
+    def _record_caveman_prose(self, text):
+        """Log the reply's article/copula rate for a caveman request (advisory)."""
+        caveman_state = getattr(self, '_caveman_state', None)
+        if not caveman_state or not text:
+            return
+        measured = _caveman.prose_rate(text)
+        if measured is None:
+            return
+        rate, words = measured
+        mean, other = _caveman.PROSE_TRACKER.record(
+            getattr(self, '_session_prefix', None) or '', caveman_state, rate,
+        )
+        logger.info(
+            '%s Caveman prose rate: %s=%.1f/100w (words=%d, mean=%.1f) %s=%s',
+            self._log_tag(), caveman_state, rate, words, mean,
+            'original' if caveman_state == 'rewritten' else 'rewritten',
+            'n/a' if other is None else f'{other:.1f}',
+        )
+
     def _record_session_context(self, stats: dict) -> None:
         """Store the measured context size and refreshed calibration ratio.
 
         A zero measurement (e.g. an early client disconnect) is skipped so it
-        cannot wrongly reset a real floor.
+        cannot wrongly reset a real floor.  The caveman cache-read ratio is
+        logged first: it applies even when no context floor is tracked.
         """
-        ctx_key = self._ctx_key
+        caveman_state = getattr(self, '_caveman_state', None)
+        if caveman_state:
+            ratio, other = _caveman.RATIO_TRACKER.record(
+                getattr(self, '_session_prefix', None) or '', caveman_state,
+                int(stats.get('input_tokens') or 0),
+                int(stats.get('cache_creation_tokens') or 0),
+                int(stats.get('cache_read_tokens') or 0),
+            )
+            logger.info(
+                '%s Caveman prompt-cache read ratio: %s=%.3f %s=%s',
+                self._log_tag(), caveman_state, ratio,
+                'original' if caveman_state == 'rewritten' else 'rewritten',
+                'n/a' if other is None else f'{other:.3f}',
+            )
+        ctx_key = getattr(self, '_ctx_key', None)
         if not ctx_key:
             return
         measured_input = (

@@ -5,7 +5,7 @@ import sqlite3
 
 import pytest
 
-from anthrouter.db import RequestDB, compute_cache_savings, compute_cost
+from anthrouter.db import _MIGRATIONS, RequestDB, compute_cache_savings, compute_cost
 
 
 @dataclasses.dataclass
@@ -57,8 +57,8 @@ def _record(store, **kwargs):
 # Schema
 # ---------------------------------------------------------------------------
 
-def test_schema_version_is_four(db):
-    assert db._conn.execute('PRAGMA user_version').fetchone()[0] == 4
+def test_schema_version_is_five(db):
+    assert db._conn.execute('PRAGMA user_version').fetchone()[0] == 5
 
 
 def _requests_columns(conn):
@@ -82,7 +82,7 @@ def test_version_3_db_gains_stop_reason_column_on_open(tmp_path):
 
     store = RequestDB(path)
     assert 'classifier_stop_reason' in _requests_columns(store._conn)
-    assert store._conn.execute('PRAGMA user_version').fetchone()[0] == 4
+    assert store._conn.execute('PRAGMA user_version').fetchone()[0] == 5
     store.close()
 
 
@@ -95,7 +95,7 @@ def test_migration_survives_column_already_present_at_version_3(tmp_path):
     _make_version_3_db(path, keep_column=True)
 
     store = RequestDB(path)
-    assert store._conn.execute('PRAGMA user_version').fetchone()[0] == 4
+    assert store._conn.execute('PRAGMA user_version').fetchone()[0] == 5
     assert 'classifier_stop_reason' in _requests_columns(store._conn)
     store.close()
 
@@ -314,6 +314,50 @@ def test_distinct_hashes_each_count_once(db):
     assert db.get_prompt('aaa')['ref_count'] == 1
     assert db.get_prompt('bbb')['ref_count'] == 1
     assert db.get_prompt('ccc')['ref_count'] == 1
+
+
+def test_caveman_hash_counts_once_alongside_other_columns(db):
+    _record(
+        db,
+        system_prompt_sha256='aaa',
+        system_prompt_sanitized_sha256='aaa',
+        system_prompt_caveman_sha256='ddd',
+        prompt_store_entries={
+            'aaa': ('system', 'original'),
+            'ddd': ('system', 'rewritten'),
+        },
+    )
+    assert db.get_prompt('aaa')['ref_count'] == 1
+    assert db.get_prompt('ddd')['ref_count'] == 1
+
+
+def test_deleting_a_request_releases_the_caveman_reference(db):
+    request_id = _record(
+        db, system_prompt_caveman_sha256='ddd',
+        prompt_store_entries={'ddd': ('system', 'rewritten')},
+    )
+    assert db.get_request(request_id)['system_prompt_caveman_sha256'] == 'ddd'
+    with db._conn:
+        db._conn.execute('DELETE FROM requests WHERE id = ?', (request_id,))
+    assert db.get_prompt('ddd')['ref_count'] == 0
+
+
+def test_version_4_db_gains_caveman_column_and_triggers(tmp_path):
+    path = str(tmp_path / 'v4.db')
+    raw = sqlite3.connect(path)
+    for v in range(4):
+        _MIGRATIONS[v](raw)
+    raw.execute('PRAGMA user_version = 4')
+    raw.commit()
+    raw.close()
+
+    store = RequestDB(path)
+    assert 'system_prompt_caveman_sha256' in _requests_columns(store._conn)
+    assert store._conn.execute('PRAGMA user_version').fetchone()[0] == 5
+    _record(store, system_prompt_caveman_sha256='ddd',
+            prompt_store_entries={'ddd': ('system', 'rewritten')})
+    assert store.get_prompt('ddd')['ref_count'] == 1
+    store.close()
 
 
 def test_deleting_a_request_decrements_the_reference(db):

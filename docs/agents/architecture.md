@@ -4,7 +4,7 @@ anthrouter's request handling is built on a few linked concerns: routing request
 
 ## Request path (`anthrouter/handlers.py`)
 
-One inbound `/v1/messages` request walks, in order: local-command interception → model-tier routing → system-prompt sanitization → upstream dispatch (`AnthropicTransport`) → single-pass SSE/JSON usage-and-text extraction → DB record → response, with the client's originally-requested model name echoed back regardless of what was actually routed to.
+One inbound `/v1/messages` request walks, in order: local-command interception → model-tier routing → system-prompt sanitization → caveman rewrite → upstream dispatch (`AnthropicTransport`) → single-pass SSE/JSON usage-and-text extraction → DB record → response, with the client's originally-requested model name echoed back regardless of what was actually routed to.
 
 There is no handler-level retry. `AnthropicTransport` already retries 429s (honoring upstream retry timing) and 5xx in-connection; with one backend there's nowhere else for a failed request to go. This means the routing decision and the prompt-hash pair are derived exactly once per request — no stash/restore across attempts.
 
@@ -34,6 +34,10 @@ The sentinel mechanics behind that contract: classifier payloads carry `_anthpro
 ## Sanitizer (`anthrouter/sanitizer.py`, `prompt_volatility.py`)
 
 `sanitize_system_prompt()` runs once per attempt, after hashing the client's system prompt and before dispatch. In `strip` mode it removes allowlisted volatile blocks (e.g. a per-request billing header that invalidates the cached prefix every turn); `warn` only logs; `off` is inert. The pre-strip hash is always what gets recorded as "the prompt as the client sent it" — the sanitized hash is separate and NULL means "sanitizer didn't run," not "found nothing." An unrecognized volatile block is flagged but never silently dropped.
+
+## Caveman rewrite (`anthrouter/caveman_rewrite.py`, ADR-0022)
+
+`_rewrite_caveman_system` runs in `_prepare` right after the sanitizer, only when the opening turn carries `CAVEMAN MODE ACTIVE — level: <level>`, and never for a security-monitor request. It asks `--caveman-rewrite-model` for `{find, replace}` ops confined to communication/tone sections of `system` and of the opening turn's inline `role:'system'` messages, through `self.transport` with the client's own credentials (billed to the client's key). The result is cached in memory and on disk, byte-stable across restarts; any failure dispatches the prompt unchanged. The rewritten `system` hash goes to `system_prompt_caveman_sha256`, never to the sanitized column, and the `prompt_store` ref-count triggers count it.
 
 ## Host interception (`anthrouter/interception.py`, ADR-0018/0019/0020)
 
