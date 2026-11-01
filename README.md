@@ -66,6 +66,22 @@ Settings live in `~/.anthrouter/config.env` (every one has a matching flag; see
 `~/.anthrouter/anthrouter.db`, and the admin UI is at
 <http://127.0.0.1:8083/ui/>.
 
+### Caveman rewrite
+
+`--caveman-rewrite` (env: `ANTHROUTER_CAVEMAN_REWRITE`, default `on`) acts on
+requests whose opening turn (every user or inline system message before the
+first assistant reply) carries the caveman-kit header
+`CAVEMAN MODE ACTIVE — level: <level>`. It asks `--caveman-rewrite-model`
+(default `claude-sonnet-5-5`) for edit ops that remove communication guidance
+contradicting the terse mode, and accepts them only when every edit falls inside
+a communication/tone section, never in the caveman ruleset itself. **The editor
+call is sent with your own credentials and billed to your key**, like the
+routing classifier; later requests for the same prompt hit the cache. The
+rewrite is cached in memory and under `--caveman-rewrite-dir` (default
+`~/.anthrouter/rewrites`), so it stays byte-stable across restarts. Model
+errors, timeouts (`--caveman-rewrite-timeout`, default 30 s) and invalid edits
+send the prompt unchanged. See `docs/adr/0022-caveman-system-prompt-rewrite.md`.
+
 ## Uninstall
 
 ```bash

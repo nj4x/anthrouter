@@ -27,7 +27,9 @@ CONNECT_PROXY_HOSTS = frozenset({'127.0.0.1', '::1', 'localhost'})
 # (CLI/env only, ADR-0018: a runtime toggle that opens a tunnel endpoint does
 # not belong behind the admin token),
 # interception_ca_sources (CLI/env only, ADR-0020: an admin-API write must not
-# add trust roots that every Node process in the shell then accepts)
+# add trust roots that every Node process in the shell then accepts),
+# caveman_rewrite_timeout, caveman_rewrite_dir (CLI/env only, ADR-0022: they
+# key the process-wide rewriter instance and its disk cache)
 EDITABLE_FIELDS: dict[str, bool] = {
     # Live-editable (applies immediately)
     'auto_model_routing_classification': False,
@@ -57,6 +59,8 @@ EDITABLE_FIELDS: dict[str, bool] = {
     'auto_model_routing_system_prompt_preview_limit': False,
     'lock_requested_model': False,
     'sanitize_system_prompt': False,
+    'caveman_rewrite': False,
+    'caveman_rewrite_model': False,
     'sse_keepalive_interval': False,
     'db_retention_days': False,
     'oauth_usage_timezone': True,
@@ -201,6 +205,17 @@ FIELD_METADATA: dict[str, dict] = {
         'description': 'Handle cache-hostile volatile blocks in the inbound system prompt: "strip" removes allowlisted telemetry blocks, "warn" only detects and warns, "off" disables both.',
         'type': 'str',
         'enum': ['off', 'warn', 'strip'],
+        'group': 'Prompt Sanitization',
+    },
+    'caveman_rewrite': {
+        'description': 'For caveman-mode requests, rewrite communication guidance in the system prompt that contradicts the caveman style; any failure sends the prompt unchanged. The editor call is billed to the client credential.',
+        'type': 'str',
+        'enum': ['on', 'off'],
+        'group': 'Prompt Sanitization',
+    },
+    'caveman_rewrite_model': {
+        'description': 'Model that proposes the caveman rewrite edit ops.',
+        'type': 'str',
         'group': 'Prompt Sanitization',
     },
     # === Database ===
@@ -385,6 +400,10 @@ class Config:
     auto_model_routing_system_prompt_preview_limit: int = 500
     lock_requested_model: str = 'off'   # Model baseline lock for routing; 'off' disables
     sanitize_system_prompt: str = 'strip'  # off | warn | strip
+    caveman_rewrite: str = 'on'  # on | off — see docs/adr/0022
+    caveman_rewrite_model: str = 'claude-sonnet-5-5'
+    caveman_rewrite_timeout: float = 30.0
+    caveman_rewrite_dir: str = ''  # '' resolves to <anthrouter_home>/rewrites
     sse_keepalive_interval: float = 10.0
     db_path: str | None = None   # Path to SQLite DB file; None disables DB recording
     db_retention_days: int = 30  # Prune request rows older than this; 0 keeps forever
@@ -433,6 +452,12 @@ def validate_config(cfg: Config) -> list[str]:
     sanitize_meta = FIELD_METADATA.get('sanitize_system_prompt', {})
     if sanitize_meta.get('enum') and cfg.sanitize_system_prompt not in sanitize_meta['enum']:
         errors.append(f"sanitize_system_prompt must be one of {sanitize_meta['enum']}, got {cfg.sanitize_system_prompt!r}")
+
+    caveman_meta = FIELD_METADATA.get('caveman_rewrite', {})
+    if caveman_meta.get('enum') and cfg.caveman_rewrite not in caveman_meta['enum']:
+        errors.append(f"caveman_rewrite must be one of {caveman_meta['enum']}, got {cfg.caveman_rewrite!r}")
+    if not str(cfg.caveman_rewrite_model or '').strip():
+        errors.append('caveman_rewrite_model must be non-empty')
     
     # Numeric bounds: auto_model_routing_min_confidence [0, 1]
     min_conf_meta = FIELD_METADATA.get('auto_model_routing_min_confidence', {})
@@ -763,6 +788,28 @@ def parse_args(argv=None) -> Config:
                         ' unrecognised volatile blocks; "warn" only detects and warns;'
                         ' "off" disables both (default: strip,'
                         ' env: ANTHROUTER_SANITIZE_SYSTEM_PROMPT)')
+    p.add_argument('--caveman-rewrite', dest='caveman_rewrite',
+                   default=os.environ.get('ANTHROUTER_CAVEMAN_REWRITE', 'on'),
+                   choices=['on', 'off'],
+                   help='For requests whose opening turn carries the caveman-kit header'
+                        ' (CAVEMAN MODE ACTIVE — level: X), ask --caveman-rewrite-model for edit'
+                        ' ops that remove contradicting communication guidance from the system'
+                        ' prompt, confined to communication/tone sections; the result is cached'
+                        ' byte-stable on disk. The editor call is billed to the client credential.'
+                        ' Any failure sends the prompt unchanged'
+                        ' (default: on, env: ANTHROUTER_CAVEMAN_REWRITE)')
+    p.add_argument('--caveman-rewrite-model', dest='caveman_rewrite_model',
+                   default=os.environ.get('ANTHROUTER_CAVEMAN_REWRITE_MODEL', 'claude-sonnet-5-5'),
+                   help='Model that proposes caveman rewrite edit ops'
+                        ' (default: claude-sonnet-5-5, env: ANTHROUTER_CAVEMAN_REWRITE_MODEL)')
+    p.add_argument('--caveman-rewrite-timeout', dest='caveman_rewrite_timeout', type=float,
+                   default=float(os.environ.get('ANTHROUTER_CAVEMAN_REWRITE_TIMEOUT', '30')),
+                   help='Seconds to wait for the edit-op model before sending the prompt unchanged'
+                        ' (default: 30, env: ANTHROUTER_CAVEMAN_REWRITE_TIMEOUT)')
+    p.add_argument('--caveman-rewrite-dir', dest='caveman_rewrite_dir',
+                   default=os.environ.get('ANTHROUTER_CAVEMAN_REWRITE_DIR', ''),
+                   help='Disk cache for rewritten prompts'
+                        ' (default: <anthrouter home>/rewrites, env: ANTHROUTER_CAVEMAN_REWRITE_DIR)')
     p.add_argument('--sse-keepalive-interval', dest='sse_keepalive_interval', type=float,
                    default=float(os.environ.get('ANTHROUTER_SSE_KEEPALIVE_INTERVAL', '10.0')),
                    help='Seconds between SSE keepalive comment lines (": keepalive\\n\\n") sent to'
@@ -933,6 +980,8 @@ def parse_args(argv=None) -> Config:
     cfg.anthrouter_home = _resolve_home(cfg.anthrouter_home)
     if not cfg.interception_tls_dir.strip():
         cfg.interception_tls_dir = str(Path(cfg.anthrouter_home) / 'tls')
+    if not cfg.caveman_rewrite_dir.strip():
+        cfg.caveman_rewrite_dir = str(Path(cfg.anthrouter_home) / 'rewrites')
     if cfg.enable_ui and cfg.db_path is None:
         cfg.db_path = str(Path(cfg.anthrouter_home) / 'anthrouter.db')
 

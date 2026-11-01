@@ -31,7 +31,7 @@ from .model_tier import classify_model_tier
 
 logger = logging.getLogger(__name__)
 
-_SCHEMA_VERSION = 4
+_SCHEMA_VERSION = 5
 
 _RETENTION_INTERVAL_SECS = 24 * 3600
 _RETENTION_CHUNK = 1000
@@ -176,11 +176,48 @@ def _apply_migration_3(conn: sqlite3.Connection) -> None:
         conn.execute('ALTER TABLE requests ADD COLUMN classifier_stop_reason TEXT')
 
 
+def _apply_migration_4(conn: sqlite3.Connection) -> None:
+    """Add the caveman-rewrite system-prompt hash (v4 → v5, ADR-0022).
+
+    Kept apart from ``system_prompt_sanitized_sha256`` so that column still
+    means "sanitizer output".  NULL means the rewrite did not change the
+    dispatched prompt.  The rewritten content is stored in ``prompt_store``
+    as ``content_type='system'``, which the existing CHECK already allows, so
+    the table is not rebuilt.  Both ref-count triggers are recreated to count
+    the new column; a missed column would leak or prematurely prune its row.
+    The column-exists guard follows ``_apply_migration_3``.
+    """
+    columns = {row[1] for row in conn.execute('PRAGMA table_info(requests)')}
+    if 'system_prompt_caveman_sha256' not in columns:
+        conn.execute('ALTER TABLE requests ADD COLUMN system_prompt_caveman_sha256 TEXT')
+    conn.execute('DROP TRIGGER IF EXISTS trg_requests_refcount_ai')
+    conn.execute('DROP TRIGGER IF EXISTS trg_requests_refcount_ad')
+    conn.execute("""CREATE TRIGGER trg_requests_refcount_ai AFTER INSERT ON requests BEGIN
+        UPDATE prompt_store SET ref_count = ref_count + 1
+        WHERE content_hash IN (
+            SELECT new.system_prompt_sha256
+            UNION SELECT new.system_prompt_sanitized_sha256
+            UNION SELECT new.system_prompt_caveman_sha256
+            UNION SELECT new.tools_sha256
+        );
+    END""")
+    conn.execute("""CREATE TRIGGER trg_requests_refcount_ad AFTER DELETE ON requests BEGIN
+        UPDATE prompt_store SET ref_count = ref_count - 1
+        WHERE content_hash IN (
+            SELECT old.system_prompt_sha256
+            UNION SELECT old.system_prompt_sanitized_sha256
+            UNION SELECT old.system_prompt_caveman_sha256
+            UNION SELECT old.tools_sha256
+        );
+    END""")
+
+
 _MIGRATIONS = {
     0: _apply_migration_0,
     1: _apply_migration_1,
     2: _apply_migration_2,
     3: _apply_migration_3,
+    4: _apply_migration_4,
 }
 
 
@@ -277,6 +314,7 @@ class RequestDB:
         response_text: str | None = None,
         system_prompt_sha256: str | None = None,
         system_prompt_sanitized_sha256: str | None = None,
+        system_prompt_caveman_sha256: str | None = None,
         tools_sha256: str | None = None,
         prompt_store_entries: dict[str, tuple[str, str]] | None = None,
         sanitizer_events: list[dict] | None = None,
@@ -329,10 +367,10 @@ class RequestDB:
                     ratelimit_tokens_remaining, ratelimit_input_tokens_remaining,
                     ratelimit_output_tokens_remaining, ratelimit_reset_at,
                     system_prompt_score, user_prompt_score, routing_weighted_score,
-                    classifier_stop_reason
+                    classifier_stop_reason, system_prompt_caveman_sha256
                 ) VALUES (
                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                 )
                 """,
                 (
@@ -374,6 +412,7 @@ class RequestDB:
                     getattr(routing_decision, 'user_prompt_score', None),
                     getattr(routing_decision, 'routing_weighted_score', None),
                     routing_decision.classifier_stop_reason,
+                    system_prompt_caveman_sha256,
                 ),
             )
             request_id: int = cur.lastrowid

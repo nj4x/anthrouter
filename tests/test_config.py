@@ -203,6 +203,8 @@ def test_editable_fields_live_editable_fields():
         'auto_model_routing_classifier_max_retries',
         'lock_requested_model',
         'sanitize_system_prompt',
+        'caveman_rewrite',
+        'caveman_rewrite_model',
         'sse_keepalive_interval',
         'db_retention_days',
         'auto_model_routing_classification',
@@ -789,3 +791,29 @@ def test_classifier_max_retries_in_field_metadata():
     assert meta['max'] == 4
     assert meta['group'] == 'Model Routing'
     assert 'description' in meta
+
+
+def test_caveman_rewrite_defaults(tmp_path, monkeypatch):
+    monkeypatch.setenv('ANTHROUTER_HOME', str(tmp_path))
+    cfg = parse_args([])
+    assert cfg.caveman_rewrite == 'on'
+    assert cfg.caveman_rewrite_model == 'claude-sonnet-5-5'
+    assert cfg.caveman_rewrite_timeout == 30.0
+    assert cfg.caveman_rewrite_dir == str(tmp_path / 'rewrites')
+
+
+def test_caveman_rewrite_env_vars(tmp_path, monkeypatch):
+    monkeypatch.setenv('ANTHROUTER_CAVEMAN_REWRITE', 'off')
+    monkeypatch.setenv('ANTHROUTER_CAVEMAN_REWRITE_MODEL', 'claude-haiku-5-5')
+    monkeypatch.setenv('ANTHROUTER_CAVEMAN_REWRITE_TIMEOUT', '5')
+    monkeypatch.setenv('ANTHROUTER_CAVEMAN_REWRITE_DIR', str(tmp_path / 'rw'))
+    cfg = parse_args([])
+    assert cfg.caveman_rewrite == 'off'
+    assert cfg.caveman_rewrite_model == 'claude-haiku-5-5'
+    assert cfg.caveman_rewrite_timeout == 5.0
+    assert cfg.caveman_rewrite_dir == str(tmp_path / 'rw')
+
+
+def test_caveman_rewrite_rejects_unknown_value():
+    with pytest.raises(SystemExit):
+        parse_args(['--caveman-rewrite', 'maybe'])

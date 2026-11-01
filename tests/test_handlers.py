@@ -1259,3 +1259,29 @@ def test_reclassified_affirmation_caches_the_uncapped_tier_under_a_lock():
     tier_key = ('ctx', 'sonnet')
     ProxyRequestHandler._apply_tier_cache(handler, routing, {}, tier_key, None)
     assert sessions.routed_tier(tier_key) == 'opus'
+
+
+def test_caveman_request_dispatches_rewritten_system_and_records_hash(proxy, upstream, tmp_path):
+    prompt = ('# Tone and style\n'
+              'Write in complete, grammatical sentences with articles.\n'
+              'Use markdown links for files.\n')
+    ops = [{'find': 'Write in complete, grammatical sentences with articles.\n', 'replace': ''}]
+    _FakeUpstream.json_body = {
+        'id': 'msg_up', 'type': 'message', 'role': 'assistant',
+        'content': [{'type': 'text', 'text': json.dumps(ops)}],
+        'usage': {'input_tokens': 100, 'output_tokens': 7},
+    }
+    server = proxy(caveman_rewrite='on', caveman_rewrite_dir=str(tmp_path / 'rw'))
+    post(server, '/v1/messages', {
+        'model': 'sonnet', 'system': prompt, 'metadata': {'user_id': SESSION},
+        'messages': [{'role': 'user', 'content': 'CAVEMAN MODE ACTIVE — level: ultra\nhi'}]})
+
+    editor, main = _FakeUpstream.received
+    assert editor['payload']['model'] == 'claude-sonnet-5-5'
+    assert CLASSIFIER_SENTINEL_KEY not in editor['payload']
+    assert editor['headers']['x-api-key'] == 'sk-test'
+    assert main['payload']['system'] == prompt.replace(ops[0]['find'], '')
+    row = db_rows(server)[0]
+    assert row['system_prompt_caveman_sha256']
+    stored = server.RequestHandlerClass.request_db.get_prompt(row['system_prompt_caveman_sha256'])
+    assert stored['content'] == main['payload']['system']
