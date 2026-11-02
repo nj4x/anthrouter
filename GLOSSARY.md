@@ -42,6 +42,9 @@ _Avoid_: Linear mode, uniform mode
 **Volatile block**: A system-prompt segment (e.g. a per-request billing header) that changes every turn and defeats prompt caching; the sanitizer optionally strips these before upstream dispatch.
 _Avoid_: Dynamic block, ephemeral block
 
+**Attribution reminder**: The `<system-reminder>` Claude Code adds to user messages, opening `Attribution for git commits and pull requests`, that asks for `Co-Authored-By` and `Generated with` lines; stripped after sanitization, matched by that opening only (ADR-0023).
+_Avoid_: Attribution block
+
 **Caveman rewrite**: The stage after sanitization that, for a request whose opening turn carries the caveman-kit header, removes communication guidance contradicting the terse mode from the system prompt and the opening turn's inline system messages (ADR-0022).
 
 **Communication section**: A markdown section whose heading matches the tone/style/output keyword set; the only place a caveman rewrite edit may land. A caveman ruleset section is never one.

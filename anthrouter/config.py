@@ -59,6 +59,7 @@ EDITABLE_FIELDS: dict[str, bool] = {
     'auto_model_routing_system_prompt_preview_limit': False,
     'lock_requested_model': False,
     'sanitize_system_prompt': False,
+    'strip_attribution_reminder': False,
     'caveman_rewrite': False,
     'caveman_rewrite_model': False,
     'sse_keepalive_interval': False,
@@ -205,6 +206,12 @@ FIELD_METADATA: dict[str, dict] = {
         'description': 'Handle cache-hostile volatile blocks in the inbound system prompt: "strip" removes allowlisted telemetry blocks, "warn" only detects and warns, "off" disables both.',
         'type': 'str',
         'enum': ['off', 'warn', 'strip'],
+        'group': 'Prompt Sanitization',
+    },
+    'strip_attribution_reminder': {
+        'description': 'Remove the Claude Code <system-reminder> that tells the agent to end commits with Co-Authored-By and PR descriptions with "Generated with", matched only by its opening text "Attribution for git commits and pull requests".',
+        'type': 'str',
+        'enum': ['on', 'off'],
         'group': 'Prompt Sanitization',
     },
     'caveman_rewrite': {
@@ -400,6 +407,7 @@ class Config:
     auto_model_routing_system_prompt_preview_limit: int = 500
     lock_requested_model: str = 'off'   # Model baseline lock for routing; 'off' disables
     sanitize_system_prompt: str = 'strip'  # off | warn | strip
+    strip_attribution_reminder: str = 'on'  # on | off — see docs/adr/0023
     caveman_rewrite: str = 'on'  # on | off — see docs/adr/0022
     caveman_rewrite_model: str = 'claude-sonnet-5-5'
     caveman_rewrite_timeout: float = 30.0
@@ -452,6 +460,10 @@ def validate_config(cfg: Config) -> list[str]:
     sanitize_meta = FIELD_METADATA.get('sanitize_system_prompt', {})
     if sanitize_meta.get('enum') and cfg.sanitize_system_prompt not in sanitize_meta['enum']:
         errors.append(f"sanitize_system_prompt must be one of {sanitize_meta['enum']}, got {cfg.sanitize_system_prompt!r}")
+
+    strip_meta = FIELD_METADATA.get('strip_attribution_reminder', {})
+    if strip_meta.get('enum') and cfg.strip_attribution_reminder not in strip_meta['enum']:
+        errors.append(f"strip_attribution_reminder must be one of {strip_meta['enum']}, got {cfg.strip_attribution_reminder!r}")
 
     caveman_meta = FIELD_METADATA.get('caveman_rewrite', {})
     if caveman_meta.get('enum') and cfg.caveman_rewrite not in caveman_meta['enum']:
@@ -788,6 +800,13 @@ def parse_args(argv=None) -> Config:
                         ' unrecognised volatile blocks; "warn" only detects and warns;'
                         ' "off" disables both (default: strip,'
                         ' env: ANTHROUTER_SANITIZE_SYSTEM_PROMPT)')
+    p.add_argument('--strip-attribution-reminder', dest='strip_attribution_reminder',
+                   default=os.environ.get('ANTHROUTER_STRIP_ATTRIBUTION_REMINDER', 'on'),
+                   choices=['on', 'off'],
+                   help='Remove the Claude Code <system-reminder> that tells the agent to end'
+                        ' commits with Co-Authored-By and PR descriptions with "Generated with",'
+                        ' matched by its opening text "Attribution for git commits and pull'
+                        ' requests" (default: on, env: ANTHROUTER_STRIP_ATTRIBUTION_REMINDER)')
     p.add_argument('--caveman-rewrite', dest='caveman_rewrite',
                    default=os.environ.get('ANTHROUTER_CAVEMAN_REWRITE', 'on'),
                    choices=['on', 'off'],

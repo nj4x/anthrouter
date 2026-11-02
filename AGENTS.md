@@ -20,7 +20,7 @@ See `docs/agents/build-and-test.md` for UI testing and live development.
 
 ## Request path
 
-One inbound `/v1/messages` request walks, in order: local-command interception → model-tier routing → system-prompt sanitization → caveman rewrite → upstream dispatch (`AnthropicTransport`) → single-pass SSE/JSON usage-and-text extraction → DB record → response, with the client's originally-requested model name echoed back regardless of what was actually routed to. See `docs/agents/architecture.md` for full details.
+One inbound `/v1/messages` request walks, in order: local-command interception → model-tier routing → system-prompt sanitization → attribution-reminder strip → caveman rewrite → upstream dispatch (`AnthropicTransport`) → single-pass SSE/JSON usage-and-text extraction → DB record → response, with the client's originally-requested model name echoed back regardless of what was actually routed to. See `docs/agents/architecture.md` for full details.
 
 Routing failures always fail closed to the originally-requested model — never fail open to a more expensive or more permissive tier.
 

@@ -4,6 +4,8 @@ Both ``anthproxy.handlers`` (local-command matching) and ``anthproxy.model_route
 (complexity classification) need to strip ``<system-reminder>`` and ``<transcript>``
 blocks injected by the Claude Code CLI before inspecting the final user message.
 This module owns the regexes and the stripping logic so both callers stay in sync.
+It also owns ``strip_attribution_reminders``, which rewrites outbound user messages
+(ADR-0023).
 """
 
 import re
@@ -243,3 +245,93 @@ def last_transcript_user_turn(text: str) -> str:
     # something recent to classify on.
     tail = inner.strip()
     return tail[-_TRANSCRIPT_FALLBACK_LIMIT:]
+
+
+# Opening text of the reminder Claude Code appends to user messages to make the
+# agent end commits with ``Co-Authored-By`` and PR bodies with ``Generated with``.
+# Matched by this exact opening only: the user's own CLAUDE.md and memory also
+# arrive as ``<system-reminder>`` blocks and may mention those strings.
+# Additions are deliberate code changes, not configuration (ADR-0023).
+ATTRIBUTION_REMINDER_PREFIX = 'Attribution for git commits and pull requests'
+
+# A closed span whose body starts with the prefix.  The body may not contain
+# another opener, so an unclosed attribution reminder never runs on into the
+# next reminder's closing tag: it does not match at all (fail open).
+# Only the tags are case-insensitive; the prefix is matched exactly.  The
+# opener's attribute scan is bounded so a run of unterminated openers stays linear.
+_ATTRIBUTION_REMINDER_RE = re.compile(
+    r'(?i:<system-reminder(?=[\s>])[^>]{0,512}>)\s*' + re.escape(ATTRIBUTION_REMINDER_PREFIX)
+    + r'(?:(?!(?i:<system-reminder(?=[\s>]))).)*?(?i:</system-reminder\s*>)',
+    re.DOTALL,
+)
+
+
+def _is_blank_text_block(block):
+    return (isinstance(block, dict) and block.get('type') == 'text'
+            and isinstance(block.get('text'), str) and not block['text'].strip())
+
+
+def _strip_attribution_content(content):
+    """Return ``(content, removed)`` for one user message's content."""
+    if isinstance(content, str):
+        new, n = _ATTRIBUTION_REMINDER_RE.subn('', content)
+        if not n or not new.strip():
+            # Empty user content is rejected upstream; keep the message whole.
+            return content, 0
+        return new, n
+    if not isinstance(content, list):
+        return content, 0
+    removed = 0
+    blocks = []
+    for block in content:
+        text = block.get('text') if isinstance(block, dict) and block.get('type') == 'text' else None
+        if not isinstance(text, str):
+            blocks.append(block)
+            continue
+        new, n = _ATTRIBUTION_REMINDER_RE.subn('', text)
+        if not n:
+            blocks.append(block)
+            continue
+        if new.strip():
+            blocks.append({**block, 'text': new})
+            removed += n
+            continue
+        # The block held only the reminder: drop it, moving any cache
+        # breakpoint to the preceding block so the cached prefix keeps it.
+        cache_control = block.get('cache_control')
+        if cache_control is not None:
+            if not blocks or not isinstance(blocks[-1], dict) or 'cache_control' in blocks[-1]:
+                blocks.append(block)
+                continue
+            blocks[-1] = {**blocks[-1], 'cache_control': cache_control}
+        removed += n
+    if not removed or not any(not _is_blank_text_block(b) for b in blocks):
+        # Nothing removed, or removal would leave only blank text (rejected
+        # upstream): keep the message whole.
+        return content, 0
+    return blocks, removed
+
+
+def strip_attribution_reminders(messages):
+    """Remove the attribution ``<system-reminder>`` from every user message.
+
+    Returns ``(messages, removed)``.  The original list is returned unchanged
+    when nothing matched; otherwise a new list with new message dicts for the
+    changed messages.  Only top-level text of ``role:'user'`` messages is
+    scanned; ``tool_result`` content and ``role:'system'`` messages are not.
+    A message the removal would leave with only blank text is kept unchanged,
+    and a dropped block's ``cache_control`` moves to the block before it
+    (ADR-0023).
+    """
+    if not isinstance(messages, list):
+        return messages, 0
+    removed = 0
+    result = []
+    for msg in messages:
+        if isinstance(msg, dict) and msg.get('role') == 'user':
+            content, n = _strip_attribution_content(msg.get('content'))
+            if n:
+                removed += n
+                msg = {**msg, 'content': content}
+        result.append(msg)
+    return (result, removed) if removed else (messages, 0)

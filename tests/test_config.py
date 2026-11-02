@@ -203,6 +203,7 @@ def test_editable_fields_live_editable_fields():
         'auto_model_routing_classifier_max_retries',
         'lock_requested_model',
         'sanitize_system_prompt',
+        'strip_attribution_reminder',
         'caveman_rewrite',
         'caveman_rewrite_model',
         'sse_keepalive_interval',
