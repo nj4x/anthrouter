@@ -87,11 +87,19 @@ def test_leading_whitespace_still_matches():
     assert stripped is True
 
 
-def test_all_blocks_volatile_yields_empty_list():
-    system = [_block(BILLING)]
+def test_all_blocks_volatile_are_kept():
+    """A billing-only system field is the request's sole marker (ADR-0025)."""
+    for system in ([_block(BILLING)], [_block(BILLING), _block(BILLING)]):
+        result, stripped = strip_volatile_system_blocks(system)
+        assert stripped is False
+        assert result is system
+
+
+def test_billing_block_is_stripped_beside_any_non_identity_block():
+    system = [_block(BILLING), _block('You are a helpful bot.')]
     result, stripped = strip_volatile_system_blocks(system)
     assert stripped is True
-    assert result == []
+    assert result == [_block('You are a helpful bot.')]
 
 
 def test_cache_control_is_preserved_on_surviving_blocks():
@@ -357,6 +365,24 @@ def test_strip_mode_with_nothing_to_strip_still_records_sanitized_hash():
     assert result.dropped == 0
 
 
+def test_strip_mode_keeps_billing_only_system_and_logs_why(caplog):
+    system = [_block(BILLING)]
+    with caplog.at_level('INFO', logger='anthrouter.sanitizer'):
+        payload, result, original = _run('strip', system=system, session='seam-billing-only')
+    assert payload['system'] == [_block(BILLING)]
+    assert result.dropped == 0
+    assert result.stripped_blocks == []
+    assert result.sanitized_sha256 == original
+    assert 'stripping would empty the system prompt' in caplog.text
+
+
+def test_kept_line_is_not_logged_when_stripping_or_nothing_matches(caplog):
+    with caplog.at_level('INFO', logger='anthrouter.sanitizer'):
+        _run('strip', session='seam-kept-neg-1')
+        _run('strip', system=[_block(CC_PREFIX)], session='seam-kept-neg-2')
+    assert 'stripping would empty the system prompt' not in caplog.text
+
+
 def test_string_form_system_is_hashed_but_not_stripped():
     payload = {'system': f'{BILLING}\n{CC_PREFIX}'}
     original = payload['system']
@@ -452,6 +478,36 @@ def test_strip_mode_flags_unlisted_block_as_no_allowlist_match(caplog):
     assert [f['index'] for f in result.flagged] == [0]
     assert 'Not stripped: no allowlist match.' in caplog.text
     assert 'mode is warn' not in caplog.text
+
+
+def test_strip_mode_flags_kept_all_telemetry_block_as_all_allowlisted(caplog):
+    tracker = PromptVolatilityTracker(min_samples=2)
+    with caplog.at_level('WARNING', logger='anthrouter.sanitizer'):
+        for i in range(4):
+            result = sanitize_system_prompt(
+                {'system': [_block(_billing(i), cache_control={'type': 'ephemeral'})]},
+                'strip', 'post-sole', tracker=tracker,
+            )
+    assert [f['index'] for f in result.flagged] == [0]
+    assert 'Not stripped: every system block is allowlisted.' in caplog.text
+    assert 'mode is warn' not in caplog.text
+
+
+def test_kept_billing_only_turns_do_not_flag_the_sessions_identity_block(caplog):
+    """Billing-only turns sharing a session with stripped identity turns (ADR-0025)."""
+    tracker = PromptVolatilityTracker(min_samples=2)
+    with caplog.at_level('WARNING', logger='anthrouter.sanitizer'):
+        for i in range(6):
+            sanitize_system_prompt(
+                {'system': [_block(_billing(i), cache_control={'type': 'ephemeral'})]},
+                'strip', 'mixed', tracker=tracker,
+            )
+            result = sanitize_system_prompt(
+                {'system': _cached_system(_billing(100 + i))}, 'strip', 'mixed',
+                tracker=tracker,
+            )
+            assert result.flagged == []
+    assert 'no allowlist match' not in caplog.text
 
 
 def test_flagged_index_refers_to_outbound_array():

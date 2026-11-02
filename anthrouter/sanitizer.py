@@ -68,8 +68,8 @@ def sanitize_system_prompt(payload, mode, session_id, tracker=None, log_tag='') 
     """Detect and optionally strip cache-hostile volatile system blocks.
 
     In ``strip`` mode the allowlisted blocks are removed from ``payload`` in
-    place and the post-strip hash is returned — including when nothing matched,
-    so "ran and found nothing" stays distinct from "did not run".  ``warn`` only
+    place, unless every block is allowlisted (ADR-0025), and the post-strip
+    hash is returned — including when nothing matched, so "ran and found nothing" stays distinct from "did not run".  ``warn`` only
     observes and logs; ``off`` is inert.
 
     Never raises: a sanitizer fault must not fail an otherwise valid request.
@@ -84,6 +84,7 @@ def sanitize_system_prompt(payload, mode, session_id, tracker=None, log_tag='') 
             return result
 
         result.ran = True
+        kept_whole = False
 
         if mode == 'strip':
             sanitized, stripped = strip_volatile_system_blocks(system)
@@ -96,6 +97,15 @@ def sanitize_system_prompt(payload, mode, session_id, tracker=None, log_tag='') 
                     'block(s) to restore prompt-cache prefix reuse',
                     log_tag, result.dropped,
                 )
+            elif isinstance(system, list) and all(
+                is_volatile_system_block(b) for b in system
+            ):
+                kept_whole = True
+                logger.info(
+                    '%s Kept %d volatile telemetry block(s): stripping would '
+                    'empty the system prompt (ADR-0025)',
+                    log_tag, len(system),
+                )
             content = system_content_str(payload.get('system'))
             if content is not None:
                 result.sanitized_content = content
@@ -105,17 +115,24 @@ def sanitize_system_prompt(payload, mode, session_id, tracker=None, log_tag='') 
 
         # Observed after the strip so only blocks actually dispatched can be
         # flagged (ADR-0014); indices therefore refer to the outbound array.
+        # A kept-whole all-telemetry prompt gets its own key: its index 0 would
+        # otherwise vary against the stripped turns' constant identity block in
+        # the same session and flag that block falsely (ADR-0025).
         outbound = payload.get('system')
-        result.flagged = (tracker or TRACKER).observe(session_id or '', outbound)
+        tracker_key = session_id or ''
+        if kept_whole and tracker_key:
+            tracker_key = f'{tracker_key}#sole-telemetry'
+        result.flagged = (tracker or TRACKER).observe(tracker_key, outbound)
 
         # An unrecognised volatile block is never dropped — silently deleting
         # content the operator cannot see would be undebuggable client-side.
         for block in result.flagged:
-            reason = (
-                'mode is warn'
-                if is_volatile_system_block(outbound[block['index']])
-                else 'no allowlist match'
-            )
+            if not is_volatile_system_block(outbound[block['index']]):
+                reason = 'no allowlist match'
+            elif mode == 'warn':
+                reason = 'mode is warn'
+            else:
+                reason = 'every system block is allowlisted'
             logger.warning(
                 '%s Volatile system block at index %d varies within this session '
                 '(%d distinct values over %d requests, ratio %.2f) and sits inside '

@@ -45,3 +45,4 @@ Consequences of the amendment:
 - Each monitor call may write about 142k characters to the prompt cache, if the billing block changes per call. Monitor calls are rare, so this cost is accepted.
 - Monitor requests no longer feed the session's volatility tracker. This also removes the pre-existing sharing noted in the review of PR #43.
 - Unconfirmed: the mechanism is inferred from the data and a secondary source (LiteLLM issue #29572). Verification is the next live monitor request after deploy. If it still gets 429, reading (a) holds (upstream rejects any request without the identity block) and the identity-block fallback needs a separate compliance decision.
+- Generalized in part by ADR-0025: the sanitizer now keeps the billing block for any request whose `system` field holds only billing blocks.
