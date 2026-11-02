@@ -4,7 +4,7 @@ anthrouter's request handling is built on a few linked concerns: routing request
 
 ## Request path (`anthrouter/handlers.py`)
 
-One inbound `/v1/messages` request walks, in order: local-command interception → model-tier routing → system-prompt sanitization → caveman rewrite → upstream dispatch (`AnthropicTransport`) → single-pass SSE/JSON usage-and-text extraction → DB record → response, with the client's originally-requested model name echoed back regardless of what was actually routed to.
+One inbound `/v1/messages` request walks, in order: local-command interception → model-tier routing → system-prompt sanitization → attribution-reminder strip → caveman rewrite → upstream dispatch (`AnthropicTransport`) → single-pass SSE/JSON usage-and-text extraction → DB record → response, with the client's originally-requested model name echoed back regardless of what was actually routed to.
 
 There is no handler-level retry. `AnthropicTransport` already retries 429s (honoring upstream retry timing) and 5xx in-connection; with one backend there's nowhere else for a failed request to go. This means the routing decision and the prompt-hash pair are derived exactly once per request — no stash/restore across attempts.
 
@@ -34,6 +34,10 @@ The sentinel mechanics behind that contract: classifier payloads carry `_anthpro
 ## Sanitizer (`anthrouter/sanitizer.py`, `prompt_volatility.py`)
 
 `sanitize_system_prompt()` runs once per attempt, after hashing the client's system prompt and before dispatch. In `strip` mode it removes allowlisted volatile blocks (e.g. a per-request billing header that invalidates the cached prefix every turn); `warn` only logs; `off` is inert. The pre-strip hash is always what gets recorded as "the prompt as the client sent it" — the sanitized hash is separate and NULL means "sanitizer didn't run," not "found nothing." An unrecognized volatile block is flagged but never silently dropped.
+
+## Attribution reminder strip (`request_text.strip_attribution_reminders`, ADR-0023)
+
+`_strip_attribution_reminder` runs in `_prepare` after the sanitizer and before the caveman rewrite, behind `--strip-attribution-reminder`, and never for a security-monitor request. It removes the whole `<system-reminder>` whose body starts `Attribution for git commits and pull requests` from every `role:'user'` message's top-level text, never by keyword (CLAUDE.md and memory also arrive as reminders). `tool_result` content and inline `role:'system'` messages are out of scope. It never raises and writes no hash column.
 
 ## Caveman rewrite (`anthrouter/caveman_rewrite.py`, ADR-0022)
 

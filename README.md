@@ -66,6 +66,18 @@ Settings live in `~/.anthrouter/config.env` (every one has a matching flag; see
 `~/.anthrouter/anthrouter.db`, and the admin UI is at
 <http://127.0.0.1:8083/ui/>.
 
+### Attribution reminder strip
+
+`--strip-attribution-reminder` (env: `ANTHROUTER_STRIP_ATTRIBUTION_REMINDER`,
+default `on`) removes the `<system-reminder>` Claude Code adds to user messages
+telling the agent to end commits with `Co-Authored-By` and PR descriptions with
+`Generated with`. It matches only a reminder whose body starts
+`Attribution for git commits and pull requests`, so your own CLAUDE.md or memory
+reminders are never touched. Security-monitor requests are left alone. A message
+the removal would leave empty is kept as sent, and so is a reminder block whose
+`cache_control` has nowhere to move. Each strip is logged at INFO. See
+`docs/adr/0023-strip-attribution-reminder.md`.
+
 ### Caveman rewrite
 
 `--caveman-rewrite` (env: `ANTHROUTER_CAVEMAN_REWRITE`, default `on`) acts on

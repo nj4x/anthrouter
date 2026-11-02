@@ -1,7 +1,8 @@
 """HTTP entrypoint: ``/v1/messages``, ``/v1/messages/count_tokens``, ``/health``.
 
 One request walks: local-command interception → model-tier routing →
-system-prompt sanitization → upstream dispatch → single-pass SSE wrapper →
+system-prompt sanitization → attribution-reminder strip → caveman rewrite →
+upstream dispatch → single-pass SSE wrapper →
 DB record → Anthropic-shaped response.
 
 There is no handler-level retry.  ``AnthropicTransport`` already retries 429s
@@ -54,6 +55,7 @@ from .request_text import (
     ACTIVITY_LABEL_FALLBACKS,
     is_activity_label_prompt,
     last_transcript_user_turn,
+    strip_attribution_reminders,
     strip_reminders,
 )
 from .sanitizer import SanitizeResult, sanitize_system_prompt
@@ -572,6 +574,30 @@ def _system_content_str(system) -> str | None:
     return None
 
 
+def _strip_attribution_reminder(handler, payload, config):
+    """Remove Claude Code's commit/PR attribution reminder from user messages.
+
+    Matched by the reminder's exact opening text only (ADR-0023).  A
+    security-monitor request is skipped, like the sanitizer skips it
+    (ADR-0017).  Never raises: a fault dispatches the payload unchanged.
+    """
+    try:
+        if (getattr(config, 'strip_attribution_reminder', 'off') != 'on'
+                or _has_happy_new_year_system_prompt(payload)):
+            return
+        messages, removed = strip_attribution_reminders(payload.get('messages'))
+        if removed:
+            payload['messages'] = messages
+            logger.info(
+                '%s Stripped %d attribution reminder(s) from user messages',
+                handler._log_tag(), removed,
+            )
+    except Exception:
+        logger.warning(
+            '%s Attribution-reminder strip failed', handler._log_tag(), exc_info=True,
+        )
+
+
 def _rewrite_caveman_system(handler, payload, target, credentials, prompt_capture):
     """Rewrite contradicting communication guidance for caveman-mode requests (ADR-0022).
 
@@ -1033,6 +1059,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
             for block in sanitized.flagged
         ]
         if not monitor:
+            _strip_attribution_reminder(self, payload, self.config)
             _rewrite_caveman_system(
                 self, payload, RoutingTarget(config=self.config, backend=self.transport),
                 credentials, self._prompt_capture,
