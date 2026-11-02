@@ -673,6 +673,25 @@ def _rewrite_caveman_system(handler, payload, target, credentials, prompt_captur
                        handler._log_tag(), exc_info=True)
 
 
+def _capture_dispatched_user_text(handler, payload, prompt_capture):
+    """Record the last user message as dispatched when a stage changed it (ADR-0024).
+
+    Runs after every content stage.  Written only when it differs from
+    ``user_prompt_text``, so NULL keeps meaning "sent unchanged".  Skipped when
+    the original capture failed, since a dispatched text with no original to
+    diff against would be shown as the client's.  Never raises.
+    """
+    try:
+        if 'user_prompt_text' not in prompt_capture:
+            return
+        dispatched = _extract_user_prompt_text(payload)
+        if dispatched != prompt_capture['user_prompt_text']:
+            prompt_capture['user_prompt_dispatched_text'] = dispatched or ''
+    except Exception:
+        logger.warning('%s Dispatched user-text capture failed', handler._log_tag(),
+                       exc_info=True)
+
+
 class ProxyRequestHandler(BaseHTTPRequestHandler):
     # Injected by the server factory.
     config = None
@@ -1064,6 +1083,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
                 self, payload, RoutingTarget(config=self.config, backend=self.transport),
                 credentials, self._prompt_capture,
             )
+            _capture_dispatched_user_text(self, payload, self._prompt_capture)
 
     def _route(self, payload: dict, sess_key: str | None, credentials: dict) -> None:
         """Apply the model lock, run ``route_model()`` and the session tier cache."""

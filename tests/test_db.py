@@ -57,8 +57,8 @@ def _record(store, **kwargs):
 # Schema
 # ---------------------------------------------------------------------------
 
-def test_schema_version_is_five(db):
-    assert db._conn.execute('PRAGMA user_version').fetchone()[0] == 5
+def test_schema_version_is_six(db):
+    assert db._conn.execute('PRAGMA user_version').fetchone()[0] == 6
 
 
 def _requests_columns(conn):
@@ -82,7 +82,7 @@ def test_version_3_db_gains_stop_reason_column_on_open(tmp_path):
 
     store = RequestDB(path)
     assert 'classifier_stop_reason' in _requests_columns(store._conn)
-    assert store._conn.execute('PRAGMA user_version').fetchone()[0] == 5
+    assert store._conn.execute('PRAGMA user_version').fetchone()[0] == 6
     store.close()
 
 
@@ -95,7 +95,7 @@ def test_migration_survives_column_already_present_at_version_3(tmp_path):
     _make_version_3_db(path, keep_column=True)
 
     store = RequestDB(path)
-    assert store._conn.execute('PRAGMA user_version').fetchone()[0] == 5
+    assert store._conn.execute('PRAGMA user_version').fetchone()[0] == 6
     assert 'classifier_stop_reason' in _requests_columns(store._conn)
     store.close()
 
@@ -268,6 +268,92 @@ def test_get_request_non_null_hash_with_no_prompt_store_row_returns_null_content
     assert row['tools_content'] is None
 
 
+@pytest.mark.parametrize('caveman,expected', [
+    ('ddd', 'caveman system prompt'),
+    (None, 'sanitized system prompt'),
+], ids=['caveman-wins', 'sanitized-only'])
+def test_get_request_dispatched_system_prompt_follows_stage_order(db, caveman, expected):
+    entries = {
+        'aaa': ('system', 'original system prompt'),
+        'bbb': ('system_sanitized', 'sanitized system prompt'),
+        'ddd': ('system', 'caveman system prompt'),
+    }
+    row = db.get_request(_record(
+        db,
+        system_prompt_sha256='aaa',
+        system_prompt_sanitized_sha256='bbb',
+        system_prompt_caveman_sha256=caveman,
+        prompt_store_entries=entries,
+    ))
+    assert row['system_prompt_dispatched_content'] == expected
+
+
+def test_get_request_caveman_without_sanitizer_is_dispatched(db):
+    row = db.get_request(_record(
+        db,
+        system_prompt_sha256='aaa',
+        system_prompt_caveman_sha256='ddd',
+        prompt_store_entries={'aaa': ('system', 'orig'), 'ddd': ('system', 'cave')},
+    ))
+    assert row['system_prompt_dispatched_content'] == 'cave'
+
+
+def test_get_request_unchanged_system_prompt_has_null_dispatched_content(db):
+    row = db.get_request(_record(
+        db,
+        system_prompt_sha256='aaa',
+        prompt_store_entries={'aaa': ('system', 'a system prompt')},
+    ))
+    assert row['system_prompt_dispatched_content'] is None
+
+
+def test_user_prompt_dispatched_text_round_trips(db):
+    row = db.get_request(_record(
+        db, user_prompt_text='q <reminder>', user_prompt_dispatched_text='q '))
+    assert row['user_prompt_text'] == 'q <reminder>'
+    assert row['user_prompt_dispatched_text'] == 'q '
+
+
+def test_absent_user_prompt_dispatched_text_is_null(db):
+    assert db.get_request(_record(db, user_prompt_text='q'))['user_prompt_dispatched_text'] is None
+
+
+def test_search_does_not_index_dispatched_text(db):
+    _record(db, user_prompt_text='original words', user_prompt_dispatched_text='zebra crossing')
+    assert db.get_requests(q='zebra') == []
+
+
+def test_version_5_db_gains_dispatched_text_column(tmp_path):
+    path = str(tmp_path / 'v5.db')
+    raw = sqlite3.connect(path)
+    for v in range(5):
+        _MIGRATIONS[v](raw)
+    raw.execute('PRAGMA user_version = 5')
+    raw.commit()
+    raw.close()
+
+    store = RequestDB(path)
+    assert 'user_prompt_dispatched_text' in _requests_columns(store._conn)
+    assert store._conn.execute('PRAGMA user_version').fetchone()[0] == 6
+    row = store.get_request(_record(store, user_prompt_dispatched_text='sent'))
+    assert row['user_prompt_dispatched_text'] == 'sent'
+    store.close()
+
+
+def test_migration_5_survives_column_already_present(tmp_path):
+    path = str(tmp_path / 'v5.db')
+    raw = sqlite3.connect(path)
+    for v in range(6):
+        _MIGRATIONS[v](raw)
+    raw.execute('PRAGMA user_version = 5')
+    raw.commit()
+    raw.close()
+
+    store = RequestDB(path)
+    assert store._conn.execute('PRAGMA user_version').fetchone()[0] == 6
+    store.close()
+
+
 def test_get_request_column_names_unchanged_for_existing_callers(db):
     row = db.get_request(_record(db))
     assert row['requested_model'] == 'sonnet'
@@ -353,7 +439,7 @@ def test_version_4_db_gains_caveman_column_and_triggers(tmp_path):
 
     store = RequestDB(path)
     assert 'system_prompt_caveman_sha256' in _requests_columns(store._conn)
-    assert store._conn.execute('PRAGMA user_version').fetchone()[0] == 5
+    assert store._conn.execute('PRAGMA user_version').fetchone()[0] == 6
     _record(store, system_prompt_caveman_sha256='ddd',
             prompt_store_entries={'ddd': ('system', 'rewritten')})
     assert store.get_prompt('ddd')['ref_count'] == 1
