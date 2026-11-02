@@ -179,15 +179,16 @@ def strip_volatile_system_blocks(system):
     12.5x more expensive.
 
     Returns ``(system, stripped)``.  The original object is returned unchanged
-    when nothing matched, when ``system`` is a bare string, or when it is empty.
-    Dropping every block is allowed: an all-telemetry system field legitimately
-    sanitizes to nothing, and an empty list is treated the same as an absent
-    field downstream.
+    when nothing matched, when ``system`` is a bare string, when it is empty, or
+    when every block matched.  An all-telemetry system field is kept whole: the
+    billing block is then the request's only Claude Code marker, and upstream
+    answers a header-less ``429 rate_limit_error`` to a request that carries
+    neither it nor the identity block (ADR-0025).
     """
     if not system or not isinstance(system, list):
         return system, False
     kept = [b for b in system if not is_volatile_system_block(b)]
-    if len(kept) == len(system):
+    if not kept or len(kept) == len(system):
         return system, False
     return kept, True
 

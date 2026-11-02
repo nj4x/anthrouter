@@ -33,7 +33,7 @@ The sentinel mechanics behind that contract: classifier payloads carry `_anthpro
 
 ## Sanitizer (`anthrouter/sanitizer.py`, `prompt_volatility.py`)
 
-`sanitize_system_prompt()` runs once per attempt, after hashing the client's system prompt and before dispatch. In `strip` mode it removes allowlisted volatile blocks (e.g. a per-request billing header that invalidates the cached prefix every turn); `warn` only logs; `off` is inert. The pre-strip hash is always what gets recorded as "the prompt as the client sent it" — the sanitized hash is separate and NULL means "sanitizer didn't run," not "found nothing." An unrecognized volatile block is flagged but never silently dropped.
+`sanitize_system_prompt()` runs once per attempt, after hashing the client's system prompt and before dispatch. In `strip` mode it removes allowlisted volatile blocks (e.g. a per-request billing header that invalidates the cached prefix every turn); `warn` only logs; `off` is inert. The pre-strip hash is always what gets recorded as "the prompt as the client sent it" — the sanitized hash is separate and NULL means "sanitizer didn't run," not "found nothing." An unrecognized volatile block is flagged but never silently dropped. A `system` field made only of allowlisted blocks is kept whole: stripped to empty, such a request got a header-less 429 upstream (ADR-0025).
 
 ## Attribution reminder strip (`request_text.strip_attribution_reminders`, ADR-0023)
 
