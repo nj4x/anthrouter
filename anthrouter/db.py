@@ -1,6 +1,6 @@
 """SQLite persistence for the anthrouter observability UI.
 
-Schema version: 4 (migrations 0-3, tracked via ``PRAGMA user_version``; this
+Schema version: 6 (migrations 0-5, tracked via ``PRAGMA user_version``; this
 schema is not ported from anthproxy's 13-migration history).  Three tables:
 
 ``requests``
@@ -31,7 +31,7 @@ from .model_tier import classify_model_tier
 
 logger = logging.getLogger(__name__)
 
-_SCHEMA_VERSION = 5
+_SCHEMA_VERSION = 6
 
 _RETENTION_INTERVAL_SECS = 24 * 3600
 _RETENTION_CHUNK = 1000
@@ -212,12 +212,27 @@ def _apply_migration_4(conn: sqlite3.Connection) -> None:
     END""")
 
 
+def _apply_migration_5(conn: sqlite3.Connection) -> None:
+    """Add the dispatched last-user-message text (v5 → v6, ADR-0024).
+
+    NULL means the message was sent as the client wrote it, or that the
+    request never reached dispatch.  Inline on ``requests`` rather than in
+    ``prompt_store``: the text changes per turn, so dedup would buy nothing.
+    The FTS index keeps covering ``user_prompt_text`` only.  The column-exists
+    guard follows ``_apply_migration_3``.
+    """
+    columns = {row[1] for row in conn.execute('PRAGMA table_info(requests)')}
+    if 'user_prompt_dispatched_text' not in columns:
+        conn.execute('ALTER TABLE requests ADD COLUMN user_prompt_dispatched_text TEXT')
+
+
 _MIGRATIONS = {
     0: _apply_migration_0,
     1: _apply_migration_1,
     2: _apply_migration_2,
     3: _apply_migration_3,
     4: _apply_migration_4,
+    5: _apply_migration_5,
 }
 
 
@@ -311,6 +326,7 @@ class RequestDB:
         error: str | None = None,
         attempt: int = 1,
         user_prompt_text: str | None = None,
+        user_prompt_dispatched_text: str | None = None,
         response_text: str | None = None,
         system_prompt_sha256: str | None = None,
         system_prompt_sanitized_sha256: str | None = None,
@@ -367,10 +383,11 @@ class RequestDB:
                     ratelimit_tokens_remaining, ratelimit_input_tokens_remaining,
                     ratelimit_output_tokens_remaining, ratelimit_reset_at,
                     system_prompt_score, user_prompt_score, routing_weighted_score,
-                    classifier_stop_reason, system_prompt_caveman_sha256
+                    classifier_stop_reason, system_prompt_caveman_sha256,
+                    user_prompt_dispatched_text
                 ) VALUES (
                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                 )
                 """,
                 (
@@ -413,6 +430,7 @@ class RequestDB:
                     getattr(routing_decision, 'routing_weighted_score', None),
                     routing_decision.classifier_stop_reason,
                     system_prompt_caveman_sha256,
+                    user_prompt_dispatched_text,
                 ),
             )
             request_id: int = cur.lastrowid
@@ -443,12 +461,19 @@ class RequestDB:
         A non-NULL hash with no matching ``prompt_store`` row (e.g. a failed
         ``_extract_prompt_capture()``) yields NULL content here, which the
         admin UI renders as absent rather than surfacing as an error.
+
+        ``system_prompt_dispatched_content`` is the system prompt as sent
+        upstream: the caveman rewrite's output, else the sanitizer's, else
+        NULL (sent as the client wrote it).  The stage order lives here so the
+        UI never encodes it (ADR-0024).
         """
         row = self._read_conn().execute(
             """SELECT r.*,
                       ps_sys.content   AS system_prompt_content,
                       ps_tools.content AS tools_content,
-                      ps_san.content   AS system_prompt_sanitized_content
+                      ps_san.content   AS system_prompt_sanitized_content,
+                      COALESCE(ps_cav.content, ps_san.content)
+                                       AS system_prompt_dispatched_content
                  FROM requests r
                  LEFT JOIN prompt_store ps_sys
                         ON ps_sys.content_hash = r.system_prompt_sha256
@@ -456,6 +481,8 @@ class RequestDB:
                         ON ps_tools.content_hash = r.tools_sha256
                  LEFT JOIN prompt_store ps_san
                         ON ps_san.content_hash = r.system_prompt_sanitized_sha256
+                 LEFT JOIN prompt_store ps_cav
+                        ON ps_cav.content_hash = r.system_prompt_caveman_sha256
                 WHERE r.id = ?""",
             (request_id,),
         ).fetchone()

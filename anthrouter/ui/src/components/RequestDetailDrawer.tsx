@@ -1,9 +1,10 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
 import useSWR from 'swr'
 
 import type { RequestDetail } from '../api'
 import { fetchJson } from '../api'
+import { computeProxyDiff } from '../diff'
 import { count, estimateTokens, prettyPrintMaybeJson } from '../format'
 
 function CopyButton({ text }: { text: string }) {
@@ -25,6 +26,77 @@ function CopyButton({ text }: { text: string }) {
     >
       {copied ? 'Copied!' : 'Copy'}
     </button>
+  )
+}
+
+const PRE_CLASS = 'bg-slate-100 dark:bg-slate-800 p-3 rounded text-xs overflow-auto max-h-48 text-slate-800 dark:text-slate-200 whitespace-pre-wrap break-words'
+
+/**
+ * A prompt panel that shows the original text, or a diff against what the
+ * proxy dispatched when a stage changed it (ADR-0024).  ``dispatched`` null or
+ * equal to ``original`` means sent unchanged.  Copy always copies the original.
+ */
+function PromptPanel({ title, unchangedTitle = title, original, dispatched, pretty }: {
+  title: string
+  unchangedTitle?: string
+  original: string
+  dispatched: string | null | undefined
+  pretty: boolean
+}) {
+  const [asSent, setAsSent] = useState(false)
+  const changed = dispatched != null && dispatched !== original
+  const shownOriginal = pretty ? prettyPrintMaybeJson(original) : original
+  const shownDispatched = changed ? (pretty ? prettyPrintMaybeJson(dispatched) : dispatched) : ''
+  const segments = useMemo(
+    () => (changed ? computeProxyDiff(shownOriginal, shownDispatched) : null),
+    [changed, shownOriginal, shownDispatched],
+  )
+
+  return (
+    <section>
+      <h3 className="text-xs font-semibold text-slate-600 dark:text-slate-400 uppercase tracking-wide mb-2 flex items-center justify-between">
+        <span>
+          {changed ? (asSent ? `${title} (as sent)` : title) : unchangedTitle}{' '}
+          <span className="normal-case font-normal text-slate-400 dark:text-slate-500">
+            (~{estimateTokens(changed && asSent ? dispatched : original).toLocaleString()} tok)
+          </span>
+          {changed && (
+            <span className="ml-2 normal-case font-normal bg-amber-100 dark:bg-amber-900 text-amber-800 dark:text-amber-200 px-2 py-0.5 rounded">
+              changed by proxy
+            </span>
+          )}
+        </span>
+        <span className="flex items-center">
+          {changed && (
+            <button
+              onClick={() => setAsSent((v) => !v)}
+              aria-pressed={asSent}
+              className="px-1.5 py-0.5 rounded text-xs normal-case text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200 hover:bg-slate-200 dark:hover:bg-slate-700 border border-slate-300 dark:border-slate-600"
+            >
+              {asSent ? 'diff' : 'as sent'}
+            </button>
+          )}
+          <CopyButton text={original} />
+        </span>
+      </h3>
+      <pre className={PRE_CLASS}>
+        {!changed
+          ? shownOriginal
+          : asSent
+            ? shownDispatched
+            : segments == null
+              ? shownOriginal
+              : segments.map((seg, i) =>
+                seg.kind === 'removed' ? (
+                  <del key={i} className="line-through text-red-700/70 dark:text-red-300/70 bg-red-50 dark:bg-red-900/20">{seg.text}</del>
+                ) : seg.kind === 'added' ? (
+                  <ins key={i} className="no-underline bg-emerald-100 dark:bg-emerald-900/40 text-emerald-900 dark:text-emerald-100">{seg.text}</ins>
+                ) : (
+                  <span key={i}>{seg.text}</span>
+                ),
+              )}
+      </pre>
+    </section>
   )
 }
 
@@ -212,20 +284,12 @@ export function RequestDetailDrawer({ requestId, onClose }: Props) {
 
               {/* User prompt */}
               {req.user_prompt_text && (
-                <section>
-                  <h3 className="text-xs font-semibold text-slate-600 dark:text-slate-400 uppercase tracking-wide mb-2 flex items-center justify-between">
-                    <span>
-                      User prompt{' '}
-                      <span className="normal-case font-normal text-slate-400 dark:text-slate-500">
-                        (~{estimateTokens(req.user_prompt_text).toLocaleString()} tok)
-                      </span>
-                    </span>
-                    <CopyButton text={req.user_prompt_text} />
-                  </h3>
-                  <pre className="bg-slate-100 dark:bg-slate-800 p-3 rounded text-xs overflow-auto max-h-48 text-slate-800 dark:text-slate-200 whitespace-pre-wrap break-words">
-                    {req.user_prompt_text}
-                  </pre>
-                </section>
+                <PromptPanel
+                  title="User prompt"
+                  original={req.user_prompt_text}
+                  dispatched={req.user_prompt_dispatched_text}
+                  pretty={false}
+                />
               )}
 
               {/* Model response */}
@@ -243,20 +307,13 @@ export function RequestDetailDrawer({ requestId, onClose }: Props) {
 
               {/* System prompt */}
               {req.system_prompt_content && (
-                <section>
-                  <h3 className="text-xs font-semibold text-slate-600 dark:text-slate-400 uppercase tracking-wide mb-2 flex items-center justify-between">
-                    <span>
-                      System prompt (original){' '}
-                      <span className="normal-case font-normal text-slate-400 dark:text-slate-500">
-                        (~{estimateTokens(req.system_prompt_content).toLocaleString()} tok)
-                      </span>
-                    </span>
-                    <CopyButton text={req.system_prompt_content} />
-                  </h3>
-                  <pre className="bg-slate-100 dark:bg-slate-800 p-3 rounded text-xs overflow-auto max-h-48 text-slate-800 dark:text-slate-200 whitespace-pre-wrap break-words">
-                    {prettyPrintMaybeJson(req.system_prompt_content)}
-                  </pre>
-                </section>
+                <PromptPanel
+                  title="System prompt"
+                  unchangedTitle="System prompt (original)"
+                  original={req.system_prompt_content}
+                  dispatched={req.system_prompt_dispatched_content}
+                  pretty
+                />
               )}
 
               {/* Stripped blocks */}

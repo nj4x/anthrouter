@@ -28,9 +28,13 @@ export interface RequestRow {
   system_prompt_sanitized_sha256: string | null
   tools_sha256: string | null
   user_prompt_text: string | null
+  /** Last user message as dispatched; null when sent unchanged (ADR-0024). */
+  user_prompt_dispatched_text?: string | null
   response_text: string | null
   system_prompt_content: string | null
   system_prompt_sanitized_content: string | null
+  /** System prompt as dispatched (caveman, else sanitized); null when unchanged. */
+  system_prompt_dispatched_content?: string | null
   tools_content: string | null
   system_prompt_score: number | null
   user_prompt_score: number | null

@@ -3,7 +3,7 @@ artifact-type: adr
 lineage-rules: root
 ---
 
-**Status**: Proposed
+**Status**: Accepted
 
 # Show proxy-stripped content as a diff in the request drawer
 
@@ -43,8 +43,8 @@ flowchart TD
     D3 --> UI
     UI --> CH{"dispatched text present and differs?"}
     CH -->|no| PL["plain original, as today"]
-    CH -->|yes, 2,000 lines or fewer, diff ok| DF["line diff, then word diff, plus badge"]
-    CH -->|yes, over 2,000 lines or diff error| FB["plain original plus badge"]
+    CH -->|yes, within size limits, diff ok| DF["line diff, then word diff, plus badge"]
+    CH -->|yes, over size limits or diff error| FB["plain original plus badge"]
 ```
 
 ## Decision
@@ -56,7 +56,7 @@ Render removed text as strikethrough and inserted text as a highlight, by diffin
 3. **User prompt.** Only the last user message is diffed, matching the existing "User prompt" panel. New nullable column `requests.user_prompt_dispatched_text` (schema v5 → v6), captured after the attribution strip and written only when it differs from `user_prompt_text`; NULL means sent unchanged. FTS keeps indexing the original.
 4. **System prompt.** One diff, original to dispatched. `get_request` joins `system_prompt_caveman_sha256` and returns `system_prompt_dispatched_content`: the caveman content, else the sanitized content, else NULL. The server owns the stage order; the UI never encodes it.
 5. **Drawer.** A changed panel renders the diff by default with a "changed by proxy" badge: removed text `line-through` in muted red, inserted text highlighted green. The copy button copies the original. An "as sent" toggle shows the plain dispatched text: the diff mixes removed and inserted text, and an operator checking what upstream received needs the clean result. Unchanged requests render as today. The "Stripped Blocks" section stays, since it also lists flagged-but-not-stripped blocks that no diff can show.
-6. **Granularity.** Line diff on the pretty-printed text (the `prettyPrintMaybeJson` output the panel shows), then a word diff inside each changed line pair. The drawer first checks input size: above 2,000 lines in either text, it skips the diff and shows the plain original plus the badge, so a 100 KB system prompt cannot freeze it. The same fallback applies when the diff step throws.
+6. **Granularity.** Line diff on the pretty-printed text (the `prettyPrintMaybeJson` output the panel shows), then a word diff inside each changed line pair. The drawer first checks input size: above 2,000 lines or 200,000 characters in either text (the character cap covers a JSON block-list prompt that keeps each block on one line), it skips the diff and shows the plain original plus the badge, so a 100 KB system prompt cannot freeze it. The same fallback applies when the diff step throws.
 7. **Library.** jsdiff (`diff` on npm, about 30 KB, no dependencies). `dist/` is rebuilt with `make ui-build` and committed. Rejected: a hand-written LCS diff, which is more code to own and test.
 
 ## Consequences

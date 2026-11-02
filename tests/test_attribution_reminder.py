@@ -6,9 +6,13 @@ from types import SimpleNamespace
 import pytest
 
 from anthrouter.config import Config, parse_args
-from anthrouter.handlers import HAPPY_NEW_YEAR_PREFIX, _strip_attribution_reminder
+from anthrouter.handlers import (
+    HAPPY_NEW_YEAR_PREFIX,
+    _capture_dispatched_user_text,
+    _strip_attribution_reminder,
+)
 from anthrouter.request_text import strip_attribution_reminders
-from tests.conftest import SESSION, _FakeUpstream, post
+from tests.conftest import SESSION, _FakeUpstream, db_rows, post
 
 REMINDER = (
     '<system-reminder>\n'
@@ -237,6 +241,37 @@ def test_handler_never_raises(monkeypatch, caplog):
     assert 'Attribution-reminder strip failed' in caplog.text
 
 
+def test_capture_records_changed_dispatched_text():
+    capture = {'user_prompt_text': 'q ' + REMINDER}
+    _capture_dispatched_user_text(_handler(), {'messages': [_user('q ')]}, capture)
+    assert capture['user_prompt_dispatched_text'] == 'q '
+
+
+def test_capture_skips_unchanged_text():
+    capture = {'user_prompt_text': 'q'}
+    _capture_dispatched_user_text(_handler(), {'messages': [_user('q')]}, capture)
+    assert 'user_prompt_dispatched_text' not in capture
+
+
+def test_capture_skips_when_original_capture_failed():
+    capture = {}
+    _capture_dispatched_user_text(_handler(), {'messages': [_user('q')]}, capture)
+    assert capture == {}
+
+
+def test_capture_never_raises(monkeypatch, caplog):
+    from anthrouter import handlers
+
+    def boom(payload):
+        raise RuntimeError('boom')
+    monkeypatch.setattr(handlers, '_extract_user_prompt_text', boom)
+    capture = {'user_prompt_text': 'q'}
+    with caplog.at_level('WARNING', logger='anthrouter.handlers'):
+        _capture_dispatched_user_text(_handler(), {'messages': [_user('q')]}, capture)
+    assert capture == {'user_prompt_text': 'q'}
+    assert 'Dispatched user-text capture failed' in caplog.text
+
+
 def test_config_flag_default():
     assert Config().strip_attribution_reminder == 'on'
 
@@ -274,3 +309,14 @@ def test_security_monitor_request_is_forwarded_unstripped(proxy, upstream):
         'model': 'sonnet', 'system': HAPPY_NEW_YEAR_PREFIX,
         'messages': [_user('q ' + REMINDER)]})
     assert _FakeUpstream.received[-1]['payload']['messages'][0]['content'] == 'q ' + REMINDER
+
+
+@pytest.mark.parametrize('mode,dispatched', [('on', 'q '), ('off', None)])
+def test_recorded_row_holds_dispatched_user_text(proxy, upstream, mode, dispatched):
+    server = proxy(strip_attribution_reminder=mode)
+    post(server, '/v1/messages', {
+        'model': 'sonnet', 'metadata': {'user_id': SESSION},
+        'messages': [_user('q ' + REMINDER)]})
+    row = db_rows(server)[0]
+    assert row['user_prompt_text'] == 'q ' + REMINDER
+    assert row['user_prompt_dispatched_text'] == dispatched
