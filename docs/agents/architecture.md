@@ -61,7 +61,7 @@ The recovery for that fail-open path sits in `_send_with_retries` beside the thi
 
 ## Persistence (`anthrouter/db.py`, `admin.py`)
 
-SQLite, one write connection guarded by a lock, per-thread read connections over WAL. Three tables: `requests` (one row per dispatch, routing decision folded in), `prompt_store` (deduped/ref-counted system+tools content), `sanitizer_events`. FTS5 external-content trigram index over prompt/response text for substring search without a casefolded shadow column.
+SQLite, one write connection guarded by a lock, per-thread read connections over WAL. Three tables: `requests` (one row per dispatch, routing decision folded in), `prompt_store` (deduped/ref-counted system+tools content), `sanitizer_events`. FTS5 external-content trigram index over prompt/response text for substring search without a casefolded shadow column. Every `requests` row stores the final attempt's upstream `request-id` header in `upstream_request_id`, and an upstream 429 records `status='rate_limited'` whether or not the request streamed (ADR-0026).
 
 `admin.py` has two entry points:
 - `handle_get` — read-only queries, always enabled

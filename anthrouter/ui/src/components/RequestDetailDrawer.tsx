@@ -198,6 +198,12 @@ export function RequestDetailDrawer({ requestId, onClose }: Props) {
                       <dd className="text-red-700 dark:text-red-200 text-xs">{req.error}</dd>
                     </div>
                   )}
+                  {req.upstream_request_id && (
+                    <div className="flex justify-between items-start">
+                      <dt className="text-xs text-slate-600 dark:text-slate-400">Upstream request-id</dt>
+                      <dd className="text-slate-900 dark:text-slate-200 text-xs font-mono select-all break-all">{req.upstream_request_id}</dd>
+                    </div>
+                  )}
                 </dl>
               </section>
 

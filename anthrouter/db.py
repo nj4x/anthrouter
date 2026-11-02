@@ -1,6 +1,6 @@
 """SQLite persistence for the anthrouter observability UI.
 
-Schema version: 6 (migrations 0-5, tracked via ``PRAGMA user_version``; this
+Schema version: 7 (migrations 0-6, tracked via ``PRAGMA user_version``; this
 schema is not ported from anthproxy's 13-migration history).  Three tables:
 
 ``requests``
@@ -31,7 +31,7 @@ from .model_tier import classify_model_tier
 
 logger = logging.getLogger(__name__)
 
-_SCHEMA_VERSION = 6
+_SCHEMA_VERSION = 7
 
 _RETENTION_INTERVAL_SECS = 24 * 3600
 _RETENTION_CHUNK = 1000
@@ -226,6 +226,19 @@ def _apply_migration_5(conn: sqlite3.Connection) -> None:
         conn.execute('ALTER TABLE requests ADD COLUMN user_prompt_dispatched_text TEXT')
 
 
+def _apply_migration_6(conn: sqlite3.Connection) -> None:
+    """Add the upstream ``request-id`` response header (v6 → v7, ADR-0026).
+
+    NULL means no upstream response was received (a connection failure, or a
+    request that never reached dispatch) or the upstream sent no such header.
+    Kept so an upstream 429 can be quoted to Anthropic without searching the
+    log.  The column-exists guard follows ``_apply_migration_3``.
+    """
+    columns = {row[1] for row in conn.execute('PRAGMA table_info(requests)')}
+    if 'upstream_request_id' not in columns:
+        conn.execute('ALTER TABLE requests ADD COLUMN upstream_request_id TEXT')
+
+
 _MIGRATIONS = {
     0: _apply_migration_0,
     1: _apply_migration_1,
@@ -233,6 +246,7 @@ _MIGRATIONS = {
     3: _apply_migration_3,
     4: _apply_migration_4,
     5: _apply_migration_5,
+    6: _apply_migration_6,
 }
 
 
@@ -327,6 +341,7 @@ class RequestDB:
         attempt: int = 1,
         user_prompt_text: str | None = None,
         user_prompt_dispatched_text: str | None = None,
+        upstream_request_id: str | None = None,
         response_text: str | None = None,
         system_prompt_sha256: str | None = None,
         system_prompt_sanitized_sha256: str | None = None,
@@ -384,10 +399,10 @@ class RequestDB:
                     ratelimit_output_tokens_remaining, ratelimit_reset_at,
                     system_prompt_score, user_prompt_score, routing_weighted_score,
                     classifier_stop_reason, system_prompt_caveman_sha256,
-                    user_prompt_dispatched_text
+                    user_prompt_dispatched_text, upstream_request_id
                 ) VALUES (
                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                 )
                 """,
                 (
@@ -431,6 +446,7 @@ class RequestDB:
                     routing_decision.classifier_stop_reason,
                     system_prompt_caveman_sha256,
                     user_prompt_dispatched_text,
+                    upstream_request_id,
                 ),
             )
             request_id: int = cur.lastrowid
