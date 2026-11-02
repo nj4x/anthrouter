@@ -24,6 +24,8 @@ export interface RequestRow {
   duration_ms: number | null
   status: string
   error: string | null
+  /** Upstream `request-id` response header; null when none was received (ADR-0026). */
+  upstream_request_id?: string | null
   system_prompt_sha256: string | null
   system_prompt_sanitized_sha256: string | null
   tools_sha256: string | null

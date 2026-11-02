@@ -58,7 +58,7 @@ def _record(store, **kwargs):
 # ---------------------------------------------------------------------------
 
 def test_schema_version_is_six(db):
-    assert db._conn.execute('PRAGMA user_version').fetchone()[0] == 6
+    assert db._conn.execute('PRAGMA user_version').fetchone()[0] == 7
 
 
 def _requests_columns(conn):
@@ -82,7 +82,7 @@ def test_version_3_db_gains_stop_reason_column_on_open(tmp_path):
 
     store = RequestDB(path)
     assert 'classifier_stop_reason' in _requests_columns(store._conn)
-    assert store._conn.execute('PRAGMA user_version').fetchone()[0] == 6
+    assert store._conn.execute('PRAGMA user_version').fetchone()[0] == 7
     store.close()
 
 
@@ -95,7 +95,7 @@ def test_migration_survives_column_already_present_at_version_3(tmp_path):
     _make_version_3_db(path, keep_column=True)
 
     store = RequestDB(path)
-    assert store._conn.execute('PRAGMA user_version').fetchone()[0] == 6
+    assert store._conn.execute('PRAGMA user_version').fetchone()[0] == 7
     assert 'classifier_stop_reason' in _requests_columns(store._conn)
     store.close()
 
@@ -334,7 +334,7 @@ def test_version_5_db_gains_dispatched_text_column(tmp_path):
 
     store = RequestDB(path)
     assert 'user_prompt_dispatched_text' in _requests_columns(store._conn)
-    assert store._conn.execute('PRAGMA user_version').fetchone()[0] == 6
+    assert store._conn.execute('PRAGMA user_version').fetchone()[0] == 7
     row = store.get_request(_record(store, user_prompt_dispatched_text='sent'))
     assert row['user_prompt_dispatched_text'] == 'sent'
     store.close()
@@ -350,8 +350,43 @@ def test_migration_5_survives_column_already_present(tmp_path):
     raw.close()
 
     store = RequestDB(path)
-    assert store._conn.execute('PRAGMA user_version').fetchone()[0] == 6
+    assert store._conn.execute('PRAGMA user_version').fetchone()[0] == 7
     store.close()
+
+
+def test_version_6_db_gains_upstream_request_id_column(tmp_path):
+    path = str(tmp_path / 'v6.db')
+    raw = sqlite3.connect(path)
+    for v in range(6):
+        _MIGRATIONS[v](raw)
+    raw.execute('PRAGMA user_version = 6')
+    raw.commit()
+    raw.close()
+
+    store = RequestDB(path)
+    assert 'upstream_request_id' in _requests_columns(store._conn)
+    assert store._conn.execute('PRAGMA user_version').fetchone()[0] == 7
+    row = store.get_request(_record(store, upstream_request_id='req_011CABC'))
+    assert row['upstream_request_id'] == 'req_011CABC'
+    store.close()
+
+
+def test_migration_6_survives_column_already_present(tmp_path):
+    path = str(tmp_path / 'v6.db')
+    raw = sqlite3.connect(path)
+    for v in range(7):
+        _MIGRATIONS[v](raw)
+    raw.execute('PRAGMA user_version = 6')
+    raw.commit()
+    raw.close()
+
+    store = RequestDB(path)
+    assert store._conn.execute('PRAGMA user_version').fetchone()[0] == 7
+    store.close()
+
+
+def test_upstream_request_id_defaults_to_null(db):
+    assert db.get_request(_record(db))['upstream_request_id'] is None
 
 
 def test_get_request_column_names_unchanged_for_existing_callers(db):
@@ -439,7 +474,7 @@ def test_version_4_db_gains_caveman_column_and_triggers(tmp_path):
 
     store = RequestDB(path)
     assert 'system_prompt_caveman_sha256' in _requests_columns(store._conn)
-    assert store._conn.execute('PRAGMA user_version').fetchone()[0] == 6
+    assert store._conn.execute('PRAGMA user_version').fetchone()[0] == 7
     _record(store, system_prompt_caveman_sha256='ddd',
             prompt_store_entries={'ddd': ('system', 'rewritten')})
     assert store.get_prompt('ddd')['ref_count'] == 1

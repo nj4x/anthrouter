@@ -263,6 +263,52 @@ def test_failed_request_row_stores_the_rate_limit_window(proxy, status, row_stat
     assert row['ratelimit_reset_at'] == '2026-08-31T12:00:00Z'
 
 
+@pytest.mark.parametrize('stream', [False, True])
+def test_upstream_429_is_rate_limited_whether_or_not_streamed(proxy, stream):
+    _FakeUpstream.status = 429
+    _FakeUpstream.extra_headers = {'request-id': 'req_011CTEST429'}
+    server = proxy()
+    payload = {'model': 'sonnet', 'metadata': {'user_id': SESSION},
+               'messages': [{'role': 'user', 'content': 'hello there'}]}
+    if stream:
+        body = post(server, '/v1/messages', {**payload, 'stream': True}, raw=True)
+        assert 'event: error' in body and 'rate_limit_error' in body
+    else:
+        with pytest.raises(urllib.error.HTTPError):
+            post(server, '/v1/messages', payload)
+    row = db_rows(server)[0]
+    assert row['status'] == 'rate_limited'
+    assert row['error'] == '429 — rate_limit_error'
+    assert row['upstream_request_id'] == 'req_011CTEST429'
+
+
+def test_streaming_500_stays_an_error(proxy):
+    _FakeUpstream.status = 500
+    server = proxy()
+    post(server, '/v1/messages', {
+        'model': 'sonnet', 'stream': True, 'metadata': {'user_id': SESSION},
+        'messages': [{'role': 'user', 'content': 'hello there'}]}, raw=True)
+    assert db_rows(server)[0]['status'] == 'error'
+
+
+@pytest.mark.parametrize('stream', [False, True])
+def test_successful_request_stores_the_upstream_request_id(proxy, stream):
+    _FakeUpstream.extra_headers = {'request-id': 'req_011CTESTOK'}
+    server = proxy()
+    post(server, '/v1/messages', {
+        'model': 'sonnet', 'stream': stream, 'metadata': {'user_id': SESSION},
+        'messages': [{'role': 'user', 'content': 'hello there'}]}, raw=stream)
+    assert db_rows(server)[0]['upstream_request_id'] == 'req_011CTESTOK'
+
+
+def test_missing_request_id_header_stores_null(proxy):
+    server = proxy()
+    post(server, '/v1/messages', {
+        'model': 'sonnet', 'metadata': {'user_id': SESSION},
+        'messages': [{'role': 'user', 'content': 'hello there'}]})
+    assert db_rows(server)[0]['upstream_request_id'] is None
+
+
 def test_streaming_request_records_usage_by_max_not_by_sum(proxy):
     server = proxy()
     post(server, '/v1/messages', {

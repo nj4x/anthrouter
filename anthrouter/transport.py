@@ -117,6 +117,9 @@ class AnthropicTransport:
 
         The value is written before each dispatch, so it is already correct when
         the loop raises: an exhausted request reports the attempts it made.
+        ``attempt_out['upstream_request_id']`` holds the ``request-id`` header of
+        that attempt's response, reset to None before each dispatch so a final
+        connection failure never reports an earlier attempt's id (ADR-0026).
         """
         aliases = config.model_aliases if config else None
         body_bytes = build_body(payload, aliases=aliases)
@@ -129,10 +132,13 @@ class AnthropicTransport:
         for attempt in range(MAX_RETRIES + 1):
             if attempt_out is not None:
                 attempt_out['attempt'] = attempt + 1
+                attempt_out['upstream_request_id'] = None
             conn = self.target.connect()
             try:
                 conn.request(method, url_path, body=body_bytes, headers=headers)
                 resp = conn.getresponse()
+                if attempt_out is not None:
+                    attempt_out['upstream_request_id'] = resp.getheader('request-id')
             except (OSError, http.client.HTTPException, ssl.SSLError) as exc:
                 conn.close()
                 if attempt < MAX_RETRIES:

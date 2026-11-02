@@ -93,3 +93,17 @@ describe('RequestDetailDrawer proxy diff', () => {
     expect(screen.queryByText('changed by proxy')).not.toBeInTheDocument()
   })
 })
+
+describe('RequestDetailDrawer upstream request-id', () => {
+  it('shows the upstream request-id when one was recorded', async () => {
+    show({ status: 'rate_limited', error: '429 — rate_limit_error', upstream_request_id: 'req_011CXYZ' })
+    expect(await screen.findByText('req_011CXYZ')).toBeInTheDocument()
+    expect(screen.getByText('Upstream request-id')).toBeInTheDocument()
+  })
+
+  it('hides the row when no request-id was recorded', async () => {
+    show({ upstream_request_id: null })
+    expect(await screen.findByText('Success')).toBeInTheDocument()
+    expect(screen.queryByText('Upstream request-id')).not.toBeInTheDocument()
+  })
+})

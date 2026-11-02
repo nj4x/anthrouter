@@ -84,6 +84,8 @@ class _FakeUpstream(BaseHTTPRequestHandler):
         self.send_header('anthropic-ratelimit-requests-remaining', '42')
         self.send_header('anthropic-ratelimit-tokens-remaining', '13000')
         self.send_header('anthropic-ratelimit-tokens-reset', '2026-08-31T12:00:00Z')
+        for name, value in type(self).extra_headers.items():
+            self.send_header(name, value)
 
     def log_message(self, *args):
         pass

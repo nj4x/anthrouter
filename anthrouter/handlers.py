@@ -1281,14 +1281,18 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
             self._record_session_context(stats)
             if not errored:
                 self._record_caveman_prose(''.join(text_parts))
+            db_status = 'error' if errored else 'success'
             if upstream_error is not None:
                 db_stats: dict = {}
                 db_error: str | None = f'{upstream_error[0]} — {upstream_error[1]}'
+                # Same status as the non-streaming 429 in do_POST (ADR-0026).
+                if upstream_error[0] == 429:
+                    db_status = 'rate_limited'
             else:
                 db_stats = stats
                 db_error = 'sse_error' if errored else None
             self._record_db(
-                sid, db_stats, duration_ms, 'error' if errored else 'success',
+                sid, db_stats, duration_ms, db_status,
                 error=db_error, response_text=''.join(text_parts) or None,
             )
 
@@ -1385,6 +1389,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
                 sanitizer_events=self._sanitizer_events,
                 ratelimit=self._ratelimit,
                 attempt=self._attempt.get('attempt', 1),
+                upstream_request_id=self._attempt.get('upstream_request_id'),
                 net_savings_usd=net_savings_usd,
                 classifier_overhead_usd=classifier_overhead_usd,
                 **self._prompt_capture,
