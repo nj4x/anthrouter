@@ -5277,6 +5277,22 @@ class TestClassifierRetryPolicy:
         assert sleeps == []
         assert decision.reason_code == 'classifier_failed'
 
+    @pytest.mark.parametrize('status', [404, 408, 409, 413, 422])
+    def test_4xx_passed_through_by_adr_0028_is_not_retried(self, monkeypatch, status):
+        decision, calls, sleeps = self._run(
+            monkeypatch,
+            AnthropicRequestError('rejected', error_type='invalid_request_error',
+                                  status_code=status))
+        assert calls == 1
+        assert sleeps == []
+        assert decision.reason_code == 'classifier_failed'
+        assert decision.routed_model == 'sonnet'
+
+    def test_429_with_retry_after_is_still_retried(self, monkeypatch):
+        _decision, calls, _sleeps = self._run(
+            monkeypatch, self._rate_limit(retry_after=5.0), jitter=1.0)
+        assert calls > 1
+
     def test_zero_budget_makes_one_call_and_no_sleep(self, monkeypatch):
         decision, calls, sleeps = self._run(
             monkeypatch,

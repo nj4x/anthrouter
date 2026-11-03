@@ -38,6 +38,10 @@ class _FakeUpstream(BaseHTTPRequestHandler):
     status = 200
     json_body: dict = {}
     extra_headers: dict = {}
+    error_type: str | None = 'api_error'
+    error_message = 'upstream exploded'
+    error_raw: bytes | None = None
+    error_headers: dict = {}
 
     def do_POST(self):
         body = self.rfile.read(int(self.headers.get('Content-Length', 0)))
@@ -49,12 +53,18 @@ class _FakeUpstream(BaseHTTPRequestHandler):
         })
 
         if type(self).status != 200:
-            data = json.dumps({'type': 'error', 'error': {
-                'type': 'api_error', 'message': 'upstream exploded'}}).encode()
-            self.send_response(type(self).status)
+            cls = type(self)
+            if cls.error_raw is not None:
+                data = cls.error_raw
+            else:
+                error = {'message': cls.error_message}
+                if cls.error_type is not None:
+                    error['type'] = cls.error_type
+                data = json.dumps({'type': 'error', 'error': error}).encode()
+            self.send_response(cls.status)
             self.send_header('Content-Type', 'application/json')
             self.send_header('Content-Length', str(len(data)))
-            for name, value in type(self).extra_headers.items():
+            for name, value in {**cls.extra_headers, **cls.error_headers}.items():
                 self.send_header(name, value)
             self.end_headers()
             self.wfile.write(data)
@@ -96,6 +106,10 @@ def upstream():
     _FakeUpstream.received = []
     _FakeUpstream.status = 200
     _FakeUpstream.extra_headers = {}
+    _FakeUpstream.error_type = 'api_error'
+    _FakeUpstream.error_message = 'upstream exploded'
+    _FakeUpstream.error_raw = None
+    _FakeUpstream.error_headers = {}
     _FakeUpstream.json_body = {
         'id': 'msg_up', 'type': 'message', 'role': 'assistant',
         'content': [{'type': 'text', 'text': 'hi there'}],
