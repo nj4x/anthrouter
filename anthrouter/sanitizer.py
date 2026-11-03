@@ -84,7 +84,7 @@ def sanitize_system_prompt(payload, mode, session_id, tracker=None, log_tag='') 
             return result
 
         result.ran = True
-        kept_whole = False
+        kept_billing = False
 
         if mode == 'strip':
             sanitized, stripped = strip_volatile_system_blocks(system)
@@ -100,7 +100,7 @@ def sanitize_system_prompt(payload, mode, session_id, tracker=None, log_tag='') 
             elif isinstance(system, list):
                 kept_count = sum(1 for b in system if is_volatile_system_block(b))
                 if kept_count:
-                    kept_whole = True
+                    kept_billing = True
                     logger.info(
                         '%s Kept %d volatile telemetry block(s): no identity '
                         'block in the system prompt (ADR-0029)',
@@ -121,7 +121,7 @@ def sanitize_system_prompt(payload, mode, session_id, tracker=None, log_tag='') 
         # (ADR-0029).
         outbound = payload.get('system')
         tracker_key = session_id or ''
-        if kept_whole and tracker_key:
+        if kept_billing and tracker_key:
             tracker_key = f'{tracker_key}#no-identity'
         result.flagged = (tracker or TRACKER).observe(tracker_key, outbound)
 

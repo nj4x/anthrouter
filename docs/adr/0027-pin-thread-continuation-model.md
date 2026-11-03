@@ -74,7 +74,9 @@ flowchart TD
    - `thread_pin_unknown`: the id was not found (restart, eviction, or a Thread created before this change). `routed_model` is the routing baseline: the lock model when `--lock-requested-model` is set, else the requested model (ADR-0016).
 
    In both cases `payload['model']` equals `routed_model`, `applied = (routed_model != requested)`, and the response echoes the client's requested model as before.
-6. **Logging.** The `Routing request:` line gains `thread=<type>` when the payload has a `thread`. The type is logged; the ids are not.
+
+   **Long-context window.** The pin skips the size floor, and the floor is the only place that adds the `context-1m` beta. So each map entry also records whether the dispatched request carried a `context-1m*` beta, and a `thread_pinned` turn whose entry has it gets the beta added again. This keeps the Thread's 1M window; it is not a re-route. A check on the `[1m]` model suffix is not enough, because `--auto-model-routing-long` accepts a target without it.
+6. **Logging.** The `Routing request:` line gains `thread=<type>` when the payload has a `thread`. The type is logged as `create` or `continue`, any other string as `other`, and a missing or non-string type as `none`, so the client-controlled field cannot forge or bloat log lines. The ids are not logged.
 
 ```mermaid
 sequenceDiagram

@@ -41,10 +41,12 @@ from .mapper import (
     sse_event,
 )
 from .model_router import (
+    _LONG_CONTEXT_BETA_PREFIX,
     _TRAILING_SCAN_LIMIT,
     ModelRoutingDecision,
     RoutingTarget,
     _cap_cached_tier,
+    _ensure_long_context_beta,
     _extract_user_text,
     calibrated_ratio,
     route_model,
@@ -1123,14 +1125,19 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         outranks the lock and the auto-routing flag.  ``thread_pinned`` is a
         deliberate exception to ADR-0016: it can exceed the lock or baseline.
         An id the map does not hold falls closed to the routing baseline
-        (ADR-0027).
+        (ADR-0027).  A Thread whose recorded request carried a ``context-1m*``
+        beta gets it again: the pin skips the size floor, which is otherwise
+        the only place that adds it.
         """
         raw_model = payload.get('model')
         requested = str(raw_model) if isinstance(raw_model, str) else repr(raw_model)
         lock = self.config.lock_requested_model
         baseline = lock if lock != 'off' else requested
-        pinned = self.sessions.thread_model(payload['thread']['previous_message_id'])
+        pin = self.sessions.thread_pin(payload['thread']['previous_message_id'])
+        pinned = pin[0] if pin is not None else None
         routed = pinned if pinned is not None else baseline
+        if pin is not None and pin[1]:
+            _ensure_long_context_beta(payload)
         # An unpinned, unlocked turn keeps its own ``model`` untouched, so a
         # missing or non-string one still fails upstream rather than becoming
         # the string "None".
@@ -1253,13 +1260,21 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         thread = payload.get('thread')
         thread_tag = ''
         if isinstance(thread, dict):
+            # Client-controlled: only a known value is logged, so the field
+            # cannot forge or bloat log lines.
             thread_type = thread.get('type')
-            thread_tag = f" thread={thread_type if isinstance(thread_type, str) else 'none'}"
+            if thread_type not in ('create', 'continue'):
+                thread_type = 'other' if isinstance(thread_type, str) else 'none'
+            thread_tag = f' thread={thread_type}'
         logger.info('%s Routing request: operation=messages stream=%s model=%s%s',
                     self._log_tag(), streaming, payload.get('model', ''), thread_tag)
         start_time = time.monotonic()
         model = payload.get('model', '')
         thread_model = model if isinstance(thread, dict) and isinstance(model, str) else None
+        long_context = any(
+            isinstance(b, str) and b.startswith(_LONG_CONTEXT_BETA_PREFIX)
+            for b in payload.get('_anthropic_beta') or []
+        )
         sid = sess_key or UNTRACKED_SESSION_ID
 
         if streaming:
@@ -1269,6 +1284,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
             )
             wrapped = self._usage_sse_wrapper(
                 sse_gen, start_time, model, sid, thread_model=thread_model,
+                long_context=long_context,
             )
             self._send_sse(self._rewrite_response_model_sse(wrapped))
             return
@@ -1280,7 +1296,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         self.sessions.record_ratelimit(self._ratelimit)
         message_id = result.get('id')
         if thread_model is not None and isinstance(message_id, str):
-            self.sessions.record_thread(message_id, thread_model)
+            self.sessions.record_thread(message_id, thread_model, long_context)
         usage = result.get('usage', {}) or {}
         stats = {
             'input_tokens': usage.get('input_tokens', 0),
@@ -1314,12 +1330,12 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         return _wrapped()
 
     def _usage_sse_wrapper(self, sse_gen, start_time: float, model: str, sid: str,
-                           thread_model: str | None = None):
+                           thread_model: str | None = None, long_context: bool = False):
         """Yield SSE chunks, parsing usage, text, and errors in a single pass.
 
         ``thread_model`` is set only for a request that carried a ``thread``: the
         ``message_start`` id is recorded against it once ``message_stop`` arrives
-        with no ``error`` event (ADR-0027).
+        with no ``error`` event (ADR-0027), with ``long_context`` alongside.
         """
         stats = {
             'input_tokens': 0,
@@ -1369,7 +1385,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
                 errored = True
             if (thread_model is not None and not errored and thread_marks['stopped']
                     and thread_marks['id'] is not None):
-                self.sessions.record_thread(thread_marks['id'], thread_model)
+                self.sessions.record_thread(thread_marks['id'], thread_model, long_context)
             self._record_session_context(stats)
             if not errored:
                 self._record_caveman_prose(''.join(text_parts))

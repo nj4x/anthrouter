@@ -269,6 +269,41 @@ def test_thread_without_a_type_logs_none(proxy, caplog):
     assert any(r.getMessage().endswith('thread=none') for r in caplog.records)
 
 
+def test_unknown_thread_type_is_logged_as_other_not_raw(proxy, caplog):
+    server = proxy()
+    forged = 'continue\nINFO forged line' + 'x' * 5000
+    with caplog.at_level(logging.INFO):
+        post(server, '/v1/messages', {
+            'model': 'sonnet', 'thread': {'type': forged},
+            'messages': [{'role': 'user', 'content': 'hi'}]})
+    lines = [r.getMessage() for r in caplog.records if 'Routing request:' in r.getMessage()]
+    assert lines and lines[0].endswith('thread=other')
+    assert not any('forged line' in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.parametrize('stream', [False, True])
+def test_pinned_continuation_keeps_the_size_floors_long_context_beta(proxy, stream):
+    server = proxy(**ROUTED, auto_model_routing_long='opus[1m]',
+                   auto_model_routing_long_context_threshold=1000)
+    _FakeUpstream.message_ids = ['msg_L']
+    post(server, '/v1/messages', _create(stream=stream, text='word ' * 5000), raw=stream)
+    assert 'context-1m' in _FakeUpstream.received[-1]['headers'].get('anthropic-beta', '')
+
+    post(server, '/v1/messages', _continue('msg_L', stream=stream), raw=stream)
+    assert _reason(server) == 'thread_pinned'
+    assert 'context-1m' in _FakeUpstream.received[-1]['headers'].get('anthropic-beta', '')
+
+
+def test_pinned_continuation_of_a_short_thread_adds_no_long_context_beta(proxy):
+    server = proxy(**ROUTED, auto_model_routing_long='opus[1m]',
+                   auto_model_routing_long_context_threshold=1000)
+    _FakeUpstream.message_ids = ['msg_S']
+    post(server, '/v1/messages', _create())
+    post(server, '/v1/messages', _continue('msg_S'))
+    assert _reason(server) == 'thread_pinned'
+    assert 'context-1m' not in _FakeUpstream.received[-1]['headers'].get('anthropic-beta', '')
+
+
 def test_request_without_a_thread_logs_no_thread_tag(proxy, caplog):
     server = proxy()
     with caplog.at_level(logging.INFO):
