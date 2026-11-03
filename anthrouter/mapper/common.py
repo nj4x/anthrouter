@@ -24,17 +24,34 @@ class AnthropicRequestError(Exception):
 
     ``connection_error`` marks a transport-level failure (refused connection,
     timeout, TLS error) as distinct from an HTTP response the upstream actually
-    sent.
+    sent.  ``upstream_status`` and ``upstream_error_type`` hold what upstream
+    sent when the client is shown something else (ADR-0031); ``None`` means
+    the client sees the error as raised.
     """
 
     def __init__(self, message, error_type='invalid_request_error', status_code=400,
-                 retry_after=None, connection_error=False):
+                 retry_after=None, connection_error=False, upstream_status=None,
+                 upstream_error_type=None):
         super().__init__(message)
         self.message = message
         self.error_type = error_type
         self.status_code = status_code
         self.retry_after = retry_after
         self.connection_error = connection_error
+        self.upstream_status = upstream_status
+        self.upstream_error_type = upstream_error_type
+
+    @property
+    def db_error(self) -> str:
+        """The request row's ``error`` value: upstream's status, never the rewrite's.
+
+        ADR-0028 Decision 3 keeps the upstream status in the DB; a rewritten
+        error is marked so queries can tell it from one passed through.
+        """
+        if self.upstream_status is None:
+            return f'{self.status_code} — {self.error_type}'
+        return (f'{self.upstream_status} — {self.upstream_error_type} '
+                f'(sent to client as {self.status_code})')
 
 
 _ALL_THINKING_TYPES = frozenset({'thinking', 'redacted_thinking'})

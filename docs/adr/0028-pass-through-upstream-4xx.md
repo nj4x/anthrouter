@@ -3,7 +3,7 @@ artifact-type: adr
 lineage-rules: root
 ---
 
-**Status**: Approved
+**Status**: Approved. Decision 1 is amended by ADR-0031: an expired-Thread 404 goes to the client as a 400.
 
 # Pass upstream 4xx statuses through to the client
 
@@ -59,7 +59,7 @@ The release notes do not document this 404 or its `error.type`. Retrying the sam
 
 ## Consequences
 
-- A client gets upstream's own non-retryable status and recovery text. For a Thread 404 that means a replay with `{"type": "create"}` instead of a retry loop.
+- A client gets upstream's own non-retryable status and recovery text. For a Thread 404 that means a replay with `{"type": "create"}` instead of a retry loop. (Observed later: Claude Desktop does not replay after the 404. It stops, and the user must type `Try again`. ADR-0031 sends this 404 to the client as a 400.)
 - Classifier calls see the same change. The classifier retries a failure when `status_code >= 500` (`model_router.py`). An upstream 404, 413 or 422 on a classifier call used to arrive as 502 and was retried. Now it fails at once as `classifier_failed`, which is correct for a non-transient error. A 408 or 409 on a classifier call is no longer retried either. The classifier fails closed to the routing baseline (ADR-0016), so a lost retry costs one routing decision, never a failed client request.
 - Dashboards and queries that grouped every non-400/401/403/429 upstream 4xx under `502 — api_error` will see new `error` values (`404 — not_found_error`, `413 — request_too_large`, …). Historical rows are not backfilled.
 - A 502 from anthrouter now means an upstream 5xx or a failure inside anthrouter, never an upstream 4xx.

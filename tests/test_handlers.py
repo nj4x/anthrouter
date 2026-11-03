@@ -1388,12 +1388,12 @@ def test_upstream_4xx_keeps_status_with_upstream_type_and_unprefixed_message(
     monkeypatch.setattr('anthrouter.transport.time.sleep', lambda _s: None)
     _FakeUpstream.status = status
     _FakeUpstream.error_type = 'custom_upstream_error'
-    _FakeUpstream.error_message = 'No thread state was found'
+    _FakeUpstream.error_message = 'upstream said no'
     server = proxy()
     client_status, error = _error_via_proxy(server, stream)
     assert client_status == (200 if stream else status)
     assert error['type'] == 'custom_upstream_error'
-    assert error['message'] == 'No thread state was found'
+    assert error['message'] == 'upstream said no'
     row = db_rows(server)[0]
     assert row['error'] == f'{status} — custom_upstream_error'
     assert row['status'] == ('rate_limited' if status == 429 else 'error')
@@ -1415,8 +1415,25 @@ def test_upstream_4xx_without_type_gets_the_per_status_default(
 
 
 @pytest.mark.parametrize('stream', [False, True])
-def test_thread_404_reaches_the_client_as_a_404_not_found(proxy, stream):
+def test_expired_thread_404_reaches_the_client_as_a_400_once(proxy, stream):
+    """ADR-0031: the client replays after a Thread 400, not after the 404."""
     message = 'No thread state was found for the requested `previous_message_id`.'
+    _FakeUpstream.status = 404
+    _FakeUpstream.error_type = 'not_found_error'
+    _FakeUpstream.error_message = message
+    server = proxy()
+    client_status, error = _error_via_proxy(server, stream)
+    assert client_status == (200 if stream else 400)
+    assert error == {'type': 'invalid_request_error', 'message': message}
+    assert len(_FakeUpstream.received) == 1
+    row = db_rows(server)[0]
+    assert row['error'] == '404 — not_found_error (sent to client as 400)'
+    assert row['status'] == 'error'
+
+
+@pytest.mark.parametrize('stream', [False, True])
+def test_other_404_reaches_the_client_as_a_404_not_found(proxy, stream):
+    message = 'model: claude-x'
     _FakeUpstream.status = 404
     _FakeUpstream.error_type = 'not_found_error'
     _FakeUpstream.error_message = message

@@ -29,6 +29,11 @@ function CopyButton({ text }: { text: string }) {
   )
 }
 
+/** The DB ``error`` of an expired-Thread 404 that the proxy sent to the client as a 400 (ADR-0031). */
+const EXPIRED_THREAD_ERROR = '404 — not_found_error (sent to client as 400)'
+const EXPIRED_THREAD_HINT = 'Upstream Thread not found, most likely expired (no request for more than 5 minutes). '
+  + 'anthrouter sent it to the client as a 400 so the client replays the conversation. This is not a model fault.'
+
 const PRE_CLASS = 'bg-slate-100 dark:bg-slate-800 p-3 rounded text-xs overflow-auto max-h-48 text-slate-800 dark:text-slate-200 whitespace-pre-wrap break-words'
 
 /**
@@ -210,6 +215,9 @@ export function RequestDetailDrawer({ requestId, onClose }: Props) {
                       <dt className="text-xs text-slate-600 dark:text-slate-400">Error</dt>
                       <dd className="text-red-700 dark:text-red-200 text-xs">{req.error}</dd>
                     </div>
+                  )}
+                  {req.error === EXPIRED_THREAD_ERROR && (
+                    <p className="text-xs text-slate-600 dark:text-slate-400">{EXPIRED_THREAD_HINT}</p>
                   )}
                   {req.upstream_request_id && (
                     <div className="flex justify-between items-start">

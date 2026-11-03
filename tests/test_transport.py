@@ -1372,3 +1372,64 @@ def test_error_log_400_carries_request_id_but_no_ratelimit_fields(caplog):
     assert 'request-id=' in caplog.text
     assert 'ratelimit=' not in caplog.text
     assert 'retry-after' not in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# ADR-0031 — expired-Thread 404 goes to the client as a 400
+# ---------------------------------------------------------------------------
+
+_THREAD_404_MESSAGE = (
+    'No thread state was found for the requested `previous_message_id`. Replay the '
+    'full conversation with `thread: {"type": "create"}` to start a new Thread.')
+
+
+def _raised(status, body):
+    with pytest.raises(AnthropicRequestError) as exc:
+        handle_error_response(status, body, _HeaderOnlyResponse({}))
+    return exc.value
+
+
+@pytest.mark.parametrize('upstream_type', ['not_found_error', None])
+def test_expired_thread_404_is_raised_as_400_with_upstream_truth(upstream_type):
+    error = {'message': _THREAD_404_MESSAGE}
+    if upstream_type:
+        error['type'] = upstream_type
+    exc = _raised(404, json.dumps({'error': error}).encode())
+    assert exc.status_code == 400
+    assert exc.error_type == 'invalid_request_error'
+    assert exc.message == _THREAD_404_MESSAGE
+    assert exc.upstream_status == 404
+    assert exc.upstream_error_type == 'not_found_error'
+    assert exc.db_error == '404 — not_found_error (sent to client as 400)'
+
+
+def test_expired_thread_rewrite_logs_one_info_line(caplog):
+    body = json.dumps({'error': {'type': 'not_found_error',
+                                 'message': _THREAD_404_MESSAGE}}).encode()
+    with caplog.at_level(logging.INFO, logger='anthrouter.http_util'):
+        _raised(404, body)
+    assert 'Upstream error HTTP 404' in caplog.text
+    assert ('Upstream Thread not found (usually expired): sent to client as 400 '
+            'so it replays') in caplog.text
+
+
+@pytest.mark.parametrize('status,message,client_status,db_error', [
+    (404, 'model: claude-x not found', 404, '404 — not_found_error'),
+    (404, 'Error: No thread state was found', 404, '404 — not_found_error'),
+    (400, _THREAD_404_MESSAGE, 400, '400 — not_found_error'),
+    (500, _THREAD_404_MESSAGE, 502, '502 — api_error'),
+])
+def test_only_the_expired_thread_404_is_rewritten(status, message, client_status, db_error):
+    body = json.dumps({'error': {'type': 'not_found_error', 'message': message}}).encode()
+    exc = _raised(status, body)
+    assert exc.status_code == client_status
+    assert exc.db_error == db_error
+    if status != 500:
+        assert exc.error_type == 'not_found_error'
+        assert exc.message == message
+
+
+def test_non_json_404_with_thread_text_is_not_rewritten():
+    exc = _raised(404, _THREAD_404_MESSAGE.encode())
+    assert exc.status_code == 404
+    assert exc.db_error == '404 — not_found_error'
