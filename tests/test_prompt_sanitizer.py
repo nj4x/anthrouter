@@ -3,7 +3,10 @@
 import hashlib
 import json
 
+import pytest
+
 from anthrouter.mapper.common import (
+    IDENTITY_SYSTEM_BLOCK_PREFIXES,
     VOLATILE_SYSTEM_BLOCK_PREFIXES,
     strip_volatile_system_blocks,
     system_content_str,
@@ -19,6 +22,8 @@ BILLING = (
     'cch=ba498; cc_prompt_id=77cb8807-0000-4000-8000-000000000001;'
 )
 CC_PREFIX = "You are Claude Code, Anthropic's official CLI for Claude."
+SDK_PREFIX = "You are a Claude agent, built on Anthropic's Claude Agent SDK."
+RECON = 'You transform a mechanically-gathered recon block into a JSON proposal.'
 
 
 def _block(text, **extra):
@@ -75,10 +80,18 @@ def test_empty_and_missing_system_are_safe():
 
 
 def test_non_dict_and_non_text_blocks_ignored():
-    system = ['bare string', {'type': 'text'}, {'text': 123}, _block(BILLING)]
+    system = ['bare string', {'type': 'text'}, {'text': 123}, _block(BILLING), _block(CC_PREFIX)]
     result, stripped = strip_volatile_system_blocks(system)
     assert stripped is True
-    assert result == ['bare string', {'type': 'text'}, {'text': 123}]
+    assert result == ['bare string', {'type': 'text'}, {'text': 123}, _block(CC_PREFIX)]
+
+
+@pytest.mark.parametrize('other', ['bare string', {'type': 'text'}, {'text': 123}, {'text': ['x']}])
+def test_non_dict_and_non_text_blocks_never_count_as_identity(other):
+    system = [_block(BILLING), other]
+    result, stripped = strip_volatile_system_blocks(system)
+    assert stripped is False
+    assert result is system
 
 
 def test_leading_whitespace_still_matches():
@@ -88,18 +101,19 @@ def test_leading_whitespace_still_matches():
 
 
 def test_all_blocks_volatile_are_kept():
-    """A billing-only system field is the request's sole marker (ADR-0025)."""
+    """A billing-only system field has no identity block to keep (ADR-0025, ADR-0029)."""
     for system in ([_block(BILLING)], [_block(BILLING), _block(BILLING)]):
         result, stripped = strip_volatile_system_blocks(system)
         assert stripped is False
         assert result is system
 
 
-def test_billing_block_is_stripped_beside_any_non_identity_block():
+def test_billing_block_is_kept_beside_a_non_identity_block():
+    """ADR-0029 narrows ADR-0025 Decision 2: no identity block, nothing stripped."""
     system = [_block(BILLING), _block('You are a helpful bot.')]
     result, stripped = strip_volatile_system_blocks(system)
-    assert stripped is True
-    assert result == [_block('You are a helpful bot.')]
+    assert stripped is False
+    assert result is system
 
 
 def test_cache_control_is_preserved_on_surviving_blocks():
@@ -114,6 +128,13 @@ def test_cache_control_is_preserved_on_surviving_blocks():
 def test_allowlist_is_a_tuple_of_prefixes():
     assert isinstance(VOLATILE_SYSTEM_BLOCK_PREFIXES, tuple)
     assert 'x-anthropic-billing-header:' in VOLATILE_SYSTEM_BLOCK_PREFIXES
+
+
+def test_identity_prefixes_are_a_tuple_of_the_two_known_identities():
+    assert IDENTITY_SYSTEM_BLOCK_PREFIXES == (
+        "You are Claude Code, Anthropic's official CLI for Claude",
+        "You are a Claude agent, built on Anthropic's Claude Agent SDK",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -373,14 +394,17 @@ def test_strip_mode_keeps_billing_only_system_and_logs_why(caplog):
     assert result.dropped == 0
     assert result.stripped_blocks == []
     assert result.sanitized_sha256 == original
-    assert 'stripping would empty the system prompt' in caplog.text
+    assert (
+        'Kept 1 volatile telemetry block(s): no identity block in the system prompt '
+        '(ADR-0029)'
+    ) in caplog.text
 
 
 def test_kept_line_is_not_logged_when_stripping_or_nothing_matches(caplog):
     with caplog.at_level('INFO', logger='anthrouter.sanitizer'):
         _run('strip', session='seam-kept-neg-1')
         _run('strip', system=[_block(CC_PREFIX)], session='seam-kept-neg-2')
-    assert 'stripping would empty the system prompt' not in caplog.text
+    assert 'no identity block in the system prompt' not in caplog.text
 
 
 def test_string_form_system_is_hashed_but_not_stripped():
@@ -480,7 +504,7 @@ def test_strip_mode_flags_unlisted_block_as_no_allowlist_match(caplog):
     assert 'mode is warn' not in caplog.text
 
 
-def test_strip_mode_flags_kept_all_telemetry_block_as_all_allowlisted(caplog):
+def test_strip_mode_flags_kept_all_telemetry_block_as_no_identity(caplog):
     tracker = PromptVolatilityTracker(min_samples=2)
     with caplog.at_level('WARNING', logger='anthrouter.sanitizer'):
         for i in range(4):
@@ -489,12 +513,12 @@ def test_strip_mode_flags_kept_all_telemetry_block_as_all_allowlisted(caplog):
                 'strip', 'post-sole', tracker=tracker,
             )
     assert [f['index'] for f in result.flagged] == [0]
-    assert 'Not stripped: every system block is allowlisted.' in caplog.text
+    assert 'Not stripped: no identity block in the system prompt.' in caplog.text
     assert 'mode is warn' not in caplog.text
 
 
 def test_kept_billing_only_turns_do_not_flag_the_sessions_identity_block(caplog):
-    """Billing-only turns sharing a session with stripped identity turns (ADR-0025)."""
+    """Billing-only turns sharing a session with stripped identity turns (ADR-0029)."""
     tracker = PromptVolatilityTracker(min_samples=2)
     with caplog.at_level('WARNING', logger='anthrouter.sanitizer'):
         for i in range(6):
@@ -522,3 +546,64 @@ def test_flagged_index_refers_to_outbound_array():
             'strip', 'post-index', tracker=tracker,
         )
     assert [f['index'] for f in result.flagged] == [0]
+
+
+# ---------------------------------------------------------------------------
+# Identity gate (ADR-0029)
+# ---------------------------------------------------------------------------
+
+def _kept_line(n):
+    return f'Kept {n} volatile telemetry block(s): no identity block in the system prompt (ADR-0029)'
+
+
+_IDENTITY_STRIPPED = [_block(CC_PREFIX), _block('Be concise.')]
+
+
+@pytest.mark.parametrize('system, expected, tracked_key, kept_count', [
+    ([_block(BILLING)], None, 'sess#no-identity', 1),
+    ([_block(BILLING), _block(RECON)], None, 'sess#no-identity', 1),
+    ([_block(BILLING), _block('You are a helpful bot.')], None, 'sess#no-identity', 1),
+    ([_block(BILLING), *_IDENTITY_STRIPPED], _IDENTITY_STRIPPED, 'sess', 0),
+    ([_block(BILLING), _block(' ' + CC_PREFIX)], [_block(' ' + CC_PREFIX)], 'sess', 0),
+    ([_block(BILLING), _block(SDK_PREFIX)], [_block(SDK_PREFIX)], 'sess', 0),
+    ([_block(BILLING), 'bare string'], None, 'sess#no-identity', 1),
+    ([_block(BILLING), _block(BILLING), _block(RECON)], None, 'sess#no-identity', 2),
+    ([_block(RECON), _block(CC_PREFIX)], None, 'sess', 0),
+    (f'{BILLING}\n{CC_PREFIX}', None, None, 0),
+    ([], None, None, 0),
+], ids=[
+    'billing', 'billing+recon', 'billing+helpful-bot', 'billing+identity+other',
+    'billing+space-identity', 'billing+agent-sdk-identity', 'billing+non-dict',
+    'two-billing+recon', 'no-volatile', 'string-form', 'empty-list',
+])
+def test_strip_happens_only_while_an_identity_block_remains(
+    caplog, system, expected, tracked_key, kept_count,
+):
+    """``expected`` is the outbound list when stripped, None when the original is kept."""
+    result, stripped = strip_volatile_system_blocks(system)
+    assert stripped is (expected is not None)
+
+    tracker = PromptVolatilityTracker()
+    payload = {'system': system}
+    with caplog.at_level('INFO', logger='anthrouter.sanitizer'):
+        sanitized = sanitize_system_prompt(payload, 'strip', 'sess', tracker=tracker)
+
+    if expected is None:
+        assert result is system
+        assert payload['system'] is system
+        assert sanitized.dropped == 0
+        assert sanitized.stripped_blocks == []
+    else:
+        assert result == expected
+        assert payload['system'] == expected
+        assert sanitized.dropped == 1
+        assert [b['block_type'] for b in sanitized.stripped_blocks] == [
+            'x-anthropic-billing-header:']
+
+    if kept_count:
+        assert _kept_line(kept_count) in caplog.text
+    else:
+        assert 'no identity block' not in caplog.text
+
+    for key in ('sess', 'sess#no-identity'):
+        assert (tracker.session_report(key) is not None) is (key == tracked_key)
