@@ -31,6 +31,12 @@ SSE_BODY = (
 )
 
 
+STREAM_ERROR_BODY = (
+    'event: error\n'
+    'data: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}\n\n'
+)
+
+
 class _FakeUpstream(BaseHTTPRequestHandler):
     """Records what it received and replies with whatever the test configured."""
 
@@ -42,6 +48,16 @@ class _FakeUpstream(BaseHTTPRequestHandler):
     error_message = 'upstream exploded'
     error_raw: bytes | None = None
     error_headers: dict = {}
+    # Per-response success ids, consumed in order: the JSON body's top-level
+    # ``id`` or the stream's ``message_start.message.id``.  Exhausted, the
+    # defaults stand.
+    message_ids: list = []
+    # Stream a ``message_start`` then an ``error`` event, with no ``message_stop``.
+    stream_error = False
+
+    def _next_id(self):
+        ids = type(self).message_ids
+        return ids.pop(0) if ids else None
 
     def do_POST(self):
         body = self.rfile.read(int(self.headers.get('Content-Length', 0)))
@@ -71,7 +87,15 @@ class _FakeUpstream(BaseHTTPRequestHandler):
             return
 
         if payload.get('stream'):
-            data = SSE_BODY.encode()
+            cls = type(self)
+            text = SSE_BODY
+            message_id = self._next_id()
+            if message_id is not None:
+                assert '"id":"msg_1"' in text, 'SSE_BODY lost its message id literal'
+                text = text.replace('"id":"msg_1"', f'"id":"{message_id}"', 1)
+            if cls.stream_error:
+                text = text.split('event: content_block_delta', 1)[0] + STREAM_ERROR_BODY
+            data = text.encode()
             self.send_response(200)
             self.send_header('Content-Type', 'text/event-stream')
             self.send_header('Content-Length', str(len(data)))
@@ -82,6 +106,9 @@ class _FakeUpstream(BaseHTTPRequestHandler):
 
         body_out = dict(type(self).json_body)
         body_out.setdefault('model', payload.get('model'))
+        message_id = self._next_id()
+        if message_id is not None:
+            body_out['id'] = message_id
         data = json.dumps(body_out).encode()
         self.send_response(200)
         self.send_header('Content-Type', 'application/json')
@@ -110,6 +137,8 @@ def upstream():
     _FakeUpstream.error_message = 'upstream exploded'
     _FakeUpstream.error_raw = None
     _FakeUpstream.error_headers = {}
+    _FakeUpstream.message_ids = []
+    _FakeUpstream.stream_error = False
     _FakeUpstream.json_body = {
         'id': 'msg_up', 'type': 'message', 'role': 'assistant',
         'content': [{'type': 'text', 'text': 'hi there'}],
