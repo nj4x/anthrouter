@@ -221,6 +221,21 @@ def _security_monitor_passthrough(payload: dict) -> ModelRoutingDecision:
     )
 
 
+def is_thread_continuation(payload: dict) -> bool:
+    """True when the request continues an upstream Thread (ADR-0027).
+
+    A future ``thread.type`` other than ``continue`` that names a
+    ``previous_message_id`` counts too: naming a previous message ties the
+    request to that message's Thread, whose model is fixed.
+    """
+    thread = payload.get('thread')
+    return (
+        isinstance(thread, dict)
+        and thread.get('type') != 'create'
+        and isinstance(thread.get('previous_message_id'), str)
+    )
+
+
 def _final_user_raw_text(payload: dict) -> str | None:
     """Raw text of the final user turn, located as routing locates it (ADR-0011).
 
@@ -415,6 +430,22 @@ def _extract_sse_stats(chunk: str, stats: dict) -> None:
             if val is None:
                 continue
             stats[stat_key] = max(stats[stat_key], int(val or 0))
+
+
+def _extract_sse_thread_marks(chunk: str, marks: dict) -> None:
+    """Capture the ``message_start`` id and whether ``message_stop`` arrived."""
+    for m in _SSE_DATA_RE.finditer(chunk):
+        try:
+            event = json.loads(m.group(1))
+        except json.JSONDecodeError:
+            continue
+        etype = event.get('type', '')
+        if etype == 'message_start':
+            message_id = (event.get('message') or {}).get('id')
+            if isinstance(message_id, str):
+                marks['id'] = message_id
+        elif etype == 'message_stop':
+            marks['stopped'] = True
 
 
 def _extract_sse_text(chunk: str, text_parts: list) -> None:
@@ -1085,8 +1116,46 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
             )
             _capture_dispatched_user_text(self, payload, self._prompt_capture)
 
+    def _pin_thread(self, payload: dict) -> ModelRoutingDecision:
+        """Routing decision for a Thread continuation: no ``route_model()``, no tier cache.
+
+        Upstream rejects any model change inside a Thread, so the recorded model
+        outranks the lock and the auto-routing flag.  ``thread_pinned`` is a
+        deliberate exception to ADR-0016: it can exceed the lock or baseline.
+        An id the map does not hold falls closed to the routing baseline
+        (ADR-0027).
+        """
+        raw_model = payload.get('model')
+        requested = str(raw_model) if isinstance(raw_model, str) else repr(raw_model)
+        lock = self.config.lock_requested_model
+        baseline = lock if lock != 'off' else requested
+        pinned = self.sessions.thread_model(payload['thread']['previous_message_id'])
+        routed = pinned if pinned is not None else baseline
+        # An unpinned, unlocked turn keeps its own ``model`` untouched, so a
+        # missing or non-string one still fails upstream rather than becoming
+        # the string "None".
+        if pinned is not None or lock != 'off':
+            payload['model'] = routed
+        return ModelRoutingDecision(
+            requested_model=requested,
+            routed_model=routed,
+            classification=None,
+            applied=(routed != requested),
+            reason_code='thread_pinned' if pinned is not None else 'thread_pin_unknown',
+        )
+
     def _route(self, payload: dict, sess_key: str | None, credentials: dict) -> None:
-        """Apply the model lock, run ``route_model()`` and the session tier cache."""
+        """Pin a Thread continuation, else apply the model lock and run ``route_model()`` and the tier cache."""
+        if is_thread_continuation(payload):
+            routing = self._pin_thread(payload)
+            self._routing = routing
+            logger.info(
+                '%s Model routing: requested=%s routed=%s applied=%s reason=%s',
+                self._log_tag(), routing.requested_model, routing.routed_model,
+                routing.applied, routing.reason_code,
+            )
+            return
+
         config = self.config
         routing_on = sess_key is not None and self.sessions.model_routing_enabled(sess_key)
         # A per-session routing override must reach route_model, which reads the
@@ -1181,10 +1250,16 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
 
     def _dispatch(self, payload: dict, credentials: dict, sess_key: str | None) -> None:
         streaming = bool(payload.get('stream'))
-        logger.info('%s Routing request: operation=messages stream=%s model=%s',
-                    self._log_tag(), streaming, payload.get('model', ''))
+        thread = payload.get('thread')
+        thread_tag = ''
+        if isinstance(thread, dict):
+            thread_type = thread.get('type')
+            thread_tag = f" thread={thread_type if isinstance(thread_type, str) else 'none'}"
+        logger.info('%s Routing request: operation=messages stream=%s model=%s%s',
+                    self._log_tag(), streaming, payload.get('model', ''), thread_tag)
         start_time = time.monotonic()
         model = payload.get('model', '')
+        thread_model = model if isinstance(thread, dict) and isinstance(model, str) else None
         sid = sess_key or UNTRACKED_SESSION_ID
 
         if streaming:
@@ -1192,7 +1267,9 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
                 payload, credentials, self.config, ratelimit_out=self._ratelimit,
                 attempt_out=self._attempt,
             )
-            wrapped = self._usage_sse_wrapper(sse_gen, start_time, model, sid)
+            wrapped = self._usage_sse_wrapper(
+                sse_gen, start_time, model, sid, thread_model=thread_model,
+            )
             self._send_sse(self._rewrite_response_model_sse(wrapped))
             return
 
@@ -1201,6 +1278,9 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
             attempt_out=self._attempt,
         )
         self.sessions.record_ratelimit(self._ratelimit)
+        message_id = result.get('id')
+        if thread_model is not None and isinstance(message_id, str):
+            self.sessions.record_thread(message_id, thread_model)
         usage = result.get('usage', {}) or {}
         stats = {
             'input_tokens': usage.get('input_tokens', 0),
@@ -1233,8 +1313,14 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
                 yield _rewrite_message_start_model(chunk, requested)
         return _wrapped()
 
-    def _usage_sse_wrapper(self, sse_gen, start_time: float, model: str, sid: str):
-        """Yield SSE chunks, parsing usage, text, and errors in a single pass."""
+    def _usage_sse_wrapper(self, sse_gen, start_time: float, model: str, sid: str,
+                           thread_model: str | None = None):
+        """Yield SSE chunks, parsing usage, text, and errors in a single pass.
+
+        ``thread_model`` is set only for a request that carried a ``thread``: the
+        ``message_start`` id is recorded against it once ``message_stop`` arrives
+        with no ``error`` event (ADR-0027).
+        """
         stats = {
             'input_tokens': 0,
             'output_tokens': 0,
@@ -1244,6 +1330,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         capture_text = self.request_db is not None or bool(getattr(self, '_caveman_state', None))
         text_parts: list[str] = []
         errored = False
+        thread_marks: dict = {'id': None, 'stopped': False}
         # An upstream failure raised out of the stream is delivered by _send_sse
         # as an out-of-band error frame, so it never appears as an "event: error"
         # line here.  Without capturing it, a stream that carried no response at
@@ -1255,6 +1342,8 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         try:
             for chunk in sse_gen:
                 _extract_sse_stats(chunk, stats)
+                if thread_model is not None:
+                    _extract_sse_thread_marks(chunk, thread_marks)
                 if capture_text:
                     _extract_sse_text(chunk, text_parts)
                 if 'event: error' in line_tail + chunk:
@@ -1278,6 +1367,9 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
             self.sessions.record_ratelimit(self._ratelimit)
             if upstream_error is not None:
                 errored = True
+            if (thread_model is not None and not errored and thread_marks['stopped']
+                    and thread_marks['id'] is not None):
+                self.sessions.record_thread(thread_marks['id'], thread_model)
             self._record_session_context(stats)
             if not errored:
                 self._record_caveman_prose(''.join(text_parts))
