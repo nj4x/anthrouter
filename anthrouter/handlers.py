@@ -223,7 +223,7 @@ def _security_monitor_passthrough(payload: dict) -> ModelRoutingDecision:
     )
 
 
-def is_thread_continuation(payload: dict) -> bool:
+def _is_thread_continuation(payload: dict) -> bool:
     """True when the request continues an upstream Thread (ADR-0027).
 
     A future ``thread.type`` other than ``continue`` that names a
@@ -435,7 +435,11 @@ def _extract_sse_stats(chunk: str, stats: dict) -> None:
 
 
 def _extract_sse_thread_marks(chunk: str, marks: dict) -> None:
-    """Capture the ``message_start`` id and whether ``message_stop`` arrived."""
+    """Capture the ``message_start`` id and whether ``message_stop`` or an ``error`` event arrived.
+
+    Parsed events only: a text delta that merely mentions ``event: error`` must
+    not cost the Thread its pin.
+    """
     for m in _SSE_DATA_RE.finditer(chunk):
         try:
             event = json.loads(m.group(1))
@@ -448,6 +452,8 @@ def _extract_sse_thread_marks(chunk: str, marks: dict) -> None:
                 marks['id'] = message_id
         elif etype == 'message_stop':
             marks['stopped'] = True
+        elif etype == 'error':
+            marks['error'] = True
 
 
 def _extract_sse_text(chunk: str, text_parts: list) -> None:
@@ -1153,7 +1159,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
 
     def _route(self, payload: dict, sess_key: str | None, credentials: dict) -> None:
         """Pin a Thread continuation, else apply the model lock and run ``route_model()`` and the tier cache."""
-        if is_thread_continuation(payload):
+        if _is_thread_continuation(payload):
             routing = self._pin_thread(payload)
             self._routing = routing
             logger.info(
@@ -1335,7 +1341,9 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
 
         ``thread_model`` is set only for a request that carried a ``thread``: the
         ``message_start`` id is recorded against it once ``message_stop`` arrives
-        with no ``error`` event (ADR-0027), with ``long_context`` alongside.
+        with no ``error`` event (ADR-0027), with ``long_context`` alongside.  The
+        record lands before the ``message_stop`` chunk is yielded, so a client
+        that continues the Thread the moment it sees the stop finds the pin.
         """
         stats = {
             'input_tokens': 0,
@@ -1346,7 +1354,8 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         capture_text = self.request_db is not None or bool(getattr(self, '_caveman_state', None))
         text_parts: list[str] = []
         errored = False
-        thread_marks: dict = {'id': None, 'stopped': False}
+        thread_marks: dict = {'id': None, 'stopped': False, 'error': False}
+        thread_recorded = False
         # An upstream failure raised out of the stream is delivered by _send_sse
         # as an out-of-band error frame, so it never appears as an "event: error"
         # line here.  Without capturing it, a stream that carried no response at
@@ -1358,8 +1367,13 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         try:
             for chunk in sse_gen:
                 _extract_sse_stats(chunk, stats)
-                if thread_model is not None:
+                if thread_model is not None and not thread_recorded:
                     _extract_sse_thread_marks(chunk, thread_marks)
+                    if (thread_marks['stopped'] and not thread_marks['error']
+                            and thread_marks['id'] is not None):
+                        self.sessions.record_thread(
+                            thread_marks['id'], thread_model, long_context)
+                        thread_recorded = True
                 if capture_text:
                     _extract_sse_text(chunk, text_parts)
                 if 'event: error' in line_tail + chunk:
@@ -1383,9 +1397,6 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
             self.sessions.record_ratelimit(self._ratelimit)
             if upstream_error is not None:
                 errored = True
-            if (thread_model is not None and not errored and thread_marks['stopped']
-                    and thread_marks['id'] is not None):
-                self.sessions.record_thread(thread_marks['id'], thread_model, long_context)
             self._record_session_context(stats)
             if not errored:
                 self._record_caveman_prose(''.join(text_parts))

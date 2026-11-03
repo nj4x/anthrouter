@@ -105,10 +105,6 @@ class SessionState:
         with self._lock:
             return self._thread_models.get(message_id)
 
-    def thread_model(self, message_id: str) -> str | None:
-        pin = self.thread_pin(message_id)
-        return pin[0] if pin is not None else None
-
     # -- context observations -------------------------------------------------
 
     def record_context(self, ctx_key: str, measured_floor: int, est_ratio: float) -> None:

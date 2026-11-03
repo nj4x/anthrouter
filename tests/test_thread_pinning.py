@@ -6,8 +6,6 @@ import urllib.error
 
 import pytest
 
-import anthrouter.handlers as handlers
-from anthrouter.handlers import is_thread_continuation
 from anthrouter.model_config import resolve_model
 from anthrouter.session_state import MAX_ENTRIES, SessionState
 from tests.conftest import SESSION, _FakeUpstream, db_rows, post
@@ -59,38 +57,43 @@ def _reason(server):
     ('continue', False),
     (None, False),
 ])
-def test_continuation_predicate(thread, expected):
-    assert is_thread_continuation({'thread': thread}) is expected
+def test_continuation_predicate(proxy, thread, expected):
+    server = proxy(**ROUTED)
+    post(server, '/v1/messages', {
+        'model': 'sonnet', 'metadata': {'user_id': SESSION}, 'thread': thread,
+        'messages': [{'role': 'user', 'content': 'hi'}]})
+    assert (_reason(server) == 'thread_pin_unknown') is expected
 
 
-def test_payload_without_thread_is_not_a_continuation():
-    assert is_thread_continuation({'model': 'sonnet'}) is False
+def test_payload_without_thread_is_not_a_continuation(proxy):
+    server = proxy(**ROUTED)
+    post(server, '/v1/messages', {
+        'model': 'sonnet', 'metadata': {'user_id': SESSION},
+        'messages': [{'role': 'user', 'content': 'hi'}]})
+    assert not _reason(server).startswith('thread_pin')
 
 
 def test_thread_map_evicts_oldest_first_and_is_keyed_by_id():
+    # Direct on SessionState: filling the map through the proxy would take
+    # 10000 round trips.
     assert MAX_ENTRIES == 10000
     state = SessionState()
     for i in range(MAX_ENTRIES + 5):
         state.record_thread(f'msg_{i}', 'haiku')
-    assert state.thread_model('msg_0') is None
-    assert state.thread_model(f'msg_{MAX_ENTRIES + 4}') == 'haiku'
-    assert state.thread_model('absent') is None
+    assert state.thread_pin('msg_0') is None
+    assert state.thread_pin(f'msg_{MAX_ENTRIES + 4}') == ('haiku', False)
+    assert state.thread_pin('absent') is None
 
 
-def test_continuation_goes_to_the_creating_turns_model_without_routing(proxy, monkeypatch):
-    calls = []
-    real = handlers.route_model
-    monkeypatch.setattr(handlers, 'route_model',
-                        lambda *a, **k: calls.append(1) or real(*a, **k))
+def test_continuation_goes_to_the_creating_turns_model_without_routing(proxy):
     server = proxy(**ROUTED)
     _FakeUpstream.message_ids = ['msg_A']
     post(server, '/v1/messages', _create())
     assert _sent() == HAIKU
-    assert len(calls) == 1
 
     post(server, '/v1/messages', _continue('msg_A', model='opus'))
     assert _sent() == HAIKU
-    assert len(calls) == 1
+    assert len(_FakeUpstream.received) == 2
     row = db_rows(server)[0]
     assert row['reason_code'] == 'thread_pinned'
     assert row['routed_model'] == 'haiku'
@@ -148,6 +151,18 @@ def test_stream_with_an_error_event_records_nothing(proxy):
     post(server, '/v1/messages', _continue('msg_A', model='opus'))
     assert _sent() == OPUS
     assert _reason(server) == 'thread_pin_unknown'
+
+
+def test_stream_text_mentioning_an_error_event_still_records(proxy):
+    server = proxy(**ROUTED)
+    _FakeUpstream.message_ids = ['msg_T']
+    _FakeUpstream.stream_text = 'SSE frames look like\nevent: error\ndata: {...}'
+    body = post(server, '/v1/messages', _create(stream=True), raw=True)
+    assert 'event: error' in body
+
+    post(server, '/v1/messages', _continue('msg_T', model='opus'))
+    assert _sent() == HAIKU
+    assert _reason(server) == 'thread_pinned'
 
 
 def test_stream_records_the_message_start_id_after_message_stop(proxy):
@@ -261,11 +276,12 @@ def test_routing_request_line_names_the_thread_type_and_no_id(proxy, caplog):
     assert not any('msg_secret' in r.getMessage() for r in caplog.records)
 
 
-def test_thread_without_a_type_logs_none(proxy, caplog):
+@pytest.mark.parametrize('thread', [{}, {'type': 7}])
+def test_thread_without_a_string_type_logs_none(proxy, caplog, thread):
     server = proxy()
     with caplog.at_level(logging.INFO):
         post(server, '/v1/messages', {
-            'model': 'sonnet', 'thread': {}, 'messages': [{'role': 'user', 'content': 'hi'}]})
+            'model': 'sonnet', 'thread': thread, 'messages': [{'role': 'user', 'content': 'hi'}]})
     assert any(r.getMessage().endswith('thread=none') for r in caplog.records)
 
 
@@ -294,12 +310,13 @@ def test_pinned_continuation_keeps_the_size_floors_long_context_beta(proxy, stre
     assert 'context-1m' in _FakeUpstream.received[-1]['headers'].get('anthropic-beta', '')
 
 
-def test_pinned_continuation_of_a_short_thread_adds_no_long_context_beta(proxy):
+@pytest.mark.parametrize('stream', [False, True])
+def test_pinned_continuation_of_a_short_thread_adds_no_long_context_beta(proxy, stream):
     server = proxy(**ROUTED, auto_model_routing_long='opus[1m]',
                    auto_model_routing_long_context_threshold=1000)
     _FakeUpstream.message_ids = ['msg_S']
-    post(server, '/v1/messages', _create())
-    post(server, '/v1/messages', _continue('msg_S'))
+    post(server, '/v1/messages', _create(stream=stream), raw=stream)
+    post(server, '/v1/messages', _continue('msg_S', stream=stream), raw=stream)
     assert _reason(server) == 'thread_pinned'
     assert 'context-1m' not in _FakeUpstream.received[-1]['headers'].get('anthropic-beta', '')
 
