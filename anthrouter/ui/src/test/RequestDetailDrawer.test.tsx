@@ -107,3 +107,56 @@ describe('RequestDetailDrawer upstream request-id', () => {
     expect(screen.queryByText('Upstream request-id')).not.toBeInTheDocument()
   })
 })
+
+describe('RequestDetailDrawer opening system messages (ADR-0030)', () => {
+  it('diffs the opening system text when the caveman rewrite changed it', async () => {
+    const { container } = show({
+      opening_system_content: 'Answer in full sentences.',
+      opening_system_dispatched_content: 'Answer in fragments.',
+    })
+    expect(await screen.findByText('Opening system messages')).toBeInTheDocument()
+    expect(screen.getByText('changed by proxy')).toBeInTheDocument()
+    const removed = [...container.ownerDocument.querySelectorAll('del')].map((d) => d.textContent).join('')
+    expect(removed).toContain('full sentences')
+    fireEvent.click(screen.getByRole('button', { name: 'as sent' }))
+    expect(screen.getByText('Answer in fragments.')).toBeInTheDocument()
+  })
+
+  it.each([
+    ['both null', { opening_system_content: null, opening_system_dispatched_content: null }],
+    ['original missing', { opening_system_content: null, opening_system_dispatched_content: 'x' }],
+    ['dispatched missing', { opening_system_content: 'x', opening_system_dispatched_content: null }],
+    ['equal', { opening_system_content: 'x', opening_system_dispatched_content: 'x' }],
+  ])('shows no panel when %s', async (_name, fields) => {
+    show({ ...fields, user_prompt_text: 'hello' })
+    expect(await screen.findByText('hello')).toBeInTheDocument()
+    expect(screen.queryByText('Opening system messages')).not.toBeInTheDocument()
+  })
+})
+
+describe('RequestDetailDrawer attribution strip count (ADR-0030)', () => {
+  it('shows the count on an unchanged user prompt', async () => {
+    show({ user_prompt_text: 'later turn', user_prompt_dispatched_text: null, attribution_reminders_stripped: 3 })
+    expect(await screen.findByText('3 attribution reminders stripped')).toBeInTheDocument()
+    expect(screen.queryByText('changed by proxy')).not.toBeInTheDocument()
+  })
+
+  it('shows the count next to the changed-by-proxy badge', async () => {
+    show({ user_prompt_text: 'q <r>', user_prompt_dispatched_text: 'q ', attribution_reminders_stripped: 1 })
+    expect(await screen.findByText('1 attribution reminder stripped')).toBeInTheDocument()
+    expect(screen.getByText('changed by proxy')).toBeInTheDocument()
+  })
+
+  it('shows no count badge when the count is null', async () => {
+    show({ user_prompt_text: 'plain', attribution_reminders_stripped: null })
+    expect(await screen.findByText('plain')).toBeInTheDocument()
+    expect(screen.queryByText(/attribution reminders? stripped/)).not.toBeInTheDocument()
+  })
+})
+
+describe('RequestDetailDrawer strip count without user text (ADR-0030)', () => {
+  it('shows the count when the last user message has no text', async () => {
+    show({ user_prompt_text: null, attribution_reminders_stripped: 2 })
+    expect(await screen.findByText('2 attribution reminders stripped')).toBeInTheDocument()
+  })
+})

@@ -35,13 +35,15 @@ const PRE_CLASS = 'bg-slate-100 dark:bg-slate-800 p-3 rounded text-xs overflow-a
  * A prompt panel that shows the original text, or a diff against what the
  * proxy dispatched when a stage changed it (ADR-0024).  ``dispatched`` null or
  * equal to ``original`` means sent unchanged.  Copy always copies the original.
+ * ``note`` is an extra header badge shown whether or not the text changed.
  */
-function PromptPanel({ title, unchangedTitle = title, original, dispatched, pretty }: {
+function PromptPanel({ title, unchangedTitle = title, original, dispatched, pretty, note }: {
   title: string
   unchangedTitle?: string
   original: string
   dispatched: string | null | undefined
   pretty: boolean
+  note?: string | null
 }) {
   const [asSent, setAsSent] = useState(false)
   const changed = dispatched != null && dispatched !== original
@@ -63,6 +65,11 @@ function PromptPanel({ title, unchangedTitle = title, original, dispatched, pret
           {changed && (
             <span className="ml-2 normal-case font-normal bg-amber-100 dark:bg-amber-900 text-amber-800 dark:text-amber-200 px-2 py-0.5 rounded">
               changed by proxy
+            </span>
+          )}
+          {note && (
+            <span className="ml-2 normal-case font-normal bg-amber-100 dark:bg-amber-900 text-amber-800 dark:text-amber-200 px-2 py-0.5 rounded">
+              {note}
             </span>
           )}
         </span>
@@ -98,6 +105,12 @@ function PromptPanel({ title, unchangedTitle = title, original, dispatched, pret
       </pre>
     </section>
   )
+}
+
+/** Badge text for the attribution strip count, which covers every user turn (ADR-0030). */
+function stripCountNote(count: number | null | undefined): string | null {
+  if (!count || count <= 0) return null
+  return `${count} attribution reminder${count === 1 ? '' : 's'} stripped`
 }
 
 function cacheHitRatio(d: RequestDetail): string {
@@ -289,13 +302,23 @@ export function RequestDetailDrawer({ requestId, onClose }: Props) {
               </section>
 
               {/* User prompt */}
-              {req.user_prompt_text && (
+              {req.user_prompt_text ? (
                 <PromptPanel
                   title="User prompt"
                   original={req.user_prompt_text}
                   dispatched={req.user_prompt_dispatched_text}
                   pretty={false}
+                  note={stripCountNote(req.attribution_reminders_stripped)}
                 />
+              ) : stripCountNote(req.attribution_reminders_stripped) && (
+                <section>
+                  <h3 className="text-xs font-semibold text-slate-600 dark:text-slate-400 uppercase tracking-wide mb-2">
+                    User prompt{' '}
+                    <span className="normal-case font-normal bg-amber-100 dark:bg-amber-900 text-amber-800 dark:text-amber-200 px-2 py-0.5 rounded">
+                      {stripCountNote(req.attribution_reminders_stripped)}
+                    </span>
+                  </h3>
+                </section>
               )}
 
               {/* Model response */}
@@ -319,6 +342,18 @@ export function RequestDetailDrawer({ requestId, onClose }: Props) {
                   original={req.system_prompt_content}
                   dispatched={req.system_prompt_dispatched_content}
                   pretty
+                />
+              )}
+
+              {/* Opening system messages: only when the caveman rewrite changed them (ADR-0030) */}
+              {req.opening_system_content != null
+                && req.opening_system_dispatched_content != null
+                && req.opening_system_content !== req.opening_system_dispatched_content && (
+                <PromptPanel
+                  title="Opening system messages"
+                  original={req.opening_system_content}
+                  dispatched={req.opening_system_dispatched_content}
+                  pretty={false}
                 />
               )}
 

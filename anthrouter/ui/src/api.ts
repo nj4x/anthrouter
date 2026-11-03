@@ -37,6 +37,12 @@ export interface RequestRow {
   system_prompt_sanitized_content: string | null
   /** System prompt as dispatched (caveman, else sanitized); null when unchanged. */
   system_prompt_dispatched_content?: string | null
+  /** Opening turn's inline role:'system' text before the caveman rewrite; null when unchanged (ADR-0030). */
+  opening_system_content?: string | null
+  /** Opening turn's inline role:'system' text as dispatched; null when unchanged (ADR-0030). */
+  opening_system_dispatched_content?: string | null
+  /** Attribution reminders stripped across every user turn; null when none or no data (ADR-0030). */
+  attribution_reminders_stripped?: number | null
   tools_content: string | null
   system_prompt_score: number | null
   user_prompt_score: number | null

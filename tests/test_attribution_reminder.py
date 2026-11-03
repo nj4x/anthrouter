@@ -211,11 +211,29 @@ def _payload(system=None):
 
 
 def test_handler_strips_when_on(caplog):
-    payload = _payload()
+    payload, capture = _payload(), {}
     with caplog.at_level('INFO', logger='anthrouter.handlers'):
-        _strip_attribution_reminder(_handler(), payload, SimpleNamespace(strip_attribution_reminder='on'))
+        _strip_attribution_reminder(_handler(), payload, SimpleNamespace(strip_attribution_reminder='on'), capture)
     assert payload['messages'][0]['content'] == 'q '
     assert 'Stripped 1 attribution reminder(s) from user messages' in caplog.text
+    assert capture == {'attribution_reminders_stripped': 1}
+
+
+def test_handler_counts_strips_across_every_user_turn():
+    payload = {'messages': [
+        _user('a ' + REMINDER), {'role': 'assistant', 'content': 'x'}, _user('b ' + REMINDER),
+        {'role': 'assistant', 'content': 'y'}, _user('c'),
+    ]}
+    capture = {}
+    _strip_attribution_reminder(_handler(), payload, SimpleNamespace(strip_attribution_reminder='on'), capture)
+    assert capture == {'attribution_reminders_stripped': 2}
+
+
+def test_handler_records_no_count_when_nothing_stripped():
+    capture = {}
+    _strip_attribution_reminder(
+        _handler(), {'messages': [_user('q')]}, SimpleNamespace(strip_attribution_reminder='on'), capture)
+    assert capture == {}
 
 
 @pytest.mark.parametrize('mode,system', [
@@ -223,9 +241,10 @@ def test_handler_strips_when_on(caplog):
     ('on', HAPPY_NEW_YEAR_PREFIX),
 ], ids=['off', 'security-monitor'])
 def test_handler_skips(mode, system):
-    payload = _payload(system)
-    _strip_attribution_reminder(_handler(), payload, SimpleNamespace(strip_attribution_reminder=mode))
+    payload, capture = _payload(system), {}
+    _strip_attribution_reminder(_handler(), payload, SimpleNamespace(strip_attribution_reminder=mode), capture)
     assert payload == _payload(system)
+    assert capture == {}
 
 
 def test_handler_never_raises(monkeypatch, caplog):
@@ -234,10 +253,11 @@ def test_handler_never_raises(monkeypatch, caplog):
     def boom(messages):
         raise RuntimeError('boom')
     monkeypatch.setattr(handlers, 'strip_attribution_reminders', boom)
-    payload = _payload()
+    payload, capture = _payload(), {}
     with caplog.at_level('WARNING', logger='anthrouter.handlers'):
-        _strip_attribution_reminder(_handler(), payload, SimpleNamespace(strip_attribution_reminder='on'))
+        _strip_attribution_reminder(_handler(), payload, SimpleNamespace(strip_attribution_reminder='on'), capture)
     assert payload == _payload()
+    assert capture == {}
     assert 'Attribution-reminder strip failed' in caplog.text
 
 
