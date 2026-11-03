@@ -1,5 +1,6 @@
 from .common import (
     CLASSIFIER_SENTINEL_KEY,
+    IDENTITY_SYSTEM_BLOCK_PREFIXES,
     VOLATILE_SYSTEM_BLOCK_PREFIXES,
     AnthropicRequestError,
     anthropic_error_payload,
@@ -12,6 +13,7 @@ from .common import (
 
 __all__ = [
     'CLASSIFIER_SENTINEL_KEY',
+    'IDENTITY_SYSTEM_BLOCK_PREFIXES',
     'VOLATILE_SYSTEM_BLOCK_PREFIXES',
     'AnthropicRequestError',
     'anthropic_error_payload',

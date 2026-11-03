@@ -169,6 +169,18 @@ VOLATILE_SYSTEM_BLOCK_PREFIXES = (
     'x-anthropic-billing-header:',
 )
 
+# Prefixes of the Claude Code / Agent SDK identity block.  Upstream answers a
+# header-less ``429 rate_limit_error`` to a request that carries neither this
+# block nor the billing block, so allowlisted blocks are stripped only while an
+# identity block remains (ADR-0029).  A missing prefix fails safe: the billing
+# block is kept and the request only misses the prompt cache.  The first entry
+# also matches the ``..., running within the Claude Agent SDK.`` form; the
+# second is the Agent SDK's default prompt, unconfirmed against recorded traffic.
+IDENTITY_SYSTEM_BLOCK_PREFIXES = (
+    "You are Claude Code, Anthropic's official CLI for Claude",
+    "You are a Claude agent, built on Anthropic's Claude Agent SDK",
+)
+
 
 def strip_volatile_system_blocks(system):
     """Drop allowlisted cache-hostile telemetry blocks from a ``system`` field.
@@ -180,27 +192,34 @@ def strip_volatile_system_blocks(system):
 
     Returns ``(system, stripped)``.  The original object is returned unchanged
     when nothing matched, when ``system`` is a bare string, when it is empty, or
-    when every block matched.  An all-telemetry system field is kept whole: the
-    billing block is then the request's only Claude Code marker, and upstream
-    answers a header-less ``429 rate_limit_error`` to a request that carries
-    neither it nor the identity block (ADR-0025).
+    when no identity block would remain.  Without an identity block the billing
+    block is the request's only Claude Code marker, and upstream answers a
+    header-less ``429 rate_limit_error`` to a request that carries neither
+    (ADR-0029, which subsumes ADR-0025's all-telemetry case).
     """
     if not system or not isinstance(system, list):
         return system, False
     kept = [b for b in system if not is_volatile_system_block(b)]
-    if not kept or len(kept) == len(system):
+    if len(kept) == len(system) or not any(is_identity_system_block(b) for b in kept):
         return system, False
     return kept, True
 
 
 def is_volatile_system_block(block):
     """True when ``block`` is an allowlisted cache-hostile telemetry block."""
+    return _text_starts_with(block, VOLATILE_SYSTEM_BLOCK_PREFIXES)
+
+
+def _text_starts_with(block, prefixes):
     if not isinstance(block, dict):
         return False
     text = block.get('text')
     if not isinstance(text, str):
         return False
     stripped = text.lstrip()
-    return any(
-        stripped.startswith(prefix) for prefix in VOLATILE_SYSTEM_BLOCK_PREFIXES
-    )
+    return any(stripped.startswith(prefix) for prefix in prefixes)
+
+
+def is_identity_system_block(block):
+    """True when ``block`` is a Claude Code or Agent SDK identity block (ADR-0029)."""
+    return _text_starts_with(block, IDENTITY_SYSTEM_BLOCK_PREFIXES)

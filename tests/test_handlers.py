@@ -354,7 +354,7 @@ def test_original_system_hash_survives_sanitization(proxy):
     server = proxy(sanitize_system_prompt='strip')
     system = [
         {'type': 'text', 'text': 'x-anthropic-billing-header: cc_prompt_id=abc'},
-        {'type': 'text', 'text': 'You are Claude Code.'},
+        {'type': 'text', 'text': "You are Claude Code, Anthropic's official CLI for Claude."},
     ]
     post(server, '/v1/messages', {
         'model': 'sonnet', 'system': system, 'metadata': {'user_id': SESSION},
@@ -699,6 +699,19 @@ class TestSecurityMonitorPassthrough:
         payload = _monitor_payload()
         post(server, '/v1/messages', payload)
         assert _FakeUpstream.received[0]['payload']['system'] == payload['system']
+
+    def test_monitor_request_with_identity_block_still_forwards_unsanitized(self, proxy):
+        """The identity gate (ADR-0029) would strip here; the monitor exemption must not."""
+        server = proxy(sanitize_system_prompt='strip', auto_model_routing=True,
+                       lock_requested_model='sonnet')
+        payload = _monitor_payload()
+        payload['system'].append(
+            {'type': 'text', 'text': "You are Claude Code, Anthropic's official CLI for Claude."})
+        post(server, '/v1/messages', payload)
+        sent = _FakeUpstream.received[0]['payload']
+        assert sent['system'] == payload['system']
+        assert sent['model'] == 'claude-sonnet-5'
+        assert db_rows(server)[0]['reason_code'] == 'security_monitor_passthrough'
 
     def test_monitor_request_makes_no_volatility_observation(self, proxy, monkeypatch):
         import anthrouter.sanitizer as sanitizer
