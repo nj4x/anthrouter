@@ -51,3 +51,7 @@ The obvious match, "any reminder containing `Co-Authored-By` or `Generated with`
 - **Remove only the offending lines.** Rejected: leaves an empty "attribution guidance" reminder and tracks line wording.
 - **Extend the sanitizer.** Rejected: different field, different modes, policy rather than cache cost.
 - **Latest turn only.** Rejected: partial stripping changes the cached prefix between turns.
+
+## Amendment (2026-11-03): recording
+
+Decision 7 ("No schema change") is amended. ADR-0024 added `requests.user_prompt_dispatched_text`, the last user message as dispatched. ADR-0030 adds `requests.attribution_reminders_stripped`, the strip count across all user turns. The INFO log line stays.

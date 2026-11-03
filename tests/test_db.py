@@ -57,8 +57,8 @@ def _record(store, **kwargs):
 # Schema
 # ---------------------------------------------------------------------------
 
-def test_schema_version_is_six(db):
-    assert db._conn.execute('PRAGMA user_version').fetchone()[0] == 7
+def test_schema_version_is_eight(db):
+    assert db._conn.execute('PRAGMA user_version').fetchone()[0] == 8
 
 
 def _requests_columns(conn):
@@ -82,7 +82,7 @@ def test_version_3_db_gains_stop_reason_column_on_open(tmp_path):
 
     store = RequestDB(path)
     assert 'classifier_stop_reason' in _requests_columns(store._conn)
-    assert store._conn.execute('PRAGMA user_version').fetchone()[0] == 7
+    assert store._conn.execute('PRAGMA user_version').fetchone()[0] == 8
     store.close()
 
 
@@ -95,7 +95,7 @@ def test_migration_survives_column_already_present_at_version_3(tmp_path):
     _make_version_3_db(path, keep_column=True)
 
     store = RequestDB(path)
-    assert store._conn.execute('PRAGMA user_version').fetchone()[0] == 7
+    assert store._conn.execute('PRAGMA user_version').fetchone()[0] == 8
     assert 'classifier_stop_reason' in _requests_columns(store._conn)
     store.close()
 
@@ -334,7 +334,7 @@ def test_version_5_db_gains_dispatched_text_column(tmp_path):
 
     store = RequestDB(path)
     assert 'user_prompt_dispatched_text' in _requests_columns(store._conn)
-    assert store._conn.execute('PRAGMA user_version').fetchone()[0] == 7
+    assert store._conn.execute('PRAGMA user_version').fetchone()[0] == 8
     row = store.get_request(_record(store, user_prompt_dispatched_text='sent'))
     assert row['user_prompt_dispatched_text'] == 'sent'
     store.close()
@@ -350,7 +350,7 @@ def test_migration_5_survives_column_already_present(tmp_path):
     raw.close()
 
     store = RequestDB(path)
-    assert store._conn.execute('PRAGMA user_version').fetchone()[0] == 7
+    assert store._conn.execute('PRAGMA user_version').fetchone()[0] == 8
     store.close()
 
 
@@ -365,7 +365,7 @@ def test_version_6_db_gains_upstream_request_id_column(tmp_path):
 
     store = RequestDB(path)
     assert 'upstream_request_id' in _requests_columns(store._conn)
-    assert store._conn.execute('PRAGMA user_version').fetchone()[0] == 7
+    assert store._conn.execute('PRAGMA user_version').fetchone()[0] == 8
     row = store.get_request(_record(store, upstream_request_id='req_011CABC'))
     assert row['upstream_request_id'] == 'req_011CABC'
     store.close()
@@ -381,7 +381,7 @@ def test_migration_6_survives_column_already_present(tmp_path):
     raw.close()
 
     store = RequestDB(path)
-    assert store._conn.execute('PRAGMA user_version').fetchone()[0] == 7
+    assert store._conn.execute('PRAGMA user_version').fetchone()[0] == 8
     store.close()
 
 
@@ -474,7 +474,7 @@ def test_version_4_db_gains_caveman_column_and_triggers(tmp_path):
 
     store = RequestDB(path)
     assert 'system_prompt_caveman_sha256' in _requests_columns(store._conn)
-    assert store._conn.execute('PRAGMA user_version').fetchone()[0] == 7
+    assert store._conn.execute('PRAGMA user_version').fetchone()[0] == 8
     _record(store, system_prompt_caveman_sha256='ddd',
             prompt_store_entries={'ddd': ('system', 'rewritten')})
     assert store.get_prompt('ddd')['ref_count'] == 1
@@ -658,3 +658,103 @@ def test_cache_savings_is_the_avoided_input_price():
 
 def test_cache_savings_is_none_without_cache_reads():
     assert compute_cache_savings('haiku', 0) is None
+
+
+# ---------------------------------------------------------------------------
+# Opening system messages and attribution strip count (ADR-0030)
+# ---------------------------------------------------------------------------
+
+def test_get_request_returns_opening_system_contents(db):
+    row = db.get_request(_record(
+        db,
+        opening_system_sha256='eee',
+        opening_system_dispatched_sha256='fff',
+        prompt_store_entries={'eee': ('system', 'original style'), 'fff': ('system', 'rewritten style')},
+    ))
+    assert row['opening_system_content'] == 'original style'
+    assert row['opening_system_dispatched_content'] == 'rewritten style'
+
+
+def test_unchanged_opening_system_has_null_contents(db):
+    row = db.get_request(_record(db))
+    assert row['opening_system_sha256'] is None
+    assert row['opening_system_content'] is None
+    assert row['opening_system_dispatched_content'] is None
+
+
+def test_opening_system_hash_with_no_prompt_store_row_yields_null_content(db):
+    row = db.get_request(_record(
+        db, opening_system_sha256='gone', opening_system_dispatched_sha256='gone2'))
+    assert row['opening_system_content'] is None
+    assert row['opening_system_dispatched_content'] is None
+
+
+def test_attribution_reminders_stripped_round_trips(db):
+    assert db.get_request(_record(db, attribution_reminders_stripped=3))[
+        'attribution_reminders_stripped'] == 3
+    assert db.get_request(_record(db))['attribution_reminders_stripped'] is None
+
+
+def test_opening_system_hashes_are_ref_counted(db):
+    entries = {'eee': ('system', 'original style'), 'fff': ('system', 'rewritten style')}
+    request_id = _record(
+        db, opening_system_sha256='eee', opening_system_dispatched_sha256='fff',
+        prompt_store_entries=entries,
+    )
+    assert db.get_prompt('eee')['ref_count'] == 1
+    assert db.get_prompt('fff')['ref_count'] == 1
+    with db._conn:
+        db._conn.execute('DELETE FROM requests WHERE id = ?', (request_id,))
+    assert db.get_prompt('eee')['ref_count'] == 0
+    assert db.get_prompt('fff')['ref_count'] == 0
+
+
+def test_opening_system_hash_shared_with_system_column_counts_once(db):
+    _record(
+        db, system_prompt_sha256='eee', opening_system_sha256='eee',
+        opening_system_dispatched_sha256='fff',
+        prompt_store_entries={'eee': ('system', 'same'), 'fff': ('system', 'other')},
+    )
+    assert db.get_prompt('eee')['ref_count'] == 1
+
+
+def _make_version_7_db(path, *, through=7):
+    raw = sqlite3.connect(path)
+    for v in range(through):
+        _MIGRATIONS[v](raw)
+    raw.execute('PRAGMA user_version = 7')
+    raw.commit()
+    raw.close()
+
+
+@pytest.mark.parametrize('through', [7, 8], ids=['fresh', 'interrupted'])
+def test_version_7_db_gains_columns_and_triggers(tmp_path, through):
+    path = str(tmp_path / 'v7.db')
+    _make_version_7_db(path, through=through)
+
+    store = RequestDB(path)
+    columns = _requests_columns(store._conn)
+    assert {'opening_system_sha256', 'opening_system_dispatched_sha256',
+            'attribution_reminders_stripped'} <= columns
+    assert store._conn.execute('PRAGMA user_version').fetchone()[0] == 8
+    request_id = _record(
+        store, opening_system_sha256='eee', opening_system_dispatched_sha256='fff',
+        attribution_reminders_stripped=2,
+        prompt_store_entries={'eee': ('system', 'o'), 'fff': ('system', 'd')},
+    )
+    assert store.get_prompt('eee')['ref_count'] == 1
+    assert store.get_prompt('fff')['ref_count'] == 1
+    assert store.get_request(request_id)['attribution_reminders_stripped'] == 2
+    store.close()
+
+
+def test_retention_keeps_opening_system_content_a_live_row_references(db):
+    entries = {'eee': ('system', 'o'), 'fff': ('system', 'd')}
+    request_id = _record(
+        db, opening_system_sha256='eee', opening_system_dispatched_sha256='fff',
+        prompt_store_entries=entries,
+    )
+    db.run_retention()
+    row = db.get_request(request_id)
+    assert row['opening_system_content'] == 'o'
+    assert row['opening_system_dispatched_content'] == 'd'

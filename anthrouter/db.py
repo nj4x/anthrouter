@@ -1,6 +1,6 @@
 """SQLite persistence for the anthrouter observability UI.
 
-Schema version: 7 (migrations 0-6, tracked via ``PRAGMA user_version``; this
+Schema version: 8 (migrations 0-7, tracked via ``PRAGMA user_version``; this
 schema is not ported from anthproxy's 13-migration history).  Three tables:
 
 ``requests``
@@ -31,7 +31,7 @@ from .model_tier import classify_model_tier
 
 logger = logging.getLogger(__name__)
 
-_SCHEMA_VERSION = 7
+_SCHEMA_VERSION = 8
 
 _RETENTION_INTERVAL_SECS = 24 * 3600
 _RETENTION_CHUNK = 1000
@@ -239,6 +239,53 @@ def _apply_migration_6(conn: sqlite3.Connection) -> None:
         conn.execute('ALTER TABLE requests ADD COLUMN upstream_request_id TEXT')
 
 
+def _apply_migration_7(conn: sqlite3.Connection) -> None:
+    """Add opening-system hashes and the attribution strip count (v7 → v8, ADR-0030).
+
+    ``opening_system_sha256`` and ``opening_system_dispatched_sha256`` hold the
+    opening turn's inline ``role:'system'`` text before and after the caveman
+    rewrite, written together and only when the rewrite changed it; the content
+    lives in ``prompt_store`` as ``content_type='system'``.
+    ``attribution_reminders_stripped`` is the count over every user turn, NULL
+    when none was stripped.  Both ref-count triggers are recreated to count the
+    two hash columns, else retention would prune content a live row still
+    references.  The column guards follow ``_apply_migration_3``; with
+    ``DROP TRIGGER IF EXISTS`` they let an interrupted run re-run cleanly.
+    """
+    columns = {row[1] for row in conn.execute('PRAGMA table_info(requests)')}
+    for name, sql_type in (
+        ('opening_system_sha256', 'TEXT'),
+        ('opening_system_dispatched_sha256', 'TEXT'),
+        ('attribution_reminders_stripped', 'INTEGER'),
+    ):
+        if name not in columns:
+            conn.execute(f'ALTER TABLE requests ADD COLUMN {name} {sql_type}')
+    conn.execute('DROP TRIGGER IF EXISTS trg_requests_refcount_ai')
+    conn.execute('DROP TRIGGER IF EXISTS trg_requests_refcount_ad')
+    conn.execute("""CREATE TRIGGER trg_requests_refcount_ai AFTER INSERT ON requests BEGIN
+        UPDATE prompt_store SET ref_count = ref_count + 1
+        WHERE content_hash IN (
+            SELECT new.system_prompt_sha256
+            UNION SELECT new.system_prompt_sanitized_sha256
+            UNION SELECT new.system_prompt_caveman_sha256
+            UNION SELECT new.opening_system_sha256
+            UNION SELECT new.opening_system_dispatched_sha256
+            UNION SELECT new.tools_sha256
+        );
+    END""")
+    conn.execute("""CREATE TRIGGER trg_requests_refcount_ad AFTER DELETE ON requests BEGIN
+        UPDATE prompt_store SET ref_count = ref_count - 1
+        WHERE content_hash IN (
+            SELECT old.system_prompt_sha256
+            UNION SELECT old.system_prompt_sanitized_sha256
+            UNION SELECT old.system_prompt_caveman_sha256
+            UNION SELECT old.opening_system_sha256
+            UNION SELECT old.opening_system_dispatched_sha256
+            UNION SELECT old.tools_sha256
+        );
+    END""")
+
+
 _MIGRATIONS = {
     0: _apply_migration_0,
     1: _apply_migration_1,
@@ -247,6 +294,7 @@ _MIGRATIONS = {
     4: _apply_migration_4,
     5: _apply_migration_5,
     6: _apply_migration_6,
+    7: _apply_migration_7,
 }
 
 
@@ -346,6 +394,9 @@ class RequestDB:
         system_prompt_sha256: str | None = None,
         system_prompt_sanitized_sha256: str | None = None,
         system_prompt_caveman_sha256: str | None = None,
+        opening_system_sha256: str | None = None,
+        opening_system_dispatched_sha256: str | None = None,
+        attribution_reminders_stripped: int | None = None,
         tools_sha256: str | None = None,
         prompt_store_entries: dict[str, tuple[str, str]] | None = None,
         sanitizer_events: list[dict] | None = None,
@@ -399,10 +450,13 @@ class RequestDB:
                     ratelimit_output_tokens_remaining, ratelimit_reset_at,
                     system_prompt_score, user_prompt_score, routing_weighted_score,
                     classifier_stop_reason, system_prompt_caveman_sha256,
-                    user_prompt_dispatched_text, upstream_request_id
+                    user_prompt_dispatched_text, upstream_request_id,
+                    opening_system_sha256, opening_system_dispatched_sha256,
+                    attribution_reminders_stripped
                 ) VALUES (
                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?
                 )
                 """,
                 (
@@ -447,6 +501,9 @@ class RequestDB:
                     system_prompt_caveman_sha256,
                     user_prompt_dispatched_text,
                     upstream_request_id,
+                    opening_system_sha256,
+                    opening_system_dispatched_sha256,
+                    attribution_reminders_stripped,
                 ),
             )
             request_id: int = cur.lastrowid
@@ -482,6 +539,10 @@ class RequestDB:
         upstream: the caveman rewrite's output, else the sanitizer's, else
         NULL (sent as the client wrote it).  The stage order lives here so the
         UI never encodes it (ADR-0024).
+
+        ``opening_system_content`` and ``opening_system_dispatched_content`` are
+        the opening turn's inline ``role:'system'`` text before and after the
+        caveman rewrite, both NULL when the rewrite left it unchanged (ADR-0030).
         """
         row = self._read_conn().execute(
             """SELECT r.*,
@@ -489,7 +550,9 @@ class RequestDB:
                       ps_tools.content AS tools_content,
                       ps_san.content   AS system_prompt_sanitized_content,
                       COALESCE(ps_cav.content, ps_san.content)
-                                       AS system_prompt_dispatched_content
+                                       AS system_prompt_dispatched_content,
+                      ps_os.content    AS opening_system_content,
+                      ps_osd.content   AS opening_system_dispatched_content
                  FROM requests r
                  LEFT JOIN prompt_store ps_sys
                         ON ps_sys.content_hash = r.system_prompt_sha256
@@ -499,6 +562,10 @@ class RequestDB:
                         ON ps_san.content_hash = r.system_prompt_sanitized_sha256
                  LEFT JOIN prompt_store ps_cav
                         ON ps_cav.content_hash = r.system_prompt_caveman_sha256
+                 LEFT JOIN prompt_store ps_os
+                        ON ps_os.content_hash = r.opening_system_sha256
+                 LEFT JOIN prompt_store ps_osd
+                        ON ps_osd.content_hash = r.opening_system_dispatched_sha256
                 WHERE r.id = ?""",
             (request_id,),
         ).fetchone()

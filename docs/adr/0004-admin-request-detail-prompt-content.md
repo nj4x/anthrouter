@@ -42,3 +42,7 @@ Ship the `prompt_store` JOIN unconditionally, matching `anthproxy`'s behavior, w
 ## Consequences
 
 Anyone granted admin UI access can read full historical system prompts and tool schemas for every recorded request. Operators who expose the admin UI beyond loopback already receive an explicit security warning at startup; scoping that risk is their responsibility via `--host` and network controls, not via a scrub flag.
+
+## Amendment (2026-11-03): drawer layout superseded by ADR-0024
+
+The "System prompt (original)" and "System prompt (sanitized, sent upstream)" two-panel layout is replaced by one diff panel per prompt, original to dispatched (ADR-0024), and ADR-0030 adds an inline-system panel. The unconditional-JOIN decision and its trust argument are unchanged.

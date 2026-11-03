@@ -69,3 +69,7 @@ Render removed text as strikethrough and inserted text as a highlight, by diffin
 - Requests that never reach dispatch (local replies, pre-dispatch failures) have NULL dispatched columns, which means no data, not sent unchanged.
 - A strip in an earlier user turn gets no badge, since only the last user message is diffed (Decision 3).
 - The drawer's trust boundary is unchanged (ADR-0004).
+
+## Amendment (2026-11-03): scope widened by ADR-0030
+
+ADR-0030 amends Decision 1: the caveman rewrite of inline `role:'system'` messages is now shown, as its own panel. The ADR-0010 rewrite stays out of scope. It amends the consequence of Decision 3 about earlier user turns, not Decision 3 itself: they get a strip-count badge, still no diff. "As sent" in Decision 5 means the text after the content stages in this ADR; the ADR-0010 inline rewrite and the transport's inline-system retry (ADR-0022 Decision 2) run later and can still change what upstream receives.

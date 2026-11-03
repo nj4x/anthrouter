@@ -45,3 +45,7 @@ caveman-kit injects a terse-output ruleset through a SessionStart hook and a per
 - If the client's credential cannot use the rewrite model, every uncached caveman request logs outcome `error` and P is dispatched. Set `--caveman-rewrite off` or choose another model.
 - Each `EDITOR_VERSION` change costs one editor call per distinct prompt.
 - The UI does not show the caveman hash column.
+
+## Amendment (2026-11-03): the UI shows the rewrite
+
+ADR-0024 shows the `system` rewrite as a diff in the request drawer, and ADR-0030 adds the messages-target rewrite as its own panel. The Consequence "The UI does not show the caveman hash column" no longer holds. The drawer reads the content, not the hash.

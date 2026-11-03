@@ -557,3 +557,55 @@ def test_handler_prose_log_only_for_caveman(caplog):
         h._caveman_state = 'rewritten'
         handlers.ProxyRequestHandler._record_caveman_prose(h, 'The cat is here.')
     assert 'Caveman prose rate: rewritten=50.0/100w' in caplog.text
+
+
+# --- opening system capture (ADR-0030) ------------------------------------------
+
+def test_handler_captures_opening_system_original_and_dispatched(tmp_path):
+    payload = _claude_code_payload()
+    payload['messages'].insert(1, {'role': 'system', 'content': 'first block'})
+    capture = {'prompt_store_entries': {}}
+    handlers._rewrite_caveman_system(_handler(), payload, _snapshot(tmp_path, _Backend(STYLE_OPS)), {}, capture)
+    original = 'first block\n\n' + STYLE_MSG
+    dispatched = 'first block\n\n' + STYLE_MSG.replace(STYLE_OPS[0]['find'], '')
+    orig_sha = hashlib.sha256(original.encode('utf-8')).hexdigest()
+    disp_sha = hashlib.sha256(dispatched.encode('utf-8')).hexdigest()
+    assert capture['opening_system_sha256'] == orig_sha
+    assert capture['opening_system_dispatched_sha256'] == disp_sha
+    assert capture['prompt_store_entries'] == {
+        orig_sha: ('system', original), disp_sha: ('system', dispatched),
+    }
+
+
+def test_handler_skips_opening_system_capture_when_messages_unchanged(tmp_path):
+    capture = {'prompt_store_entries': {}}
+    handlers._rewrite_caveman_system(_handler(), _payload(), _snapshot(tmp_path, _Backend(GOOD_OPS)), {}, capture)
+    assert 'opening_system_sha256' not in capture
+    assert 'opening_system_dispatched_sha256' not in capture
+
+
+def test_handler_skips_opening_system_capture_when_original_capture_failed(tmp_path):
+    payload, capture = _claude_code_payload(), {}
+    handlers._rewrite_caveman_system(_handler(), payload, _snapshot(tmp_path, _Backend(STYLE_OPS)), {}, capture)
+    assert capture == {}
+    assert payload['messages'][1]['content'][0]['text'] == STYLE_MSG.replace(STYLE_OPS[0]['find'], '')
+
+
+def test_opening_system_capture_failure_keeps_rewrite(tmp_path, monkeypatch, caplog):
+    real = cr.opening_system_blocks
+    calls = []
+
+    def flaky(payload):
+        calls.append(1)
+        if len(calls) > 1:
+            raise RuntimeError('boom')
+        return real(payload)
+    monkeypatch.setattr(cr, 'opening_system_blocks', flaky)
+    payload, h, capture = _claude_code_payload(), _handler(), {'prompt_store_entries': {}}
+    with caplog.at_level('WARNING', logger='anthrouter.handlers'):
+        handlers._rewrite_caveman_system(h, payload, _snapshot(tmp_path, _Backend(STYLE_OPS)), {}, capture)
+    assert payload['messages'][1]['content'][0]['text'] == STYLE_MSG.replace(STYLE_OPS[0]['find'], '')
+    assert h._caveman_state == 'rewritten'
+    assert 'opening_system_sha256' not in capture
+    assert capture['prompt_store_entries'] == {}
+    assert 'Opening system capture failed' in caplog.text

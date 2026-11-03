@@ -613,12 +613,15 @@ def _system_content_str(system) -> str | None:
     return None
 
 
-def _strip_attribution_reminder(handler, payload, config):
+def _strip_attribution_reminder(handler, payload, config, prompt_capture):
     """Remove Claude Code's commit/PR attribution reminder from user messages.
 
     Matched by the reminder's exact opening text only (ADR-0023).  A
     security-monitor request is skipped, like the sanitizer skips it
-    (ADR-0017).  Never raises: a fault dispatches the payload unchanged.
+    (ADR-0017).  The count over every user turn goes to
+    ``attribution_reminders_stripped`` only when non-zero, so NULL keeps
+    meaning "none stripped" (ADR-0030).  Never raises: a fault dispatches the
+    payload unchanged.
     """
     try:
         if (getattr(config, 'strip_attribution_reminder', 'off') != 'on'
@@ -631,6 +634,7 @@ def _strip_attribution_reminder(handler, payload, config):
                 '%s Stripped %d attribution reminder(s) from user messages',
                 handler._log_tag(), removed,
             )
+            prompt_capture['attribution_reminders_stripped'] = removed
     except Exception:
         logger.warning(
             '%s Attribution-reminder strip failed', handler._log_tag(), exc_info=True,
@@ -694,6 +698,7 @@ def _rewrite_caveman_system(handler, payload, target, credentials, prompt_captur
         if new_blocks is not None:
             _caveman.write_opening_system_blocks(payload, where, new_blocks)
             handler._caveman_state = 'rewritten'
+            _capture_opening_system(handler, payload, blocks, prompt_capture)
         new_system = run('system', system) if system else None
         if new_system is None:
             return
@@ -710,6 +715,35 @@ def _rewrite_caveman_system(handler, payload, target, credentials, prompt_captur
     except Exception:
         logger.warning('%s Caveman rewrite failed; sending prompt unchanged',
                        handler._log_tag(), exc_info=True)
+
+
+def _capture_opening_system(handler, payload, original_blocks, prompt_capture):
+    """Record the opening ``role:'system'`` text before and after the caveman rewrite (ADR-0030).
+
+    Called only when the rewrite changed it.  Each side is its blocks' text
+    joined by a blank line; the dispatched side is read back from ``payload``
+    after the write.  Both hashes are written together or not at all, and
+    skipped when the original capture failed, since a hash with no
+    ``prompt_store`` entry would only read back as NULL.  Never raises.
+    """
+    try:
+        entries = prompt_capture.get('prompt_store_entries')
+        if not isinstance(entries, dict):
+            return
+        dispatched_blocks, _ = _caveman.opening_system_blocks(payload)
+        captured = {}
+        for column, blocks in (
+            ('opening_system_sha256', original_blocks),
+            ('opening_system_dispatched_sha256', dispatched_blocks),
+        ):
+            content = '\n\n'.join(b['text'] for b in blocks)
+            digest = hashlib.sha256(content.encode('utf-8')).hexdigest()
+            captured[column] = (digest, content)
+        for column, (digest, content) in captured.items():
+            prompt_capture[column] = digest
+            entries[digest] = ('system', content)
+    except Exception:
+        logger.warning('%s Opening system capture failed', handler._log_tag(), exc_info=True)
 
 
 def _capture_dispatched_user_text(handler, payload, prompt_capture):
@@ -1117,7 +1151,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
             for block in sanitized.flagged
         ]
         if not monitor:
-            _strip_attribution_reminder(self, payload, self.config)
+            _strip_attribution_reminder(self, payload, self.config, self._prompt_capture)
             _rewrite_caveman_system(
                 self, payload, RoutingTarget(config=self.config, backend=self.transport),
                 credentials, self._prompt_capture,
