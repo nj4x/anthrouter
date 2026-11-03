@@ -54,6 +54,8 @@ class _FakeUpstream(BaseHTTPRequestHandler):
     message_ids: list = []
     # Stream a ``message_start`` then an ``error`` event, with no ``message_stop``.
     stream_error = False
+    # Text of the stream's single ``text_delta``, JSON-escaped into SSE_BODY.
+    stream_text = 'hello'
 
     def _next_id(self):
         ids = type(self).message_ids
@@ -93,6 +95,8 @@ class _FakeUpstream(BaseHTTPRequestHandler):
             if message_id is not None:
                 assert '"id":"msg_1"' in text, 'SSE_BODY lost its message id literal'
                 text = text.replace('"id":"msg_1"', f'"id":"{message_id}"', 1)
+            if cls.stream_text != 'hello':
+                text = text.replace('"text":"hello"', f'"text":{json.dumps(cls.stream_text)}', 1)
             if cls.stream_error:
                 text = text.split('event: content_block_delta', 1)[0] + STREAM_ERROR_BODY
             data = text.encode()
@@ -139,6 +143,7 @@ def upstream():
     _FakeUpstream.error_headers = {}
     _FakeUpstream.message_ids = []
     _FakeUpstream.stream_error = False
+    _FakeUpstream.stream_text = 'hello'
     _FakeUpstream.json_body = {
         'id': 'msg_up', 'type': 'message', 'role': 'assistant',
         'content': [{'type': 'text', 'text': 'hi there'}],
