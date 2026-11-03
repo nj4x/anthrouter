@@ -1084,7 +1084,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         except AnthropicRequestError as exc:
             if dispatched:
                 self._record_failed_request(
-                    payload, f'{exc.status_code} — {exc.error_type}',
+                    payload, exc.db_error,
                     status='rate_limited' if exc.status_code == 429 else 'error',
                 )
             self._send_error(exc)
@@ -1394,7 +1394,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         # as an out-of-band error frame, so it never appears as an "event: error"
         # line here.  Without capturing it, a stream that carried no response at
         # all would be recorded as a success that cost nothing.
-        upstream_error: tuple[int | None, str] | None = None
+        upstream_error: tuple[int, str] | None = None
         # Tail of the previous chunk, so an "event: error" header split across a
         # chunk boundary is still detected.
         line_tail = ''
@@ -1415,10 +1415,10 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
                 line_tail = chunk[-20:]
                 yield chunk
         except AnthropicRequestError as exc:
-            upstream_error = (exc.status_code, exc.error_type)
+            upstream_error = (exc.status_code, exc.db_error)
             raise
         except Exception:
-            upstream_error = (502, 'upstream_failure')
+            upstream_error = (502, '502 — upstream_failure')
             raise
         finally:
             close = getattr(sse_gen, 'close', None)
@@ -1437,7 +1437,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
             db_status = 'error' if errored else 'success'
             if upstream_error is not None:
                 db_stats: dict = {}
-                db_error: str | None = f'{upstream_error[0]} — {upstream_error[1]}'
+                db_error: str | None = upstream_error[1]
                 # Same status as the non-streaming 429 in do_POST (ADR-0026).
                 if upstream_error[0] == 429:
                     db_status = 'rate_limited'

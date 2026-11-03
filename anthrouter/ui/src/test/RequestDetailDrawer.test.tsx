@@ -108,6 +108,20 @@ describe('RequestDetailDrawer upstream request-id', () => {
   })
 })
 
+describe('RequestDetailDrawer expired-Thread hint (ADR-0031)', () => {
+  it('explains a 404 that was sent to the client as a 400', async () => {
+    show({ status: 'error', error: '404 — not_found_error (sent to client as 400)' })
+    expect(await screen.findByText(/Upstream Thread not found, most likely expired/)).toBeInTheDocument()
+    expect(screen.getByText(/This is not a model fault\./)).toBeInTheDocument()
+  })
+
+  it('shows no hint for a 404 that was passed through', async () => {
+    show({ status: 'error', error: '404 — not_found_error' })
+    expect(await screen.findByText('404 — not_found_error')).toBeInTheDocument()
+    expect(screen.queryByText(/Upstream Thread not found/)).not.toBeInTheDocument()
+  })
+})
+
 describe('RequestDetailDrawer opening system messages (ADR-0030)', () => {
   it('diffs the opening system text when the caveman rewrite changed it', async () => {
     const { container } = show({

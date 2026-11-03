@@ -187,6 +187,11 @@ _DEFAULT_4XX_TYPES = {
     429: 'rate_limit_error',
 }
 
+# Claude Desktop replays the conversation with ``thread: {"type": "create"}``
+# after a Thread 400 but stops after this 404 (ADR-0031).  Upstream sends no
+# ``error.code`` for it, so the message text is the only identifier.
+_EXPIRED_THREAD_PREFIX = 'No thread state was found'
+
 
 def handle_error_response(status: int, body_bytes: bytes, resp) -> None:
     """Map an upstream HTTP error status to an ``AnthropicRequestError`` (ADR-0028).
@@ -194,7 +199,10 @@ def handle_error_response(status: int, body_bytes: bytes, resp) -> None:
     Always raises — never returns.  Every upstream 4xx keeps its own status and
     its upstream ``error.type`` (falling back to a per-status default when
     upstream sends none), with upstream's message unprefixed, so a
-    non-retryable error is never shown to the client as a retryable 502.  5xx
+    non-retryable error is never shown to the client as a retryable 502.  The
+    one exception is the expired-Thread 404, raised as ``400
+    invalid_request_error`` with the upstream status kept on the exception
+    (ADR-0031).  5xx
     and 529 map to ``502 api_error`` with an ``Upstream error (HTTP n): ``
     message prefix.  ``resp`` is read for its headers only.  Every error raised
     *here* carries the upstream retry guidance as ``retry_after`` — float
@@ -236,9 +244,20 @@ def handle_error_response(status: int, body_bytes: bytes, resp) -> None:
             status, message[:300], req_id, timing)
 
     if 400 <= status < 500:
+        error_type = error_type or _DEFAULT_4XX_TYPES.get(status, 'invalid_request_error')
+        if status == 404 and is_json and message.startswith(_EXPIRED_THREAD_PREFIX):
+            logger.info('Upstream Thread not found (usually expired): sent to client '
+                        'as 400 so it replays')
+            raise AnthropicRequestError(
+                message,
+                error_type='invalid_request_error',
+                status_code=400,
+                retry_after=retry_after,
+                upstream_status=status,
+                upstream_error_type=error_type)
         raise AnthropicRequestError(
             message,
-            error_type=error_type or _DEFAULT_4XX_TYPES.get(status, 'invalid_request_error'),
+            error_type=error_type,
             status_code=status,
             retry_after=retry_after)
     raise AnthropicRequestError(
