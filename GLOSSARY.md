@@ -18,6 +18,12 @@ _Avoid_: Ranker, scorer
 **Walk-back**: Replaying the session's last classified tier for a text-less continuation turn instead of reclassifying boilerplate.
 _Avoid_: Cache replay, tier replay
 
+**Thread**: Upstream's server-side copy of a conversation (Anthropic message threads beta). It is opened by a request carrying `thread: {"type": "create"}` and is bound to that request's model. It expires 5 minutes after its last request.
+_Avoid_: Conversation, session (a session can hold several Threads)
+
+**Thread continuation**: A request whose `thread` names a `previous_message_id` and carries only the new messages. anthrouter pins it to the model that served that message instead of routing it (ADR-0027).
+_Avoid_: Delta turn, follow-up
+
 ### Host interception
 
 **Host interception**: anthrouter acting as the client's HTTPS proxy and decrypting traffic for `api.anthropic.com` only, so that a client which ignores the base-URL setting still takes the same proxy chain as one that honours it. Traffic to every other host on port 443 passes through as an opaque tunnel; other ports and IP addresses are refused.
