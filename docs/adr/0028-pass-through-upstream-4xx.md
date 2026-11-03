@@ -3,7 +3,7 @@ artifact-type: adr
 lineage-rules: root
 ---
 
-**Status**: Accepted
+**Status**: Approved
 
 # Pass upstream 4xx statuses through to the client
 

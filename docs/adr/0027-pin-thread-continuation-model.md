@@ -3,7 +3,7 @@ artifact-type: adr
 lineage-rules: root
 ---
 
-**Status**: Accepted
+**Status**: Approved
 
 # Pin a Thread continuation to the model that served its previous message
 

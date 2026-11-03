@@ -3,7 +3,7 @@ artifact-type: adr
 lineage-rules: root
 ---
 
-**Status**: Accepted
+**Status**: Approved; Decisions 1-4 superseded by ADR-0029
 
 # Keep the billing block when it is the only system block
 
