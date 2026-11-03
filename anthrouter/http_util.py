@@ -179,15 +179,29 @@ def should_retry(status: int, resp) -> bool:
     return True
 
 
-def handle_error_response(status: int, body_bytes: bytes, resp) -> None:
-    """Map an upstream HTTP error status to an ``AnthropicRequestError``.
+_DEFAULT_4XX_TYPES = {
+    401: 'authentication_error',
+    403: 'permission_error',
+    404: 'not_found_error',
+    413: 'request_too_large',
+    429: 'rate_limit_error',
+}
 
-    Always raises — never returns.  The upstream ``error.type`` is forwarded for
-    400s so native Anthropic error types survive the hop.  ``resp`` is read for
-    its headers only.  Every error raised *here* carries the upstream retry
-    guidance as ``retry_after`` — float seconds, unrounded and uncapped, or
-    ``None`` when absent or unparseable.  Callers that raise elsewhere (the
-    transport's loop-exit fallback) are not covered by that guarantee.
+
+def handle_error_response(status: int, body_bytes: bytes, resp) -> None:
+    """Map an upstream HTTP error status to an ``AnthropicRequestError`` (ADR-0028).
+
+    Always raises — never returns.  Every upstream 4xx keeps its own status and
+    its upstream ``error.type`` (falling back to a per-status default when
+    upstream sends none), with upstream's message unprefixed, so a
+    non-retryable error is never shown to the client as a retryable 502.  5xx
+    and 529 map to ``502 api_error`` with an ``Upstream error (HTTP n): ``
+    message prefix.  ``resp`` is read for its headers only.  Every error raised
+    *here* carries the upstream retry guidance as ``retry_after`` — float
+    seconds, unrounded and uncapped, or ``None`` when absent or unparseable.
+    Callers that raise elsewhere (the transport's loop-exit fallback) are not
+    covered by that guarantee.  The ``request-id`` is logged for every status;
+    ``retry-after`` and ``ratelimit`` only for 429 and 5xx.
     """
     retry_after = parse_retry_after(resp)
     is_json = True
@@ -200,43 +214,33 @@ def handle_error_response(status: int, body_bytes: bytes, resp) -> None:
         message = error.get('message', '') or detail.get('message', '') or str(detail)
         error_type = error.get('type', '')
         error_code = error.get('code', '') or ''
-    except (json.JSONDecodeError, TypeError):
+    except (json.JSONDecodeError, TypeError, AttributeError):
         message = body_bytes.decode('utf-8', errors='replace')[:500]
         error_type = ''
         is_json = False
 
+    req_id = resp.getheader('request-id') if resp is not None else None
+    timing = ''
     if status == 429 or status >= 500:
-        req_id = resp.getheader('request-id') if resp is not None else None
-        rl = parse_ratelimit_headers(resp)
-        if is_json:
-            type_part = f' type={error_type}' if error_type else ''
-            code_part = f' code={error_code}' if error_code else ''
-            logger.warning(
-                'Upstream error HTTP %d: %s%s%s  request-id=%s  retry-after=%s  ratelimit=%s',
-                status, message[:300], type_part, code_part,
-                req_id, retry_after, rl or None,
-            )
-        else:
-            logger.warning(
-                'Upstream error HTTP %d (plain): %s  request-id=%s  retry-after=%s  ratelimit=%s',
-                status, message[:300], req_id, retry_after, rl or None,
-            )
+        timing = '  retry-after=%s  ratelimit=%s' % (
+            retry_after, parse_ratelimit_headers(resp) or None)
+    if is_json:
+        type_part = f' type={error_type}' if error_type else ''
+        code_part = f' code={error_code}' if error_code else ''
+        logger.warning(
+            'Upstream error HTTP %d: %s%s%s  request-id=%s%s',
+            status, message[:300], type_part, code_part, req_id, timing)
     else:
-        logger.warning('Upstream error HTTP %d: %s', status, message[:300])
+        logger.warning(
+            'Upstream error HTTP %d (plain): %s  request-id=%s%s',
+            status, message[:300], req_id, timing)
 
-    if status == 400:
+    if 400 <= status < 500:
         raise AnthropicRequestError(
-            message, error_type=error_type or 'invalid_request_error', status_code=400,
+            message,
+            error_type=error_type or _DEFAULT_4XX_TYPES.get(status, 'invalid_request_error'),
+            status_code=status,
             retry_after=retry_after)
-    if status == 401:
-        raise AnthropicRequestError(message, error_type='authentication_error', status_code=401,
-                                    retry_after=retry_after)
-    if status == 403:
-        raise AnthropicRequestError(message, error_type='permission_error', status_code=403,
-                                    retry_after=retry_after)
-    if status == 429:
-        raise AnthropicRequestError(message, error_type='rate_limit_error', status_code=429,
-                                    retry_after=retry_after)
     raise AnthropicRequestError(
         f'Upstream error (HTTP {status}): {message}',
         error_type='api_error',

@@ -266,6 +266,7 @@ def test_failed_request_row_stores_the_rate_limit_window(proxy, status, row_stat
 @pytest.mark.parametrize('stream', [False, True])
 def test_upstream_429_is_rate_limited_whether_or_not_streamed(proxy, stream):
     _FakeUpstream.status = 429
+    _FakeUpstream.error_type = 'rate_limit_error'
     _FakeUpstream.extra_headers = {'request-id': 'req_011CTEST429'}
     server = proxy()
     payload = {'model': 'sonnet', 'metadata': {'user_id': SESSION},
@@ -353,7 +354,7 @@ def test_original_system_hash_survives_sanitization(proxy):
     server = proxy(sanitize_system_prompt='strip')
     system = [
         {'type': 'text', 'text': 'x-anthropic-billing-header: cc_prompt_id=abc'},
-        {'type': 'text', 'text': 'You are Claude Code.'},
+        {'type': 'text', 'text': "You are Claude Code, Anthropic's official CLI for Claude."},
     ]
     post(server, '/v1/messages', {
         'model': 'sonnet', 'system': system, 'metadata': {'user_id': SESSION},
@@ -698,6 +699,19 @@ class TestSecurityMonitorPassthrough:
         payload = _monitor_payload()
         post(server, '/v1/messages', payload)
         assert _FakeUpstream.received[0]['payload']['system'] == payload['system']
+
+    def test_monitor_request_with_identity_block_still_forwards_unsanitized(self, proxy):
+        """The identity gate (ADR-0029) would strip here; the monitor exemption must not."""
+        server = proxy(sanitize_system_prompt='strip', auto_model_routing=True,
+                       lock_requested_model='sonnet')
+        payload = _monitor_payload()
+        payload['system'].append(
+            {'type': 'text', 'text': "You are Claude Code, Anthropic's official CLI for Claude."})
+        post(server, '/v1/messages', payload)
+        sent = _FakeUpstream.received[0]['payload']
+        assert sent['system'] == payload['system']
+        assert sent['model'] == 'claude-sonnet-5'
+        assert db_rows(server)[0]['reason_code'] == 'security_monitor_passthrough'
 
     def test_monitor_request_makes_no_volatility_observation(self, proxy, monkeypatch):
         import anthrouter.sanitizer as sanitizer
@@ -1331,3 +1345,145 @@ def test_caveman_request_dispatches_rewritten_system_and_records_hash(proxy, ups
     assert row['system_prompt_caveman_sha256']
     stored = server.RequestHandlerClass.request_db.get_prompt(row['system_prompt_caveman_sha256'])
     assert stored['content'] == main['payload']['system']
+
+
+# ---------------------------------------------------------------------------
+# ADR-0028 — Upstream 4xx keeps its own status
+# ---------------------------------------------------------------------------
+
+_PAYLOAD_4XX = {'model': 'sonnet', 'metadata': {'user_id': SESSION},
+                'messages': [{'role': 'user', 'content': 'hello there'}]}
+
+_DEFAULT_4XX = [
+    (400, 'invalid_request_error'), (401, 'authentication_error'),
+    (403, 'permission_error'), (404, 'not_found_error'),
+    (408, 'invalid_request_error'), (409, 'invalid_request_error'),
+    (413, 'request_too_large'), (422, 'invalid_request_error'),
+    (429, 'rate_limit_error'),
+]
+
+
+def _error_via_proxy(server, stream):
+    """Return ``(client_status, error_dict)`` for ``_PAYLOAD_4XX``.
+
+    A streamed request answers 200 with an SSE ``error`` event.
+    """
+    if stream:
+        body = post(server, '/v1/messages', {**_PAYLOAD_4XX, 'stream': True}, raw=True)
+        data = next(line for line in body.splitlines()
+                    if line.startswith('data:') and '"error"' in line)
+        return 200, json.loads(data[len('data:'):])['error']
+    request = urllib.request.Request(
+        server.base_url + '/v1/messages', data=json.dumps(_PAYLOAD_4XX).encode(),
+        headers={'Content-Type': 'application/json', 'x-api-key': 'k'}, method='POST')
+    with pytest.raises(urllib.error.HTTPError) as exc_info:
+        urllib.request.urlopen(request)
+    return exc_info.value.code, json.loads(exc_info.value.read())['error']
+
+
+@pytest.mark.parametrize('stream', [False, True])
+@pytest.mark.parametrize('status,default_type', _DEFAULT_4XX)
+def test_upstream_4xx_keeps_status_with_upstream_type_and_unprefixed_message(
+        proxy, monkeypatch, status, default_type, stream):
+    monkeypatch.setattr('anthrouter.transport.time.sleep', lambda _s: None)
+    _FakeUpstream.status = status
+    _FakeUpstream.error_type = 'custom_upstream_error'
+    _FakeUpstream.error_message = 'No thread state was found'
+    server = proxy()
+    client_status, error = _error_via_proxy(server, stream)
+    assert client_status == (200 if stream else status)
+    assert error['type'] == 'custom_upstream_error'
+    assert error['message'] == 'No thread state was found'
+    row = db_rows(server)[0]
+    assert row['error'] == f'{status} — custom_upstream_error'
+    assert row['status'] == ('rate_limited' if status == 429 else 'error')
+
+
+@pytest.mark.parametrize('stream', [False, True])
+@pytest.mark.parametrize('status,default_type', _DEFAULT_4XX)
+def test_upstream_4xx_without_type_gets_the_per_status_default(
+        proxy, monkeypatch, status, default_type, stream):
+    monkeypatch.setattr('anthrouter.transport.time.sleep', lambda _s: None)
+    _FakeUpstream.status = status
+    _FakeUpstream.error_type = None
+    _FakeUpstream.error_message = 'nope'
+    server = proxy()
+    _status, error = _error_via_proxy(server, stream)
+    assert error['type'] == default_type
+    assert error['message'] == 'nope'
+    assert db_rows(server)[0]['error'] == f'{status} — {default_type}'
+
+
+@pytest.mark.parametrize('stream', [False, True])
+def test_thread_404_reaches_the_client_as_a_404_not_found(proxy, stream):
+    message = 'No thread state was found for the requested `previous_message_id`.'
+    _FakeUpstream.status = 404
+    _FakeUpstream.error_type = 'not_found_error'
+    _FakeUpstream.error_message = message
+    server = proxy()
+    client_status, error = _error_via_proxy(server, stream)
+    assert client_status == (200 if stream else 404)
+    assert error == {'type': 'not_found_error', 'message': message}
+    assert db_rows(server)[0]['error'] == '404 — not_found_error'
+
+
+@pytest.mark.parametrize('stream', [False, True])
+def test_non_json_4xx_body_falls_back_to_decoded_text_cut_to_500(proxy, stream):
+    _FakeUpstream.status = 413
+    _FakeUpstream.error_raw = ('x' * 700).encode()
+    server = proxy()
+    _status, error = _error_via_proxy(server, stream)
+    assert error == {'type': 'request_too_large', 'message': 'x' * 500}
+
+
+@pytest.mark.parametrize('stream', [False, True])
+def test_json_4xx_with_type_but_no_message_keeps_the_message_fallback(proxy, stream):
+    _FakeUpstream.status = 409
+    _FakeUpstream.error_raw = json.dumps({'error': {'type': 'conflict_error'}}).encode()
+    server = proxy()
+    _status, error = _error_via_proxy(server, stream)
+    assert error['type'] == 'conflict_error'
+    assert error['message'] == str({'error': {'type': 'conflict_error'}})
+
+
+@pytest.mark.parametrize('stream', [False, True])
+@pytest.mark.parametrize('status', [500, 529])
+def test_upstream_5xx_and_529_stay_502_api_error(proxy, monkeypatch, status, stream):
+    monkeypatch.setattr('anthrouter.transport.time.sleep', lambda _s: None)
+    _FakeUpstream.status = status
+    _FakeUpstream.error_type = 'overloaded_error'
+    server = proxy()
+    client_status, error = _error_via_proxy(server, stream)
+    assert client_status == (200 if stream else 502)
+    assert error['type'] == 'api_error'
+    assert error['message'] == f'Upstream error (HTTP {status}): upstream exploded'
+    assert db_rows(server)[0]['error'] == '502 — api_error'
+
+
+def test_4xx_does_not_forward_retry_after(proxy):
+    _FakeUpstream.status = 404
+    _FakeUpstream.error_headers = {'Retry-After': '30'}
+    server = proxy()
+    request = urllib.request.Request(
+        server.base_url + '/v1/messages', data=json.dumps(_PAYLOAD_4XX).encode(),
+        headers={'Content-Type': 'application/json', 'x-api-key': 'k'}, method='POST')
+    with pytest.raises(urllib.error.HTTPError) as exc_info:
+        urllib.request.urlopen(request)
+    assert exc_info.value.code == 404
+    assert exc_info.value.headers.get('Retry-After') is None
+
+
+@pytest.mark.parametrize('status', [400, 404, 500])
+def test_request_id_is_logged_on_every_upstream_error_status(
+        proxy, monkeypatch, caplog, status):
+    monkeypatch.setattr('anthrouter.transport.time.sleep', lambda _s: None)
+    _FakeUpstream.status = status
+    _FakeUpstream.error_headers = {'request-id': 'req_011CLOGME', 'Retry-After': '30'}
+    server = proxy()
+    with caplog.at_level('WARNING'):
+        _error_via_proxy(server, False)
+    line = next(r.getMessage() for r in caplog.records
+                if r.getMessage().startswith('Upstream error HTTP'))
+    assert 'request-id=req_011CLOGME' in line
+    assert ('retry-after=' in line) == (status >= 500)
+    assert ('ratelimit=' in line) == (status >= 500)

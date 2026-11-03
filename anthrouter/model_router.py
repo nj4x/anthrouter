@@ -363,6 +363,8 @@ ReasonCode = Literal[
     'missing_final_user_text',
     'override_no_classifier',
     'security_monitor_passthrough',  # ADR-0017: handler skips the lock and route_model()
+    'thread_pinned',                 # ADR-0027: handler pins a Thread continuation, skips route_model()
+    'thread_pin_unknown',            # ADR-0027: continuation id not recorded; routing baseline
     'size_forced_long_context',
     'session_cached_tier',
     'session_cached_tier_capped',

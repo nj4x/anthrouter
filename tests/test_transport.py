@@ -1361,14 +1361,14 @@ def test_error_log_5xx_carries_request_id_and_retry(caplog):
     assert 'retry-after=0.25' in caplog.text
 
 
-def test_error_log_400_keeps_short_form_no_ratelimit_fields(caplog):
-    """400 error: log uses the existing short form — no request-id or ratelimit fields."""
+def test_error_log_400_carries_request_id_but_no_ratelimit_fields(caplog):
+    """4xx other than 429 logs request-id (ADR-0028) but no retry-after or ratelimit fields."""
     headers = {'retry-after': '1', 'anthropic-ratelimit-requests-remaining': '5'}
     body = json.dumps({'error': {'type': 'invalid_request_error',
                                  'message': 'Bad param'}}).encode()
     with caplog.at_level(logging.WARNING, logger='anthrouter.http_util'), pytest.raises(AnthropicRequestError):
         handle_error_response(400, body, _HeaderOnlyResponse(headers))
     assert 'Bad param' in caplog.text
-    assert 'request-id' not in caplog.text
+    assert 'request-id=' in caplog.text
     assert 'ratelimit=' not in caplog.text
     assert 'retry-after' not in caplog.text

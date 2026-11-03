@@ -10,7 +10,10 @@ observations are keyed by the *context key* — session key plus a
 first-user-message hash — so a Claude Code Task sub-agent does not inherit and
 clobber its parent's slot; and the tier cache is keyed by ``(context key,
 requested tier)`` so a tier cached on a haiku-requested turn is never replayed
-into a sonnet-requested turn of the same conversation (ADR-0012).
+into a sonnet-requested turn of the same conversation (ADR-0012).  The Thread
+map is keyed by upstream message id alone: ids are globally unique, and a
+continuation's context key never matches the key of the turn that created its
+Thread (ADR-0027).
 """
 
 from __future__ import annotations
@@ -21,7 +24,7 @@ from collections import OrderedDict
 
 logger = logging.getLogger(__name__)
 
-MAX_ENTRIES = 1000
+MAX_ENTRIES = 10000
 
 
 class SessionState:
@@ -33,6 +36,7 @@ class SessionState:
         self._routing_overrides: OrderedDict[str, bool] = OrderedDict()
         self._routed_tier: OrderedDict[tuple[str, str], str] = OrderedDict()
         self._context_obs: OrderedDict[str, tuple[int, float]] = OrderedDict()
+        self._thread_models: OrderedDict[str, tuple[str, bool]] = OrderedDict()
         self._last_ratelimit: dict = {}
 
     def _put(self, store: OrderedDict, key, value) -> None:
@@ -83,6 +87,23 @@ class SessionState:
     def routed_tier(self, key: tuple[str, str]) -> str | None:
         with self._lock:
             return self._routed_tier.get(key)
+
+    # -- Thread map -----------------------------------------------------------
+
+    def record_thread(self, message_id: str, model: str, long_context: bool = False) -> None:
+        """Remember the model that served ``message_id`` so its continuation can be pinned.
+
+        ``long_context`` records whether the dispatched request carried a
+        ``context-1m*`` beta, so a pinned continuation keeps the Thread's 1M
+        window even when only the size floor added it (ADR-0027).
+        """
+        with self._lock:
+            self._put(self._thread_models, message_id, (model, bool(long_context)))
+
+    def thread_pin(self, message_id: str) -> tuple[str, bool] | None:
+        """``(model, long_context)`` recorded for ``message_id``, or ``None``."""
+        with self._lock:
+            return self._thread_models.get(message_id)
 
     # -- context observations -------------------------------------------------
 

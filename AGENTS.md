@@ -30,7 +30,7 @@ Transport holds no credentials — `extract_client_credentials()` rejects (401) 
 
 Every `route_model()` call returns a `ModelRoutingDecision` with a stable `reason_code` used for both the INFO log line and the DB row — never invent a new code without adding it to the `ReasonCode` literal in `model_router.py`.
 
-Routing is governed by four layers of precedence: long-context size floor (deterministic), walk-back cache, affirmation inheritance, and classifier. See `docs/agents/architecture.md`.
+Routing is governed by a Thread pin (ADR-0027: a Thread continuation is sent to its Thread's recorded model (or the routing baseline when the id is unknown) and never reaches `route_model()`) ahead of four layers of precedence: long-context size floor (deterministic), walk-back cache, affirmation inheritance, and classifier. See `docs/agents/architecture.md`.
 
 ## Classifier-input privacy
 

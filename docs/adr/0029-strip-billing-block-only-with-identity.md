@@ -3,7 +3,7 @@ artifact-type: adr
 lineage-rules: root
 ---
 
-**Status**: Approved (not yet implemented)
+**Status**: Approved
 
 # Strip the billing block only when an identity block remains
 
