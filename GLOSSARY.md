@@ -21,8 +21,11 @@ _Avoid_: Cache replay, tier replay
 **Thread**: Upstream's server-side copy of a conversation (Anthropic message threads beta). It is opened by a request carrying `thread: {"type": "create"}` and is bound to that request's model. It expires 5 minutes after its last request.
 _Avoid_: Conversation, session (a session can hold several Threads)
 
-**Thread continuation**: A request whose `thread` names a `previous_message_id` and carries only the new messages. anthrouter pins it to the model that served that message instead of routing it (ADR-0027).
+**Thread continuation**: A request whose `thread` names a `previous_message_id` and carries only the new messages. anthrouter pins it to the model that served that message instead of routing it (ADR-0027). A continuation that carries a new user prompt is classified again (ADR-0033).
 _Avoid_: Delta turn, follow-up
+
+**Thread re-classification**: A Thread continuation whose new user prompt routes to a model other than the Thread's model. anthrouter does not send it upstream. It asks the client to open a new Thread on the new model (ADR-0033).
+_Avoid_: Thread error, model mismatch (the mismatch is deliberate)
 
 ### Host interception
 
