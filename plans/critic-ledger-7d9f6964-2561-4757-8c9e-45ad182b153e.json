@@ -1,0 +1,172 @@
+[
+  {
+    "id": "ID-001",
+    "group": "A",
+    "claim": "ADR-0027 changes the routing order and adds a three-way branch, but describes it only in prose. The sequenceDiagram shows only the thread_pinned happy path.",
+    "evidence": "Decision 4: 'The pin is the first routing layer. It runs after local-command interception and before the long-context floor, the walk-back cache, affirmation inheritance and the classifier. A pinned turn makes no classifier call and neither reads nor writes the tier cache.' Decision 1 and Decision 5 add the branches: a non-continuation is routed as before, thread_pinned uses the recorded model, and thread_pin_unknown uses the routing baseline. The diagram never shows the thread_pin_unknown branch, the fall-through for create or unrecognised thread shapes, or where the pin sits among the existing layers. Missing visual: flowchart.",
+    "severity": "major",
+    "fix": "",
+    "status": "fixed",
+    "introduced_pass": null
+  },
+  {
+    "id": "ID-002",
+    "group": "A",
+    "claim": "Scope creep: the bound rises tenfold for every SessionState map, but only the new Thread map needs it.",
+    "evidence": "Decision 3: 'Entries are evicted oldest-first at `MAX_ENTRIES`, which rises from 1000 to 10000 for every `SessionState` map.' Consequences repeats 'The other `SessionState` maps get the same raised bound' and gives no reason the other maps need it.",
+    "severity": "minor",
+    "fix": "",
+    "status": "fixed",
+    "introduced_pass": null
+  },
+  {
+    "id": "ID-003",
+    "group": "A",
+    "claim": "ADR-0028 bundles a separate logging change with the status-mapping decision.",
+    "evidence": "Decision 4: 'The `Upstream error HTTP %d` warning carries `request-id=` for every status, not only 429 and 5xx.' This helps diagnosis but is separate from status pass-through. It could be its own small decision, or the ADR could explain why the two belong together.",
+    "severity": "minor",
+    "fix": "",
+    "status": "fixed",
+    "introduced_pass": null
+  },
+  {
+    "id": "ID-004",
+    "group": "A",
+    "claim": "ADR-0028 Decision 1 gives the 4xx-to-error_type mapping as one long prose sentence.",
+    "evidence": "'400 `invalid_request_error`, 401 `authentication_error`, 403 `permission_error`, 404 `not_found_error`, 413 `request_too_large`, 429 `rate_limit_error`, any other 4xx `invalid_request_error`'. A status/type/client-status/retry table covering 4xx, 5xx and 529 would be easier to scan.",
+    "severity": "minor",
+    "fix": "",
+    "status": "fixed",
+    "introduced_pass": null
+  },
+  {
+    "id": "ID-005",
+    "group": "B",
+    "claim": "ADR-0028 Decision 1 can contradict itself on error_type for the four existing statuses.",
+    "evidence": "Decision 1: 'The existing 400/401/403/429 behaviour does not change; it becomes a special case of the rule.' and 'The `error_type` is the upstream `error.type` when present.' The Context says only that these statuses map 'to the same status and an Anthropic error type'. It never says whether that type is upstream's or a fixed one. If the current code uses a fixed type, an upstream-supplied type is a behaviour change.",
+    "severity": "minor",
+    "fix": "",
+    "status": "fixed",
+    "introduced_pass": null
+  },
+  {
+    "id": "ID-006",
+    "group": "B",
+    "claim": "ADR-0028 sends every 4xx through unchanged and calls 5xx the transient class, but never weighs 4xx statuses that can be transient, such as 408 or 409.",
+    "evidence": "Decision 2: 'Those are transient and the client should retry them.' Decision 5: 'no 4xx other than 429 is in it.' The only alternative considered is the old blanket 502 mapping, so the trade-off for these statuses is unjustified.",
+    "severity": "minor",
+    "fix": "",
+    "status": "fixed",
+    "introduced_pass": null
+  },
+  {
+    "id": "ID-007",
+    "group": "B",
+    "claim": "ADR-0027's memory claim covers one map only.",
+    "evidence": "Consequences: 'Memory: 10000 entries of `(id, model)` strings, under about 2 MB. The other `SessionState` maps get the same raised bound.' The entry sizes of the other maps are not given, so the 2 MB estimate does not cover them.",
+    "severity": "minor",
+    "fix": "",
+    "status": "fixed",
+    "introduced_pass": null
+  },
+  {
+    "id": "ID-008",
+    "group": "B",
+    "claim": "The 404-after-expiry premise is asserted as final, yet ADR-0027 admits it is unproven.",
+    "evidence": "ADR-0028 Context: 'The 404 is final, and the message says how to recover.' ADR-0027 Open question: 'It is not proven that a 404 never comes from a Thread whose earlier continuation was rejected for a model mismatch.' ADR-0028 builds on the first claim without cross-referencing the caveat.",
+    "severity": "minor",
+    "fix": "",
+    "status": "fixed",
+    "introduced_pass": null
+  },
+  {
+    "id": "ID-009",
+    "group": "C",
+    "claim": "ADR-0027 does not say whether a pin stays authoritative after routing config changes.",
+    "evidence": "Decision 5: 'thread_pinned: the previous_message_id was found. routed_model is the recorded model.' The fail-closed justification only says 'it never selects a tier the earlier decision had not'. It never compares the pin against the current baseline, so under a newly tightened lock a pinned turn can still dispatch a pricier tier, and the ADR does not say this is intended.",
+    "severity": "minor",
+    "fix": "",
+    "status": "fixed",
+    "introduced_pass": null
+  },
+  {
+    "id": "ID-010",
+    "group": "C",
+    "claim": "ADR-0027 does not cover a client that changes its requested model mid-Thread.",
+    "evidence": "Decision 5 sets 'routed_model is the recorded model' whatever the requested model is now. The ADR never says whether a continuation whose requested model differs from the creating turn's requested model is pinned or falls back to the baseline. Pinning silently overrides an explicit client model switch.",
+    "severity": "minor",
+    "fix": "",
+    "status": "fixed",
+    "introduced_pass": null
+  },
+  {
+    "id": "ID-011",
+    "group": "C",
+    "claim": "'finishes successfully' has no clear meaning for streams, so the recording policy is underspecified.",
+    "evidence": "Decision 2: 'When a request that carried a `thread` (create or continue) finishes successfully'. The id comes from message_start, which arrives before the stream can fail. The ADR does not say whether a stream that errors or is cut off after message_start records its id. If it does not, the next continuation of that id gets thread_pin_unknown, then a baseline dispatch and a possible 400.",
+    "severity": "minor",
+    "fix": "",
+    "status": "fixed",
+    "introduced_pass": null
+  },
+  {
+    "id": "ID-012",
+    "group": "B",
+    "claim": "ADR-0028 Compatibility overstates the change: it implies every status other than 400/401/403/429 now passes through, but its own Decision and Consequences keep 5xx as 502",
+    "evidence": "Compatibility: \"A client that treated any non-400/401/403/429 failure as 502 now sees the upstream status.\" vs Consequences: \"A 502 from anthrouter now means an upstream 5xx or a failure inside anthrouter, never an upstream 4xx.\"",
+    "severity": "minor",
+    "fix": "",
+    "status": "open",
+    "introduced_pass": null
+  },
+  {
+    "id": "ID-013",
+    "group": "B",
+    "claim": "ADR-0028's reason for logging the request-id ignores ADR-0026, which already stores the upstream request-id on every row",
+    "evidence": "ADR-0028 Context: \"So none of these 404s, and none of the 216 Thread-mismatch 400s, can be matched to Anthropic's records.\" and Decision 4: \"the statuses that now pass through, 400 and 404, are the ones that could not be matched to Anthropic's records.\" vs ADR-0026 Decision 2 (outside this artifact): \"writes `attempt_out['upstream_request_id']` from the `request-id` header of each attempt's response, for every status.\" The claim holds only for rows written before schema v7, which the ADR does not say.",
+    "severity": "minor",
+    "fix": "",
+    "status": "open",
+    "introduced_pass": null
+  },
+  {
+    "id": "ID-014",
+    "group": "B",
+    "claim": "ADR-0028 justifies passing 408/409 through by citing SDK retry behaviour, then drops classifier retries for them with no reason given",
+    "evidence": "API Contract: \"these are often transient, but they pass through unchanged instead of being retried. Anthropic's official SDKs retry 408 and 409 themselves\" vs Consequences: \"A 408 or 409 on a classifier call is no longer retried either.\"",
+    "severity": "minor",
+    "fix": "",
+    "status": "open",
+    "introduced_pass": null
+  },
+  {
+    "id": "ID-015",
+    "group": "B",
+    "claim": "ADR-0027 calls a stale map entry harmless, but that rests on upstream behaviour the ADR itself marks unverified",
+    "evidence": "Decision 3: \"An entry that outlives its Thread is harmless: upstream answers that continuation with a 404 whatever model it is sent to (ADR-0028).\" vs the Context table row \"Each response id can be continued only once\" (secondary, unverified) and the Open question: \"It is not proven that a 404 never comes from a Thread whose earlier continuation was rejected for a model mismatch.\"",
+    "severity": "minor",
+    "fix": "",
+    "status": "open",
+    "introduced_pass": null
+  },
+  {
+    "id": "ID-016",
+    "group": "B",
+    "claim": "ADR-0027's detection rule treats any non-create type carrying a string previous_message_id as a continuation, which sits uneasily with the promise that unrecognised shapes route as before",
+    "evidence": "Decision 1 (paraphrased: any type other than create plus a string previous_message_id) vs \"Every other request, including `{\"type\": \"create\"}` and an unrecognised `thread` shape, is routed as before.\" A future type such as fork carrying previous_message_id would be pinned rather than routed as before.",
+    "severity": "minor",
+    "fix": "",
+    "status": "open",
+    "introduced_pass": null
+  },
+  {
+    "id": "ID-017",
+    "group": "B",
+    "claim": "ADR-0028 has no Considered Options section, while ADR-0027 does. It never weighs a narrower fix (pass through only the Thread 404) against \"Every upstream 4xx keeps its status\", although the broad choice changes classifier retries and dashboards (Consequences).",
+    "evidence": "",
+    "severity": "minor",
+    "fix": "",
+    "status": "open",
+    "introduced_pass": null
+  }
+]
