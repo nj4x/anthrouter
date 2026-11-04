@@ -1174,9 +1174,9 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         lock = self.config.lock_requested_model
         baseline = lock if lock != 'off' else requested
         pin = self.sessions.thread_pin(payload['thread']['previous_message_id'])
-        pinned = pin[0] if pin is not None else None
+        pinned = pin.model if pin is not None else None
         routed = pinned if pinned is not None else baseline
-        if pin is not None and pin[1]:
+        if pin is not None and pin.long_context:
             _ensure_long_context_beta(payload)
         # An unpinned, unlocked turn keeps its own ``model`` untouched, so a
         # missing or non-string one still fails upstream rather than becoming
@@ -1324,9 +1324,10 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
             )
             wrapped = self._usage_sse_wrapper(
                 sse_gen, start_time, model, sid, thread_model=thread_model,
-                long_context=long_context,
+                long_context=long_context, thread_session_key=sess_key,
             )
-            self._send_sse(self._rewrite_response_model_sse(wrapped))
+            self._send_sse(self._rewrite_response_model_sse(wrapped),
+                           hold='thread' in payload)
             return
 
         result = self.transport.send_message(
@@ -1335,8 +1336,13 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         )
         self.sessions.record_ratelimit(self._ratelimit)
         message_id = result.get('id')
+        response_text = _extract_response_text(result)
         if thread_model is not None and isinstance(message_id, str):
-            self.sessions.record_thread(message_id, thread_model, long_context)
+            self.sessions.record_thread(
+                message_id, thread_model, long_context, session_key=sess_key,
+                response_text=response_text,
+                response_text_limit=self.config.auto_model_routing_prior_response_summary_limit,
+            )
         usage = result.get('usage', {}) or {}
         stats = {
             'input_tokens': usage.get('input_tokens', 0),
@@ -1345,7 +1351,6 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
             'cache_read_tokens': usage.get('cache_read_input_tokens', 0),
         }
         self._record_session_context(stats)
-        response_text = _extract_response_text(result)
         self._record_caveman_prose(response_text)
         self._record_db(
             sid, stats, int((time.monotonic() - start_time) * 1000), 'success',
@@ -1370,7 +1375,8 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         return _wrapped()
 
     def _usage_sse_wrapper(self, sse_gen, start_time: float, model: str, sid: str,
-                           thread_model: str | None = None, long_context: bool = False):
+                           thread_model: str | None = None, long_context: bool = False,
+                           thread_session_key: str | None = None):
         """Yield SSE chunks, parsing usage, text, and errors in a single pass.
 
         ``thread_model`` is set only for a request that carried a ``thread``: the
@@ -1378,6 +1384,8 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         with no ``error`` event (ADR-0027), with ``long_context`` alongside.  The
         record lands before the ``message_stop`` chunk is yielded, so a client
         that continues the Thread the moment it sees the stop finds the pin.
+        The record carries the text accumulated so far and ``thread_session_key``
+        (ADR-0033); text is captured whenever a Thread is in play, DB or not.
         """
         stats = {
             'input_tokens': 0,
@@ -1385,7 +1393,8 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
             'cache_creation_tokens': 0,
             'cache_read_tokens': 0,
         }
-        capture_text = self.request_db is not None or bool(getattr(self, '_caveman_state', None))
+        capture_text = (thread_model is not None or self.request_db is not None
+                        or bool(getattr(self, '_caveman_state', None)))
         text_parts: list[str] = []
         errored = False
         thread_marks: dict = {'id': None, 'stopped': False, 'error': False}
@@ -1401,15 +1410,21 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         try:
             for chunk in sse_gen:
                 _extract_sse_stats(chunk, stats)
+                # Text first: a chunk can carry the last delta and message_stop together.
+                if capture_text:
+                    _extract_sse_text(chunk, text_parts)
                 if thread_model is not None and not thread_recorded:
                     _extract_sse_thread_marks(chunk, thread_marks)
                     if (thread_marks['stopped'] and not thread_marks['error']
                             and thread_marks['id'] is not None):
                         self.sessions.record_thread(
-                            thread_marks['id'], thread_model, long_context)
+                            thread_marks['id'], thread_model, long_context,
+                            session_key=thread_session_key,
+                            response_text=''.join(text_parts) or None,
+                            response_text_limit=(
+                                self.config.auto_model_routing_prior_response_summary_limit),
+                        )
                         thread_recorded = True
-                if capture_text:
-                    _extract_sse_text(chunk, text_parts)
                 if 'event: error' in line_tail + chunk:
                     errored = True
                 line_tail = chunk[-20:]
@@ -1850,13 +1865,16 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         except _CLIENT_DISCONNECT:
             logger.info('%s client disconnected before response', self._log_tag())
 
-    def _prime_sse_with_keepalive(self, generator, req_start):
+    def _prime_sse_with_keepalive(self, generator, req_start, commit=None):
         """Prime the first chunk, sending keepalive comments while waiting.
 
-        Headers are already committed, so a slow upstream would otherwise leave
-        the socket idle for the whole TTFB.  Returns ``(first_chunk, error)``;
-        an ``AnthropicRequestError`` raised while priming is returned rather than
-        propagated, because it must be delivered in-band as SSE.
+        A slow upstream would otherwise leave the socket idle for the whole
+        TTFB.  Returns ``(first_chunk, error, disconnected)``: any exception
+        raised while priming is returned rather than propagated, because the
+        caller alone knows whether the status line is already committed.
+        *commit*, when given, writes the held status line and runs once,
+        just before the first keepalive (ADR-0032).  ``disconnected`` means
+        the client went away during the wait; the caller writes nothing more.
 
         The background thread only reads from *generator*; the main thread only
         writes keepalives.  After ``primed.set()`` the thread has exited and the
@@ -1865,11 +1883,11 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         interval = getattr(self.config, 'sse_keepalive_interval', 0)
         if not isinstance(interval, (int, float)) or interval <= 0:
             try:
-                return next(generator), None
+                return next(generator), None, False
             except StopIteration:
-                return None, None
-            except AnthropicRequestError as exc:
-                return None, exc
+                return None, None, False
+            except Exception as exc:
+                return None, exc, False
 
         first_chunk = [None]
         priming_error = [None]
@@ -1880,7 +1898,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
                 first_chunk[0] = next(generator)
             except StopIteration:
                 pass
-            except AnthropicRequestError as exc:
+            except Exception as exc:
                 priming_error[0] = exc
             finally:
                 primed.set()
@@ -1888,8 +1906,12 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         threading.Thread(target=_prime, daemon=True, name='sse-prime').start()
 
         keepalive_count = 0
+        disconnected = False
         while not primed.wait(timeout=interval):
             try:
+                if commit is not None:
+                    pending_commit, commit = commit, None
+                    pending_commit()
                 self.wfile.write(b': keepalive\n\n')
                 self.wfile.flush()
                 keepalive_count += 1
@@ -1897,10 +1919,12 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
                 logger.info('%s client disconnected during SSE keepalive '
                             '(keepalives_sent=%d)', self._log_tag(), keepalive_count)
                 primed.wait()  # never abandon the priming thread
+                disconnected = True
                 break
             except Exception as exc:
                 logger.warning('%s SSE keepalive write error: %s', self._log_tag(), exc)
                 primed.wait()
+                disconnected = True
                 break
 
         if keepalive_count:
@@ -1908,7 +1932,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
             logger.info('%s SSE keepalive complete (keepalives_sent=%d ttfb=%.2fs)',
                         self._log_tag(), keepalive_count, elapsed)
 
-        return first_chunk[0], priming_error[0]
+        return first_chunk[0], priming_error[0], disconnected
 
     def _send_sse_error(self, exc: AnthropicRequestError) -> None:
         frame = sse_event('error', anthropic_error_payload(exc.error_type, exc.message))
@@ -1920,31 +1944,61 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         except Exception:
             logger.debug('%s error sending SSE error event', self._log_tag(), exc_info=True)
 
-    def _send_sse(self, generator):
-        """Stream an SSE response, committing HTTP 200 before priming upstream.
+    def _send_sse_headers(self) -> None:
+        self.send_response(200)
+        self.send_header('Content-Type', 'text/event-stream')
+        self.send_header('Cache-Control', 'no-cache')
+        self.send_header('X-Accel-Buffering', 'no')
+        self.end_headers()
 
-        Because the status line is already sent, a pre-stream upstream failure is
-        delivered as an in-band SSE error event rather than an HTTP status.
+    def _send_sse(self, generator, hold: bool = False):
+        """Stream an SSE response, with one of two commit modes.
+
+        Commit first (``hold`` false, ADR-0026): HTTP 200 goes out before the
+        upstream is primed, so a pre-stream upstream failure can only be an
+        in-band SSE error event.
+
+        Hold (``hold`` true, ADR-0032; the body has a ``thread`` field): the
+        status line waits for the first upstream chunk, the first keepalive,
+        or an empty end of stream.  A failure before that goes out through
+        the non-streaming error responses (``_send_error``, or 502
+        ``api_error``), so an expired-Thread 400 reaches the client as an HTTP
+        400.  The ``requests`` row is recorded by the stream wrapper either way.
         """
         req_start = getattr(self, '_req_start', None)
         chunks_sent = 0
+        committed = False
+
+        def commit():
+            nonlocal committed
+            # Set first: a commit that fails on a broken pipe must not be retried.
+            committed = True
+            self._send_sse_headers()
+
         try:
             # The header commit is inside the try: on a cancelled request
             # end_headers is where the broken pipe first surfaces.
-            self.send_response(200)
-            self.send_header('Content-Type', 'text/event-stream')
-            self.send_header('Cache-Control', 'no-cache')
-            self.send_header('X-Accel-Buffering', 'no')
-            self.end_headers()
+            if not hold:
+                commit()
 
-            first_chunk, priming_error = self._prime_sse_with_keepalive(
-                generator, req_start)
+            first_chunk, priming_error, disconnected = self._prime_sse_with_keepalive(
+                generator, req_start, commit=None if committed else commit)
+            if disconnected:
+                return
             if priming_error is not None:
-                logger.warning('%s SSE priming error (post-header): %s',
-                               self._log_tag(), priming_error)
-                self._send_sse_error(priming_error)
+                if not committed:
+                    self._send_held_error(priming_error)
+                elif isinstance(priming_error, AnthropicRequestError):
+                    logger.warning('%s SSE priming error (post-header): %s',
+                                   self._log_tag(), priming_error)
+                    self._send_sse_error(priming_error)
+                else:
+                    logger.error('%s SSE priming failure after headers committed: %s',
+                                 self._log_tag(), priming_error)
                 return
 
+            if not committed:
+                commit()
             if first_chunk is not None:
                 self._write_chunk(first_chunk)
                 chunks_sent += 1
@@ -1971,6 +2025,22 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
                 except Exception:
                     logger.debug('%s error closing SSE generator',
                                  self._log_tag(), exc_info=True)
+
+    def _send_held_error(self, exc: Exception) -> None:
+        """Send a failure raised before a held SSE status line as a real HTTP status.
+
+        Same responses as the non-streaming error path in ``do_POST``; no
+        ``requests`` row is written here, because the stream wrapper already
+        recorded it.
+        """
+        if isinstance(exc, AnthropicRequestError):
+            logger.warning('%s SSE priming error before headers committed '
+                           '(sent as HTTP %d): %s', self._log_tag(), exc.status_code, exc)
+            self._send_error(exc)
+            return
+        logger.error('%s SSE priming failure before headers committed '
+                     '(sent as HTTP 502): %s', self._log_tag(), exc)
+        self._send_json(502, anthropic_error_payload('api_error', 'Upstream request failed'))
 
     def _write_chunk(self, chunk: str) -> None:
         self.wfile.write(chunk.encode('utf-8'))
