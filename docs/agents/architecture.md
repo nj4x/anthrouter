@@ -62,7 +62,7 @@ The recovery for that fail-open path sits in `_send_with_retries` beside the thi
 
 ## Persistence (`anthrouter/db.py`, `admin.py`)
 
-SQLite, one write connection guarded by a lock, per-thread read connections over WAL. Three tables: `requests` (one row per dispatch, routing decision folded in), `prompt_store` (deduped/ref-counted system+tools content), `sanitizer_events`. FTS5 external-content trigram index over prompt/response text for substring search without a casefolded shadow column. Every `requests` row stores the final attempt's upstream `request-id` header in `upstream_request_id`, and an upstream 429 records `status='rate_limited'` whether or not the request streamed (ADR-0026).
+SQLite, one write connection guarded by a lock, per-thread read connections over WAL. Three tables: `requests` (one row per dispatch, routing decision folded in), `prompt_store` (deduped/ref-counted system+tools content), `sanitizer_events`. FTS5 external-content trigram index over prompt/response text for substring search without a casefolded shadow column. Every `requests` row stores the final attempt's upstream `request-id` header in `upstream_request_id`, and an upstream 429 records `status='rate_limited'` whether or not the request streamed (ADR-0026). A local model-mismatch 400 on a Thread continuation records `status='reclassified'`, with `routed_model` the new model, `thread_model` the Thread's model and `cost_estimate` 0; it is not counted as an error or as a success, and its cost and savings are NULL or 0 (ADR-0033 Decision 7, schema v9).
 
 `admin.py` has two entry points:
 - `handle_get` — read-only queries, always enabled

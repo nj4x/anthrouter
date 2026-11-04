@@ -174,3 +174,32 @@ describe('RequestDetailDrawer strip count without user text (ADR-0030)', () => {
     expect(await screen.findByText('2 attribution reminders stripped')).toBeInTheDocument()
   })
 })
+
+describe('RequestDetailDrawer Thread re-classification (ADR-0033)', () => {
+  it('shows a reclassification badge and names both models, not an error', async () => {
+    show({
+      status: 'reclassified', reason_code: 'thread_reclassified',
+      routed_model: 'claude-sonnet-4-5', thread_model: 'claude-haiku-4-5', error: null,
+    })
+    expect(await screen.findByText('Reclassification')).toBeInTheDocument()
+    expect(screen.queryByText('Error')).not.toBeInTheDocument()
+    expect(screen.getByText(
+      'The new user prompt routes to claude-sonnet-4-5, but this Thread runs on claude-haiku-4-5. '
+      + 'anthrouter asked the client to start a new Thread on claude-sonnet-4-5. No upstream call was made.',
+    )).toBeInTheDocument()
+  })
+
+  it.each([
+    ['thread_replay_pinned', 'Replay kept on the last Thread model: its final message had only tool results.'],
+    ['thread_reclassified_replay', 'Replay after a re-classification: routed to the model chosen for the earlier prompt.'],
+  ])('explains %s', async (reason_code, text) => {
+    show({ reason_code })
+    expect(await screen.findByText(text)).toBeInTheDocument()
+  })
+
+  it('shows no Thread text for other reason codes', async () => {
+    show({ reason_code: 'thread_pinned', user_prompt_text: 'hello' })
+    expect(await screen.findByText('hello')).toBeInTheDocument()
+    expect(screen.queryByText(/Replay|new Thread/)).not.toBeInTheDocument()
+  })
+})

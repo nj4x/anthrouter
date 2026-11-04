@@ -365,6 +365,9 @@ ReasonCode = Literal[
     'security_monitor_passthrough',  # ADR-0017: handler skips the lock and route_model()
     'thread_pinned',                 # ADR-0027: handler pins a Thread continuation, skips route_model()
     'thread_pin_unknown',            # ADR-0027: continuation id not recorded; routing baseline
+    'thread_reclassified',           # ADR-0033: continuation prompt routes off the Thread's model; local 400, no upstream call
+    'thread_reclassified_replay',    # ADR-0033: replay took the re-classification handoff (or the size floor beat it)
+    'thread_replay_pinned',          # ADR-0033: tool-result-only replay, no handoff; session's last Thread model or baseline
     'size_forced_long_context',
     'session_cached_tier',
     'session_cached_tier_capped',
