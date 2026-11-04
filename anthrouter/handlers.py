@@ -50,7 +50,9 @@ from .model_router import (
     _ensure_long_context_beta,
     _extract_user_text,
     calibrated_ratio,
+    is_model_auto_routable,
     route_model,
+    size_floor,
 )
 from .model_tier import classify_model_tier
 from .request_text import (
@@ -307,6 +309,17 @@ def _is_tool_result_only(payload: dict) -> bool:
     return (
         isinstance(content, list) and bool(content)
         and all(isinstance(b, dict) and b.get('type') == 'tool_result' for b in content)
+    )
+
+
+def _is_thread_replay(payload: dict) -> bool:
+    """True for a ``thread=create`` carrying one or more prior assistant messages (ADR-0033)."""
+    thread = payload.get('thread')
+    messages = payload.get('messages')
+    return (
+        isinstance(thread, dict) and thread.get('type') == 'create'
+        and isinstance(messages, list)
+        and any(isinstance(m, dict) and m.get('role') == 'assistant' for m in messages)
     )
 
 
@@ -1332,7 +1345,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         return replace(decision, reason_code='thread_reclassified')
 
     def _route(self, payload: dict, sess_key: str | None, credentials: dict) -> None:
-        """Route a Thread continuation by ``_route_continuation``, else apply the model lock and run ``route_model()`` and the tier cache."""
+        """Route a Thread continuation by ``_route_continuation``, a replay by ``_route_replay``, else apply the model lock and run ``route_model()`` and the tier cache."""
         if _is_thread_continuation(payload):
             routing = self._route_continuation(payload, sess_key, credentials)
             self._routing = routing
@@ -1382,12 +1395,17 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         )
 
         target = RoutingTarget(config=config, backend=self.transport)
-        routing = route_model(
-            payload, target, credentials, cached_tier, session_floor, session_ratio,
-            log_tag=self._log_tag(), ctx_key=ctx_key, baseline_model=baseline_model,
-        )
-
-        routing = self._apply_tier_cache(routing, payload, tier_key, config)
+        if _is_thread_replay(payload):
+            routing = self._route_replay(
+                payload, sess_key, credentials, target, session_floor, session_ratio,
+                ctx_key, baseline_model,
+            )
+        else:
+            routing = route_model(
+                payload, target, credentials, cached_tier, session_floor, session_ratio,
+                log_tag=self._log_tag(), ctx_key=ctx_key, baseline_model=baseline_model,
+            )
+            routing = self._apply_tier_cache(routing, payload, tier_key, config)
 
         self._routing = routing
         self._ctx_key = ctx_key if floor_active else None
@@ -1404,6 +1422,65 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
                 routing.predicted_input_tokens, routing.session_context_tokens,
                 routing.session_estimate_ratio, routing.classifier_mode,
             )
+
+    def _route_replay(
+        self, payload: dict, sess_key: str | None, credentials: dict,
+        target: RoutingTarget, session_floor: int, session_ratio: float,
+        ctx_key: str | None, baseline_model: str | None,
+    ) -> ModelRoutingDecision:
+        """Routing decision for a Thread replay (ADR-0033 Decisions 5 and 6, Create Routing).
+
+        A replay neither reads nor writes the tier cache: its key comes from the
+        opening turn, which could send the replay back to the old tier.
+
+        1. The size floor (``size_floor()``, no classifier call) wins over a live
+           handoff.  A live handoff is still taken (deleted), and then the code
+           is ``thread_reclassified_replay``.
+        2. A live handoff for ``_final_text_key`` is taken: its model, with no
+           classifier and no affirmation handling.
+        3. Final message with only tool results: the session's last Thread
+           model, else the routing baseline; ``thread_replay_pinned``.
+        4. Otherwise ``route_model()`` with no cached tier, which classifies the
+           final prompt with the last prior assistant message and fails closed
+           to the routing baseline, not a Thread model: a replay creates a new
+           Thread, so no Thread model binds it.
+        """
+        config = target.config
+        raw_model = payload.get('model')
+        requested = str(raw_model) if isinstance(raw_model, str) else repr(raw_model)
+        floor = None
+        if config.auto_model_routing and is_model_auto_routable(raw_model):
+            _, floor = size_floor(payload, config, requested, session_floor, session_ratio,
+                                  log_tag=self._log_tag(), ctx_key=ctx_key)
+        key = self._final_text_key
+        handoff = self.sessions.take_handoff(key) if key is not None else None
+        if floor is not None:
+            return (replace(floor, reason_code='thread_reclassified_replay')
+                    if handoff is not None else floor)
+        if handoff is not None:
+            payload['model'] = handoff.model
+            logger.info('%s Thread re-classification handoff: model=%s',
+                        self._log_tag(), handoff.model)
+            return replace(handoff.decision, requested_model=requested,
+                           routed_model=handoff.model,
+                           applied=(handoff.model != requested),
+                           reason_code='thread_reclassified_replay',
+                           classifier_model=None, classifier_input_tokens=0,
+                           classifier_output_tokens=0)
+        if _is_tool_result_only(payload):
+            model = self.sessions.last_thread_model(sess_key) or baseline_model or requested
+            # An unlocked turn with no known Thread model keeps its own ``model``
+            # untouched, so a missing or non-string one still fails upstream.
+            if model != requested:
+                payload['model'] = model
+            return ModelRoutingDecision(
+                requested_model=requested, routed_model=model, classification=None,
+                applied=(model != requested), reason_code='thread_replay_pinned',
+            )
+        return route_model(
+            payload, target, credentials, None, session_floor, session_ratio,
+            log_tag=self._log_tag(), ctx_key=ctx_key, baseline_model=baseline_model,
+        )
 
     def _apply_tier_cache(
         self, routing, payload: dict, tier_key: tuple[str, str] | None, config,
