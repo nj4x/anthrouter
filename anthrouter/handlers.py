@@ -40,6 +40,7 @@ from .mapper import (
     anthropic_error_payload,
     sse_event,
 )
+from .model_config import resolve_model
 from .model_router import (
     _LONG_CONTEXT_BETA_PREFIX,
     _TRAILING_SCAN_LIMIT,
@@ -235,6 +236,77 @@ def _is_thread_continuation(payload: dict) -> bool:
         isinstance(thread, dict)
         and thread.get('type') != 'create'
         and isinstance(thread.get('previous_message_id'), str)
+    )
+
+
+THREAD_MODEL_MISMATCH_MESSAGE = (
+    'thread: the request does not match the stored Thread for the requested '
+    '`previous_message_id`; differing field(s): model. These fields must stay '
+    "the same across a Thread's turns; to change them, start a new Thread with "
+    '`thread: {"type": "create"}` and replay the conversation.'
+)
+"""Upstream's model-mismatch 400 text, sent verbatim by the local 400 (ADR-0033 Decision 4)."""
+
+
+def _final_message_content(payload: dict):
+    """``content`` of the last message when that message is a user turn, else ``None``."""
+    messages = payload.get('messages')
+    if not isinstance(messages, list) or not messages:
+        return None
+    last = messages[-1]
+    if not isinstance(last, dict) or last.get('role') != 'user':
+        return None
+    return last.get('content')
+
+
+def final_user_text(payload: dict) -> str | None:
+    """The final user message's ``text`` blocks joined with ``\\n``; ``None`` with no text block.
+
+    A string ``content`` is one block; non-text blocks are ignored.  Read it
+    from the payload as received: the sanitizer, the attribution-reminder
+    strip and the caveman rewrite all change the text the client will resend
+    (ADR-0033 Decision 5).
+    """
+    content = _final_message_content(payload)
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return None
+    texts = [b['text'] for b in content
+             if isinstance(b, dict) and b.get('type') == 'text' and isinstance(b.get('text'), str)]
+    return '\n'.join(texts) if texts else None
+
+
+def _handoff_key(sess_key: str | None, payload: dict) -> tuple[str, str] | None:
+    """Handoff store key ``(session key, SHA-256 hex of the final user text)`` (ADR-0033).
+
+    ``None`` when the request has no session key or no final user text: such a
+    request neither reads nor stores a handoff.
+    """
+    if sess_key is None:
+        return None
+    text = final_user_text(payload)
+    if text is None:
+        return None
+    return sess_key, hashlib.sha256(text.encode('utf-8')).hexdigest()
+
+
+def _same_model(a: str, b: str, config) -> bool:
+    """True when two model names resolve to the same upstream model id."""
+    if a == b:
+        return True
+    if not isinstance(a, str) or not isinstance(b, str) or not a or not b:
+        return False
+    aliases = getattr(config, 'model_aliases', None)
+    return resolve_model(a, aliases=aliases) == resolve_model(b, aliases=aliases)
+
+
+def _is_tool_result_only(payload: dict) -> bool:
+    """True when the final user message is a non-empty list of ``tool_result`` blocks only."""
+    content = _final_message_content(payload)
+    return (
+        isinstance(content, list) and bool(content)
+        and all(isinstance(b, dict) and b.get('type') == 'tool_result' for b in content)
     )
 
 
@@ -1031,6 +1103,8 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         self._ctx_key = None
         self._route_est = 0
         self._routing = None
+        self._final_text_key = None
+        self._reclassified_from = None
         self._prompt_capture = {}
         self._sanitizer_events = []
         self._caveman_state = None
@@ -1078,6 +1152,9 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
                 if token and self.oauth_cache:
                     self.oauth_cache.get(token)
             self._prepare(payload, sess_key, credentials)
+            if self._reclassified_from is not None:
+                self._send_reclassified(sess_key)
+                return
             dispatched = True
             self._dispatch(payload, credentials, sess_key)
 
@@ -1107,7 +1184,12 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         from recording one.  The system prompt is also forwarded unsanitized: the
         client's ``x-anthropic-billing-header`` block is what marks the request as
         Claude Code's, and upstream rejects the request without it (ADR-0017).
+
+        ``_final_text_key`` (``_handoff_key()``) is taken first, from the payload as received (ADR-0033
+        Decision 5).  A re-classified continuation stops after the prompt
+        capture: it is answered locally, so nothing else is prepared.
         """
+        self._final_text_key = _handoff_key(sess_key, payload)
         monitor = _has_happy_new_year_system_prompt(payload)
         if monitor:
             self._routing = _security_monitor_passthrough(payload)
@@ -1118,6 +1200,8 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
             self._route(payload, sess_key, credentials)
 
         self._prompt_capture = self._extract_prompt_capture(payload)
+        if self._reclassified_from is not None:
+            return
         sanitized = SanitizeResult() if monitor else sanitize_system_prompt(
             payload, getattr(self.config, 'sanitize_system_prompt', 'off'), sess_key,
             log_tag=self._log_tag(),
@@ -1158,48 +1242,109 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
             )
             _capture_dispatched_user_text(self, payload, self._prompt_capture)
 
-    def _pin_thread(self, payload: dict) -> ModelRoutingDecision:
-        """Routing decision for a Thread continuation: no ``route_model()``, no tier cache.
+    def _route_continuation(
+        self, payload: dict, sess_key: str | None, credentials: dict,
+    ) -> ModelRoutingDecision:
+        """Routing decision for a Thread continuation: the ordered check of ADR-0033.
 
-        Upstream rejects any model change inside a Thread, so the recorded model
-        outranks the lock and the auto-routing flag.  ``thread_pinned`` is a
-        deliberate exception to ADR-0016: it can exceed the lock or baseline.
-        An id the map does not hold falls closed to the routing baseline
-        (ADR-0027).  A Thread whose recorded request carried a ``context-1m*``
-        beta gets it again: the pin skips the size floor, which is otherwise
-        the only place that adds it.
+        1. Pin not found: routing baseline, ``thread_pin_unknown`` (ADR-0027).
+        2. Final message holds only tool results, or 3. the Thread map entry has
+           the long-context flag: pinned, ``thread_pinned``, no classifier.
+        4. A live handoff for ``_final_text_key``: the local 400 again, no classifier.
+        5. ``route_model()`` with no tier cache and no session context, and the
+           Thread's stored response text as ``prior_response_summary``.  A
+           routing failure (no classification, no size floor) fails closed to
+           the Thread's model, not the baseline: upstream rejects any other
+           model on a continuation.  The same model is pinned; another model
+           sets ``_reclassified_from`` (the local 400) and stores the handoff.
+
+        ``thread_pinned`` is a deliberate exception to ADR-0016: it can exceed
+        the lock or baseline.  A long-context Thread gets its ``context-1m*``
+        beta again: the pin skips the size floor, which otherwise adds it.
         """
         raw_model = payload.get('model')
         requested = str(raw_model) if isinstance(raw_model, str) else repr(raw_model)
-        lock = self.config.lock_requested_model
+        config = self.config
+        lock = config.lock_requested_model
         baseline = lock if lock != 'off' else requested
         pin = self.sessions.thread_pin(payload['thread']['previous_message_id'])
-        pinned = pin.model if pin is not None else None
-        routed = pinned if pinned is not None else baseline
-        if pin is not None and pin.long_context:
+        if pin is None:
+            # An unlocked turn keeps its own ``model`` untouched, so a missing or
+            # non-string one still fails upstream rather than becoming "None".
+            if lock != 'off':
+                payload['model'] = baseline
+            return ModelRoutingDecision(
+                requested_model=requested, routed_model=baseline, classification=None,
+                applied=(baseline != requested), reason_code='thread_pin_unknown',
+            )
+
+        pinned = pin.model
+
+        def _pin(decision: ModelRoutingDecision | None = None) -> ModelRoutingDecision:
+            payload['model'] = pinned
+            if decision is None:
+                decision = ModelRoutingDecision(
+                    requested_model=requested, routed_model=pinned,
+                    classification=None, applied=False, reason_code='thread_pinned',
+                )
+            return replace(decision, requested_model=requested, routed_model=pinned,
+                           applied=(pinned != requested), reason_code='thread_pinned')
+
+        if pin.long_context:
             _ensure_long_context_beta(payload)
-        # An unpinned, unlocked turn keeps its own ``model`` untouched, so a
-        # missing or non-string one still fails upstream rather than becoming
-        # the string "None".
-        if pinned is not None or lock != 'off':
-            payload['model'] = routed
-        return ModelRoutingDecision(
-            requested_model=requested,
-            routed_model=routed,
-            classification=None,
-            applied=(routed != requested),
-            reason_code='thread_pinned' if pinned is not None else 'thread_pin_unknown',
+            return _pin()
+        if _is_tool_result_only(payload):
+            return _pin()
+
+        key = self._final_text_key
+        handoff = self.sessions.peek_handoff(key) if key is not None else None
+        if handoff is not None:
+            self._reclassified_from = pinned
+            return replace(handoff.decision, requested_model=requested,
+                           routed_model=handoff.model,
+                           applied=(handoff.model != requested),
+                           reason_code='thread_reclassified',
+                           classifier_model=None, classifier_input_tokens=0,
+                           classifier_output_tokens=0)
+
+        routing_on = sess_key is not None and self.sessions.model_routing_enabled(sess_key)
+        if bool(config.auto_model_routing) != routing_on:
+            config = replace(config, auto_model_routing=routing_on)
+        decision = route_model(
+            payload, RoutingTarget(config=config, backend=self.transport), credentials,
+            cached_session_tier=None, session_context_tokens=0,
+            session_estimate_ratio=1.0, log_tag=self._log_tag(),
+            baseline_model=lock if lock != 'off' else None,
+            prior_response_summary=pin.response_text or None,
         )
+        if (decision.classification is None
+                and decision.reason_code != 'size_forced_long_context'):
+            return _pin(decision)
+        if _same_model(decision.routed_model, pinned, config):
+            return _pin(decision)
+        self._reclassified_from = pinned
+        if key is not None:
+            self.sessions.store_handoff(key, decision.routed_model, decision)
+        return replace(decision, reason_code='thread_reclassified')
 
     def _route(self, payload: dict, sess_key: str | None, credentials: dict) -> None:
-        """Pin a Thread continuation, else apply the model lock and run ``route_model()`` and the tier cache."""
+        """Route a Thread continuation by ``_route_continuation``, else apply the model lock and run ``route_model()`` and the tier cache."""
         if _is_thread_continuation(payload):
-            routing = self._pin_thread(payload)
+            routing = self._route_continuation(payload, sess_key, credentials)
             self._routing = routing
+            if self._reclassified_from is not None:
+                logger.info(
+                    '%s Thread re-classified: %s -> %s (tier=%s); sent model-mismatch '
+                    '400 so the client opens a new Thread',
+                    self._log_tag(), self._reclassified_from, routing.routed_model,
+                    routing.classification,
+                )
+                return
             logger.info(
-                '%s Model routing: requested=%s routed=%s applied=%s reason=%s',
+                '%s Model routing: requested=%s routed=%s classification=%s '
+                'applied=%s reason=%s',
                 self._log_tag(), routing.requested_model, routing.routed_model,
-                routing.applied, routing.reason_code,
+                routing.classification, routing.applied, routing.reason_code,
             )
             return
 
@@ -1540,8 +1685,23 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
 
         return requested_cost - routed_cost - classifier_overhead_usd, classifier_overhead_usd
 
+    def _send_reclassified(self, sess_key: str | None) -> None:
+        """Answer a re-classified continuation with upstream's model-mismatch 400 (ADR-0033).
+
+        No upstream call is made, so the response does not depend on the
+        streaming hold.  The row is ``status='reclassified'`` at cost 0.
+        """
+        self._record_db(
+            sess_key or UNTRACKED_SESSION_ID, {},
+            int((time.monotonic() - self._req_start) * 1000), 'reclassified',
+            thread_model=self._reclassified_from,
+        )
+        self._send_json(400, anthropic_error_payload(
+            'invalid_request_error', THREAD_MODEL_MISMATCH_MESSAGE))
+
     def _record_db(self, sid: str, stats: dict, duration_ms: int, status: str,
-                   error: str | None = None, response_text: str | None = None) -> None:
+                   error: str | None = None, response_text: str | None = None,
+                   thread_model: str | None = None) -> None:
         if self.request_db is None or self._routing is None:
             return
         try:
@@ -1560,6 +1720,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
                 upstream_request_id=self._attempt.get('upstream_request_id'),
                 net_savings_usd=net_savings_usd,
                 classifier_overhead_usd=classifier_overhead_usd,
+                thread_model=thread_model,
                 **self._prompt_capture,
             )
         except Exception:
