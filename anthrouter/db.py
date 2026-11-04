@@ -718,7 +718,11 @@ class RequestDB:
         return [dict(r) for r in rows]
 
     def get_routing_summary(self) -> dict:
-        """Counts and savings totals across every routed request."""
+        """Counts and savings totals across every routed request.
+
+        A ``reclassified`` row is excluded: the client replays that turn as a
+        new Thread, and the replay's own row counts it, so counting both would count one turn twice.
+        """
         row = self._read_conn().execute(
             """SELECT COUNT(*)                                    AS total,
                       SUM(CASE WHEN applied = 1 THEN 1 ELSE 0 END) AS applied,
@@ -727,7 +731,8 @@ class RequestDB:
                       SUM(CASE WHEN classification = 'deep'     THEN 1 ELSE 0 END) AS deep,
                       SUM(net_savings_usd)         AS net_savings_usd,
                       SUM(classifier_overhead_usd) AS classifier_overhead_usd
-                 FROM requests"""
+                 FROM requests
+                WHERE status != 'reclassified'"""
         ).fetchone()
         return dict(row)
 

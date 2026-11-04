@@ -1660,6 +1660,7 @@ def route_model(
     override_mode: str | None = None,
     ctx_key: str | None = None,
     baseline_model: str | None = None,
+    prior_response_summary: str | None = None,
 ) -> ModelRoutingDecision:
     """Classify the request and rewrite ``payload['model']`` in place.
 
@@ -1678,6 +1679,10 @@ def route_model(
     undercount).  The floor fires when
     ``max(round(estimate * ratio), session_context_tokens) >= threshold``.  Both
     default to the identity (``0`` / ``1.0``), reproducing the estimate-only floor.
+
+    A non-empty ``prior_response_summary`` replaces the one extracted from
+    ``payload['messages']``: a Thread continuation carries only its delta, so
+    its prior assistant text comes from the Thread map (ADR-0033 Decision 2).
 
     Returns a ``ModelRoutingDecision`` describing the outcome for logging.
     """
@@ -1852,9 +1857,10 @@ def route_model(
         config, 'auto_model_routing_prior_response_summary_limit', 1000
     )
     _messages_list = payload.get('messages') or []
-    prior_response_summary = _extract_prior_response_summary(
-        _messages_list, _prior_response_limit
-    )
+    if not prior_response_summary:
+        prior_response_summary = _extract_prior_response_summary(
+            _messages_list, _prior_response_limit
+        )
 
     # --- Short-affirmation continuation: a bare "yes"/"proceed"/"go ahead" as
     # THIS turn's own text carries no complexity signal — it greenlights work the

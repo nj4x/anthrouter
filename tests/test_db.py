@@ -892,3 +892,11 @@ def test_reclassified_row_is_not_an_error_a_success_or_a_cost(db):
     assert stats['cache_savings_usd'] == baseline['cache_savings_usd']
     assert db.get_routing_summary()['net_savings_usd'] == baseline_routing['net_savings_usd']
     assert [r['status'] for r in db.get_requests()].count('success') == 1
+
+
+def test_routing_summary_does_not_count_a_reclassified_row(db):
+    _record(db, status='success')
+    baseline = db.get_routing_summary()
+    _record(db, status='reclassified', stats_dict={},
+            routing_decision=FakeDecision(reason_code='thread_reclassified'))
+    assert db.get_routing_summary() == baseline
