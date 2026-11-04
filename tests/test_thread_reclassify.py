@@ -18,6 +18,7 @@ from tests.conftest import (
     db_rows,
     post,
     session_state,
+    set_session_clock,
 )
 
 HAIKU = resolve_model('haiku')
@@ -294,3 +295,167 @@ def test_handoff_key_helper(payload, expected):
     else:
         assert key == _key(expected)
     assert _handoff_key(None, {'messages': [{'role': 'user', 'content': 'abc'}]}) is None
+
+
+# -- Thread replays (ADR-0033 Decisions 5 and 6) -------------------------------
+
+PRIOR = 'Shall I refactor it?'
+
+
+def _replay(final, stream=False, model='sonnet', opening='hello'):
+    return {
+        'model': model, 'stream': stream, 'metadata': {'user_id': SESSION},
+        'thread': {'type': 'create'},
+        'messages': [
+            {'role': 'user', 'content': opening},
+            {'role': 'assistant', 'content': [{'type': 'text', 'text': PRIOR}]},
+            {'role': 'user', 'content': final},
+        ],
+    }
+
+
+def _store(server, text, model='sonnet'):
+    session_state(server).store_handoff(_key(text), model, ModelRoutingDecision(
+        requested_model='sonnet', routed_model=model, classification='standard',
+        applied=False, reason_code='classifier_rules_standard'))
+
+
+def test_replay_takes_the_handoff_and_skips_the_classifier(proxy, classifier, caplog):
+    server = proxy(**ROUTED)
+    _store(server, 'hi')
+    with caplog.at_level(logging.INFO):
+        post(server, '/v1/messages', _replay('hi'))
+    assert _FakeUpstream.received[-1]['payload']['model'] == resolve_model('sonnet')
+    assert classifier['calls'] == 0
+    assert db_rows(server)[0]['reason_code'] == 'thread_reclassified_replay'
+    assert session_state(server).peek_handoff(_key('hi')) is None
+    assert not session_state(server)._routed_tier
+    assert any(r.getMessage().endswith('Thread re-classification handoff: model=sonnet')
+               for r in caplog.records)
+
+
+def test_replay_with_other_final_text_does_not_take_the_handoff(proxy, classifier):
+    server = proxy(**ROUTED)
+    _store(server, DEEP_PROMPT)
+    post(server, '/v1/messages', _replay('hi'))
+    assert _FakeUpstream.received[-1]['payload']['model'] == HAIKU
+    assert classifier['calls'] == 1
+    assert session_state(server).peek_handoff(_key(DEEP_PROMPT)) is not None
+
+
+def test_handoff_expires_after_60_seconds(proxy, classifier):
+    server = proxy(**ROUTED)
+    now = [1000.0]
+    set_session_clock(server, lambda: now[0])
+    _store(server, 'hi')
+    now[0] += 61
+    post(server, '/v1/messages', _replay('hi'))
+    assert _FakeUpstream.received[-1]['payload']['model'] == HAIKU
+    assert classifier['calls'] == 1
+    assert db_rows(server)[0]['reason_code'] != 'thread_reclassified_replay'
+
+
+def test_size_floor_wins_over_a_live_handoff(proxy, classifier):
+    server = proxy(**ROUTED, auto_model_routing_long='opus[1m]',
+                   auto_model_routing_long_context_threshold=1000)
+    _store(server, 'hi', model='haiku')
+    _FakeUpstream.message_ids = ['msg_R']
+    post(server, '/v1/messages', _replay('hi', opening='word ' * 5000))
+    sent = _FakeUpstream.received[-1]
+    assert sent['payload']['model'] == resolve_model('opus[1m]')
+    assert 'context-1m' in sent['headers'].get('anthropic-beta', '')
+    assert classifier['calls'] == 0
+    assert db_rows(server)[0]['reason_code'] == 'thread_reclassified_replay'
+    state = session_state(server)
+    assert state.peek_handoff(_key('hi')) is None
+    assert state.thread_pin('msg_R').long_context is True
+
+
+def test_create_without_prior_assistant_keeps_the_tier_cache_and_the_handoff(proxy, classifier):
+    server = proxy(**ROUTED)
+    _store(server, 'hi')
+    post(server, '/v1/messages', _create('hi'))
+    assert _FakeUpstream.received[-1]['payload']['model'] == HAIKU
+    state = session_state(server)
+    assert state.peek_handoff(_key('hi')) is not None
+    assert state._routed_tier
+
+
+def test_replay_retry_after_429_is_classified_without_handoff(proxy, classifier):
+    server = proxy(**ROUTED)
+    _store(server, 'hi', model='opus')
+    _FakeUpstream.status = 429
+    _FakeUpstream.error_type = 'rate_limit_error'
+    with pytest.raises(urllib.error.HTTPError):
+        post(server, '/v1/messages', _replay('hi'))
+    assert _FakeUpstream.received[-1]['payload']['model'] == OPUS
+    assert session_state(server).peek_handoff(_key('hi')) is None
+    _FakeUpstream.status = 200
+    post(server, '/v1/messages', _replay('hi'))
+    assert _FakeUpstream.received[-1]['payload']['model'] == HAIKU
+    assert classifier['calls'] == 1
+    assert db_rows(server)[0]['reason_code'] != 'thread_reclassified_replay'
+    assert not session_state(server)._routed_tier
+
+
+def test_replay_without_handoff_is_classified_with_prior_and_no_tier_cache(proxy, classifier):
+    # A cached 'opus' tier for the opening turn would be inherited by the
+    # affirmation 'yes' (affirmation_inherited); unread, the replay is classified.
+    server = proxy(**ROUTED)
+    post(server, '/v1/messages', _create('hello'))
+    state = session_state(server)
+    assert state._routed_tier
+    for key in list(state._routed_tier):
+        state.set_routed_tier(key, 'opus')
+    before = dict(state._routed_tier)
+    classifier['calls'] = 0
+    classifier['priors'].clear()
+    post(server, '/v1/messages', _replay('yes'))
+    reason = db_rows(server)[0]['reason_code']
+    assert reason.startswith('affirmation_') and reason != 'affirmation_inherited'
+    assert _FakeUpstream.received[-1]['payload']['model'] != OPUS
+    post(server, '/v1/messages', _replay('hi'))
+    assert classifier['calls'] == 1
+    assert classifier['priors'] == [PRIOR]
+    assert dict(state._routed_tier) == before
+
+
+def test_replay_routing_failure_fails_closed_to_the_baseline(proxy, classifier):
+    server = proxy(**ROUTED, lock_requested_model='sonnet')
+    session_state(server).record_thread('msg_A', 'haiku', session_key=SESSION)
+    classifier['fail'] = True
+    post(server, '/v1/messages', _replay(DEEP_PROMPT, model='opus'))
+    assert classifier['calls'] == 1
+    assert _FakeUpstream.received[-1]['payload']['model'] == resolve_model('sonnet')
+    assert db_rows(server)[0]['classification'] is None
+
+
+def test_tool_result_replay_goes_to_the_last_thread_model(proxy, classifier):
+    server = proxy(**ROUTED)
+    session_state(server).record_thread('msg_A', 'haiku', session_key=SESSION)
+    post(server, '/v1/messages', _replay(TOOL_RESULT_DELTA[0]['content'], model='opus'))
+    assert _FakeUpstream.received[-1]['payload']['model'] == HAIKU
+    assert classifier['calls'] == 0
+    assert db_rows(server)[0]['reason_code'] == 'thread_replay_pinned'
+
+
+def test_tool_result_replay_with_no_last_thread_model_goes_to_the_baseline(proxy, classifier):
+    server = proxy(**ROUTED, lock_requested_model='sonnet')
+    post(server, '/v1/messages', _replay(TOOL_RESULT_DELTA[0]['content'], model='opus'))
+    assert _FakeUpstream.received[-1]['payload']['model'] == resolve_model('sonnet')
+    assert classifier['calls'] == 0
+    assert db_rows(server)[0]['reason_code'] == 'thread_replay_pinned'
+
+
+def test_continuation_400_then_replay_lands_on_the_new_model(proxy, classifier):
+    server = proxy(**ROUTED)
+    sent = _haiku_thread(server, classifier)
+    _post_400(server, _continue('msg_A', DEEP_PROMPT))
+    assert len(_FakeUpstream.received) == sent
+    post(server, '/v1/messages', _replay(DEEP_PROMPT, opening='hi'))
+    assert _FakeUpstream.received[-1]['payload']['model'] == OPUS
+    assert classifier['calls'] == 1
+    row = db_rows(server)[0]
+    assert row['reason_code'] == 'thread_reclassified_replay'
+    assert row['status'] == 'success'
+    assert session_state(server).peek_handoff(_key(DEEP_PROMPT)) is None
