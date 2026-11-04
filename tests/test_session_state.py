@@ -4,7 +4,11 @@ import hashlib
 
 import pytest
 
-from anthrouter.model_router import ModelRoutingDecision, _truncate_prior_response
+from anthrouter.model_router import (
+    _TRUNCATION_MARKER,
+    ModelRoutingDecision,
+    _truncate_prior_response,
+)
 from anthrouter.session_state import HANDOFF_TTL_SECONDS, MAX_ENTRIES, SessionState
 
 SESSION = 'session-a'
@@ -151,9 +155,12 @@ def test_stored_response_text_is_truncated_by_the_prior_response_rule(state):
 
 
 def test_stored_response_text_defaults_to_the_config_default_limit(state):
-    text = 'x' * 1500
+    text = 'h' * 750 + 't' * 750
     state.record_thread('msg_1', 'claude-opus', response_text=text)
-    assert state.thread_pin('msg_1').response_text == _truncate_prior_response(text, 1000)
+    stored = state.thread_pin('msg_1').response_text
+    assert len(stored) == 1000
+    assert stored.startswith('h') and stored.endswith('t')
+    assert _TRUNCATION_MARKER in stored
 
 
 @pytest.mark.parametrize('text', [None, ''])

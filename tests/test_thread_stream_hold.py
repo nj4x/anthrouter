@@ -137,7 +137,7 @@ def test_error_after_commit_stays_an_sse_error_event(proxy):
     assert _wait_for_row(server)['status'] == 'error'
 
 
-def test_client_disconnect_during_the_hold_writes_nothing_and_finishes(proxy, caplog):
+def test_client_disconnect_during_the_hold_writes_nothing_and_finishes(proxy):
     _FakeUpstream.response_delay = DELAY
     server = proxy(sse_keepalive_interval=0)
     host, port = server.server_address[:2]
