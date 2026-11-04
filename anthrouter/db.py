@@ -722,6 +722,8 @@ class RequestDB:
 
         A ``reclassified`` row is excluded: the client replays that turn as a
         new Thread, and the replay's own row counts it, so counting both would count one turn twice.
+        Its classifier overhead is therefore left out of the total too (ADR-0033
+        Decision 7).
         """
         row = self._read_conn().execute(
             """SELECT COUNT(*)                                    AS total,

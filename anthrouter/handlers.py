@@ -1449,8 +1449,9 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         raw_model = payload.get('model')
         requested = str(raw_model) if isinstance(raw_model, str) else repr(raw_model)
         floor = None
+        est = 0
         if config.auto_model_routing and is_model_auto_routable(raw_model):
-            _, floor = size_floor(payload, config, requested, session_floor, session_ratio,
+            est, floor = size_floor(payload, config, requested, session_floor, session_ratio,
                                   log_tag=self._log_tag(), ctx_key=ctx_key)
         key = self._final_text_key
         handoff = self.sessions.take_handoff(key) if key is not None else None
@@ -1461,10 +1462,17 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
             payload['model'] = handoff.model
             logger.info('%s Thread re-classification handoff: model=%s',
                         self._log_tag(), handoff.model)
+            # The handoff decision carries the continuation's delta-sized
+            # estimate; the calibration ratio must use this replay's own.
             return replace(handoff.decision, requested_model=requested,
                            routed_model=handoff.model,
                            applied=(handoff.model != requested),
                            reason_code='thread_reclassified_replay',
+                           estimated_input_tokens=est,
+                           predicted_input_tokens=max(round(est * session_ratio),
+                                                      session_floor),
+                           session_context_tokens=session_floor,
+                           session_estimate_ratio=session_ratio,
                            classifier_model=None, classifier_input_tokens=0,
                            classifier_output_tokens=0)
         if _is_tool_result_only(payload):
