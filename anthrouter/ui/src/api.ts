@@ -47,6 +47,8 @@ export interface RequestRow {
   system_prompt_score: number | null
   user_prompt_score: number | null
   routing_weighted_score: number | null
+  /** The Thread's own model on a `reclassified` row; `routed_model` holds the new one (ADR-0033). */
+  thread_model?: string | null
 }
 
 export interface RateLimit {

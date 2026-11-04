@@ -34,6 +34,23 @@ const EXPIRED_THREAD_ERROR = '404 — not_found_error (sent to client as 400)'
 const EXPIRED_THREAD_HINT = 'Upstream Thread not found, most likely expired (no request for more than 5 minutes). '
   + 'anthrouter sent it to the client as a 400 so the client replays the conversation. This is not a model fault.'
 
+/** Drawer text for the ADR-0033 Thread re-classification reason codes (Decision 8). */
+function threadReasonText(req: { reason_code: string | null, routed_model: string | null, thread_model?: string | null }): string | null {
+  switch (req.reason_code) {
+    case 'thread_reclassified': {
+      const next = req.routed_model ?? 'another model'
+      return `The new user prompt routes to ${next}, but this Thread runs on ${req.thread_model ?? 'another model'}. `
+        + `anthrouter asked the client to start a new Thread on ${next}. No upstream call was made.`
+    }
+    case 'thread_replay_pinned':
+      return 'Replay kept on the last Thread model: its final message had only tool results.'
+    case 'thread_reclassified_replay':
+      return 'Replay after a re-classification: routed to the model chosen for the earlier prompt.'
+    default:
+      return null
+  }
+}
+
 const PRE_CLASS = 'bg-slate-100 dark:bg-slate-800 p-3 rounded text-xs overflow-auto max-h-48 text-slate-800 dark:text-slate-200 whitespace-pre-wrap break-words'
 
 /**
@@ -202,6 +219,7 @@ export function RequestDetailDrawer({ requestId, onClose }: Props) {
                       {req.status === 'success' && <span className="bg-emerald-100 dark:bg-emerald-900 text-emerald-800 dark:text-emerald-200 px-2 py-0.5 rounded">Success</span>}
                       {req.status === 'rate_limited' && <span className="bg-amber-100 dark:bg-amber-900 text-amber-800 dark:text-amber-200 px-2 py-0.5 rounded">Rate Limited</span>}
                       {req.status === 'error' && <span className="bg-red-100 dark:bg-red-900 text-red-800 dark:text-red-200 px-2 py-0.5 rounded">Error</span>}
+                      {req.status === 'reclassified' && <span className="bg-sky-100 dark:bg-sky-900 text-sky-800 dark:text-sky-200 px-2 py-0.5 rounded">Reclassification</span>}
                     </dd>
                   </div>
                   <div className="flex justify-between items-start">
@@ -260,6 +278,12 @@ export function RequestDetailDrawer({ requestId, onClose }: Props) {
                     <div className="flex justify-between items-start">
                       <dt className="text-xs text-slate-600 dark:text-slate-400">Reason</dt>
                       <dd className="text-slate-900 dark:text-slate-200 text-xs font-mono">{req.reason_code}</dd>
+                    </div>
+                  )}
+                  {threadReasonText(req) && (
+                    <div className="flex justify-between items-start">
+                      <dt className="text-xs text-slate-600 dark:text-slate-400">Thread</dt>
+                      <dd className="text-slate-900 dark:text-slate-200 text-xs">{threadReasonText(req)}</dd>
                     </div>
                   )}
                   {(req.user_prompt_score != null || req.system_prompt_score != null) && (

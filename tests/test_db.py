@@ -57,8 +57,8 @@ def _record(store, **kwargs):
 # Schema
 # ---------------------------------------------------------------------------
 
-def test_schema_version_is_eight(db):
-    assert db._conn.execute('PRAGMA user_version').fetchone()[0] == 8
+def test_schema_version_is_nine(db):
+    assert db._conn.execute('PRAGMA user_version').fetchone()[0] == 9
 
 
 def _requests_columns(conn):
@@ -82,7 +82,7 @@ def test_version_3_db_gains_stop_reason_column_on_open(tmp_path):
 
     store = RequestDB(path)
     assert 'classifier_stop_reason' in _requests_columns(store._conn)
-    assert store._conn.execute('PRAGMA user_version').fetchone()[0] == 8
+    assert store._conn.execute('PRAGMA user_version').fetchone()[0] == 9
     store.close()
 
 
@@ -95,7 +95,7 @@ def test_migration_survives_column_already_present_at_version_3(tmp_path):
     _make_version_3_db(path, keep_column=True)
 
     store = RequestDB(path)
-    assert store._conn.execute('PRAGMA user_version').fetchone()[0] == 8
+    assert store._conn.execute('PRAGMA user_version').fetchone()[0] == 9
     assert 'classifier_stop_reason' in _requests_columns(store._conn)
     store.close()
 
@@ -334,7 +334,7 @@ def test_version_5_db_gains_dispatched_text_column(tmp_path):
 
     store = RequestDB(path)
     assert 'user_prompt_dispatched_text' in _requests_columns(store._conn)
-    assert store._conn.execute('PRAGMA user_version').fetchone()[0] == 8
+    assert store._conn.execute('PRAGMA user_version').fetchone()[0] == 9
     row = store.get_request(_record(store, user_prompt_dispatched_text='sent'))
     assert row['user_prompt_dispatched_text'] == 'sent'
     store.close()
@@ -350,7 +350,7 @@ def test_migration_5_survives_column_already_present(tmp_path):
     raw.close()
 
     store = RequestDB(path)
-    assert store._conn.execute('PRAGMA user_version').fetchone()[0] == 8
+    assert store._conn.execute('PRAGMA user_version').fetchone()[0] == 9
     store.close()
 
 
@@ -365,7 +365,7 @@ def test_version_6_db_gains_upstream_request_id_column(tmp_path):
 
     store = RequestDB(path)
     assert 'upstream_request_id' in _requests_columns(store._conn)
-    assert store._conn.execute('PRAGMA user_version').fetchone()[0] == 8
+    assert store._conn.execute('PRAGMA user_version').fetchone()[0] == 9
     row = store.get_request(_record(store, upstream_request_id='req_011CABC'))
     assert row['upstream_request_id'] == 'req_011CABC'
     store.close()
@@ -381,7 +381,7 @@ def test_migration_6_survives_column_already_present(tmp_path):
     raw.close()
 
     store = RequestDB(path)
-    assert store._conn.execute('PRAGMA user_version').fetchone()[0] == 8
+    assert store._conn.execute('PRAGMA user_version').fetchone()[0] == 9
     store.close()
 
 
@@ -474,7 +474,7 @@ def test_version_4_db_gains_caveman_column_and_triggers(tmp_path):
 
     store = RequestDB(path)
     assert 'system_prompt_caveman_sha256' in _requests_columns(store._conn)
-    assert store._conn.execute('PRAGMA user_version').fetchone()[0] == 8
+    assert store._conn.execute('PRAGMA user_version').fetchone()[0] == 9
     _record(store, system_prompt_caveman_sha256='ddd',
             prompt_store_entries={'ddd': ('system', 'rewritten')})
     assert store.get_prompt('ddd')['ref_count'] == 1
@@ -736,7 +736,7 @@ def test_version_7_db_gains_columns_and_triggers(tmp_path, through):
     columns = _requests_columns(store._conn)
     assert {'opening_system_sha256', 'opening_system_dispatched_sha256',
             'attribution_reminders_stripped'} <= columns
-    assert store._conn.execute('PRAGMA user_version').fetchone()[0] == 8
+    assert store._conn.execute('PRAGMA user_version').fetchone()[0] == 9
     request_id = _record(
         store, opening_system_sha256='eee', opening_system_dispatched_sha256='fff',
         attribution_reminders_stripped=2,
@@ -758,3 +758,145 @@ def test_retention_keeps_opening_system_content_a_live_row_references(db):
     row = db.get_request(request_id)
     assert row['opening_system_content'] == 'o'
     assert row['opening_system_dispatched_content'] == 'd'
+
+
+# ---------------------------------------------------------------------------
+# v8 -> v9: 'reclassified' status (ADR-0033 Decision 7)
+# ---------------------------------------------------------------------------
+
+def _make_version_8_db(path, rows=3):
+    """A v8 database built by migrations 0-7, with ``rows`` requests and one event."""
+    raw = sqlite3.connect(path)
+    for v in range(8):
+        _MIGRATIONS[v](raw)
+    raw.execute('PRAGMA user_version = 8')
+    raw.execute(
+        "INSERT INTO prompt_store (content_hash, content_type, content, char_count) "
+        "VALUES ('sss', 'system', 'be brief', 8)"
+    )
+    for i in range(rows):
+        raw.execute(
+            "INSERT INTO requests (session_id, requested_model, routed_model, status, "
+            "user_prompt_text, response_text, system_prompt_sha256, attribution_reminders_stripped) "
+            "VALUES (?, 'sonnet', 'haiku', ?, ?, 'done', 'sss', ?)",
+            (f'sess-{i}', 'error' if i == 0 else 'success', f'needle prompt {i}', i),
+        )
+    raw.execute(
+        "INSERT INTO sanitizer_events (request_id, block_type, is_allowlisted) "
+        "VALUES (1, 'cc_prompt_id', 1)"
+    )
+    raw.commit()
+    raw.close()
+
+
+def test_version_8_db_migrates_to_9_keeping_every_row(tmp_path):
+    path = str(tmp_path / 'v8.db')
+    _make_version_8_db(path)
+    raw = sqlite3.connect(path)
+    before = raw.execute('SELECT * FROM requests ORDER BY id').fetchall()
+    before_columns = [r[1] for r in raw.execute('PRAGMA table_info(requests)')]
+    raw.close()
+
+    store = RequestDB(path)
+    conn = store._conn
+    assert conn.execute('PRAGMA user_version').fetchone()[0] == 9
+    after_columns = [r[1] for r in conn.execute('PRAGMA table_info(requests)')]
+    assert after_columns == before_columns + ['thread_model']
+    after = [tuple(r)[:-1] for r in conn.execute('SELECT * FROM requests ORDER BY id')]
+    assert after == before
+    assert len(store.get_sanitizer_events(1)) == 1
+    assert len(store.get_requests(q='needle')) == 3
+    assert store.get_prompt('sss')['ref_count'] == 3
+    indexes = {r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'requests' "
+        "AND sql IS NOT NULL")}
+    assert indexes == {'ix_req_session', 'ix_req_ts', 'ix_req_session_ts',
+                       'ix_req_model_tier_ts', 'ix_req_ts_id'}
+    assert conn.execute('PRAGMA foreign_keys').fetchone()[0] == 1
+
+    request_id = _record(
+        store, status='reclassified', stats_dict={},
+        routing_decision=FakeDecision(reason_code='thread_reclassified', routed_model='sonnet',
+                                      classification='standard'),
+        thread_model='haiku', user_prompt_text='needle new',
+        system_prompt_sha256='sss',
+    )
+    row = store.get_request(request_id)
+    assert row['status'] == 'reclassified'
+    assert row['thread_model'] == 'haiku'
+    assert len(store.get_requests(q='needle')) == 4
+    assert store.get_prompt('sss')['ref_count'] == 4
+    with conn:
+        conn.execute('DELETE FROM requests WHERE id = 1')
+    assert store.get_sanitizer_events(1) == []
+    store.close()
+
+
+def test_failed_v9_migration_leaves_the_v8_table_intact(tmp_path, monkeypatch):
+    path = str(tmp_path / 'v8.db')
+    _make_version_8_db(path)
+
+    real_execute = sqlite3.Connection.execute
+    real_connect = sqlite3.connect
+
+    class Boom(sqlite3.Connection):
+        def execute(self, sql, *args):
+            if sql.startswith('ALTER TABLE requests_v9 RENAME'):
+                raise sqlite3.OperationalError('injected')
+            return real_execute(self, sql, *args)
+
+    monkeypatch.setattr(sqlite3, 'connect', lambda *a, **k: real_connect(*a, factory=Boom, **k))
+    with pytest.raises(sqlite3.OperationalError, match='injected'):
+        RequestDB(path)
+    monkeypatch.undo()
+
+    raw = sqlite3.connect(path)
+    assert raw.execute('PRAGMA user_version').fetchone()[0] == 8
+    assert raw.execute('SELECT COUNT(*) FROM requests').fetchone()[0] == 3
+    assert raw.execute('SELECT COUNT(*) FROM sanitizer_events').fetchone()[0] == 1
+    names = {r[0] for r in raw.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    assert 'requests_v9' not in names
+    raw.close()
+
+
+def test_fresh_db_accepts_reclassified_status(db):
+    request_id = _record(db, status='reclassified')
+    assert db.get_request(request_id)['status'] == 'reclassified'
+    table_sql = db._conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'requests'"
+    ).fetchone()[0]
+    assert "'reclassified'" in table_sql
+
+
+def test_reclassified_row_is_not_an_error_a_success_or_a_cost(db):
+    _record(db, status='success')
+    _record(db, status='error', stats_dict={})
+    baseline = db.get_stats()
+    baseline_routing = db.get_routing_summary()
+
+    request_id = _record(
+        db, status='reclassified', stats_dict=dict(STATS), net_savings_usd=0.5,
+        error='caller error', routing_decision=FakeDecision(reason_code='thread_reclassified'),
+    )
+    row = db.get_request(request_id)
+    assert row['error'] is None
+    assert row['cost_estimate'] == 0.0
+    assert row['net_savings_usd'] is None
+    assert row['cache_savings_usd'] is None
+
+    stats = db.get_stats()
+    assert stats['requests'] == baseline['requests'] + 1
+    assert stats['errors'] == baseline['errors'] == 1
+    assert stats['rate_limited'] == baseline['rate_limited'] == 0
+    assert stats['cost_estimate'] == baseline['cost_estimate']
+    assert stats['cache_savings_usd'] == baseline['cache_savings_usd']
+    assert db.get_routing_summary()['net_savings_usd'] == baseline_routing['net_savings_usd']
+    assert [r['status'] for r in db.get_requests()].count('success') == 1
+
+
+def test_routing_summary_does_not_count_a_reclassified_row(db):
+    _record(db, status='success')
+    baseline = db.get_routing_summary()
+    _record(db, status='reclassified', stats_dict={},
+            routing_decision=FakeDecision(reason_code='thread_reclassified'))
+    assert db.get_routing_summary() == baseline

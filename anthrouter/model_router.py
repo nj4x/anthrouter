@@ -363,8 +363,11 @@ ReasonCode = Literal[
     'missing_final_user_text',
     'override_no_classifier',
     'security_monitor_passthrough',  # ADR-0017: handler skips the lock and route_model()
-    'thread_pinned',                 # ADR-0027: handler pins a Thread continuation, skips route_model()
+    'thread_pinned',                 # ADR-0027/0033: Thread continuation sent on its Thread's model; classification set when re-classified to the same model
     'thread_pin_unknown',            # ADR-0027: continuation id not recorded; routing baseline
+    'thread_reclassified',           # ADR-0033: continuation prompt routes off the Thread's model; local 400, no upstream call
+    'thread_reclassified_replay',    # ADR-0033: replay took the re-classification handoff (or the size floor beat it)
+    'thread_replay_pinned',          # ADR-0033: tool-result-only replay, no handoff; session's last Thread model or baseline
     'size_forced_long_context',
     'session_cached_tier',
     'session_cached_tier_capped',
@@ -1646,6 +1649,69 @@ def _dispatch_classifier_mode(
 # Main routing entry point
 # ---------------------------------------------------------------------------
 
+def size_floor(
+    payload: dict,
+    config: Config,
+    requested: str,
+    session_context_tokens: int = 0,
+    session_estimate_ratio: float = 1.0,
+    log_tag: str = '',
+    ctx_key: str | None = None,
+) -> tuple[int, ModelRoutingDecision | None]:
+    """The long-context size floor alone: ``(estimated input tokens, decision or None)``.
+
+    ``route_model()`` runs it first; a Thread replay runs it before the handoff
+    check, with no classifier call (ADR-0033 Decision 5).  When it fires it sets
+    ``payload['model']`` to the long-context target and adds the ``context-1m``
+    beta.  The caller decides whether routing is on and the model is eligible.
+
+    When the estimated total request size is near the 200K window, force the
+    long-context tier so the only model that can serve the request is selected.
+    This outranks the classifier and the walk-back/cache paths and applies even
+    to text-less turns (a large tool_result-only turn still needs 1m).  The
+    estimate counts system+tools+history but is NEVER sent to the classifier,
+    so the bounded classifier-input invariant holds.
+    """
+    threshold = config.auto_model_routing_long_context_threshold
+    long_target = config.auto_model_routing_long  # model string or 'off'
+    try:
+        est_tokens = estimate_input_tokens(payload) if threshold > 0 else 0
+    except Exception:
+        # Malformed payload (e.g. non-list messages) — let build_routing_summary
+        # handle it and fail-closed; never crash the request on the floor.
+        est_tokens = 0
+    if threshold <= 0 or long_target == 'off':
+        return est_tokens, None
+    # The calibration-corrected estimate and the last measured session context
+    # size: the larger drives the decision.
+    corrected = round(est_tokens * session_estimate_ratio)
+    predicted = max(corrected, session_context_tokens)
+    if predicted < threshold:
+        return est_tokens, None
+    payload['model'] = long_target
+    _ensure_long_context_beta(payload)  # harmless for non-opus: Anthropic
+    # mapper's _supports_long_context gate strips context-1m for non-opus
+    logger.info(
+        '%s Model router: size floor forcing %s (requested=%s '
+        'predicted=%d threshold=%d est=%d ratio=%.2f session_floor=%d ctx=%s)',
+        log_tag, long_target, requested,
+        predicted, threshold, est_tokens, session_estimate_ratio,
+        session_context_tokens,
+        ctx_key.split('\x00', 1)[-1] if ctx_key else '--------',
+    )
+    return est_tokens, ModelRoutingDecision(
+        requested_model=requested,
+        routed_model=long_target,
+        classification=None,
+        applied=(long_target != requested),
+        reason_code='size_forced_long_context',
+        estimated_input_tokens=est_tokens,
+        predicted_input_tokens=predicted,
+        session_context_tokens=session_context_tokens,
+        session_estimate_ratio=session_estimate_ratio,
+    )
+
+
 def route_model(
     payload: dict,
     target: RoutingTarget,
@@ -1657,6 +1723,7 @@ def route_model(
     override_mode: str | None = None,
     ctx_key: str | None = None,
     baseline_model: str | None = None,
+    prior_response_summary: str | None = None,
 ) -> ModelRoutingDecision:
     """Classify the request and rewrite ``payload['model']`` in place.
 
@@ -1675,6 +1742,10 @@ def route_model(
     undercount).  The floor fires when
     ``max(round(estimate * ratio), session_context_tokens) >= threshold``.  Both
     default to the identity (``0`` / ``1.0``), reproducing the estimate-only floor.
+
+    A non-empty ``prior_response_summary`` replaces the one extracted from
+    ``payload['messages']``: a Thread continuation carries only its delta, so
+    its prior assistant text comes from the Thread map (ADR-0033 Decision 2).
 
     Returns a ``ModelRoutingDecision`` describing the outcome for logging.
     """
@@ -1731,50 +1802,12 @@ def route_model(
     # requested_model.  Fail-closed branches route to routing_baseline.
     requested = raw_model  # guaranteed str and non-empty by is_model_auto_routable
 
-    # --- Long-context size floor (deterministic, pre-classifier).  When the
-    # estimated total request size is near the 200K window, force the long-context
-    # opus tier and inject the context-1m beta so the only model that can serve the
-    # request is selected.  This outranks the classifier and the walk-back/cache
-    # paths and applies even to text-less continuation turns (a large tool_result-
-    # only turn still needs 1m).  The estimate counts system+tools+history but is
-    # NEVER sent to the classifier, so the bounded classifier-input invariant holds.
-    threshold = config.auto_model_routing_long_context_threshold
-    long_target = config.auto_model_routing_long  # model string or 'off'
-    floor_active = threshold > 0 and long_target != 'off'
-    try:
-        est_tokens = estimate_input_tokens(payload) if threshold > 0 else 0
-    except Exception:
-        # Malformed payload (e.g. non-list messages) — let build_routing_summary
-        # below handle it and fail-closed; never crash the request on the floor.
-        est_tokens = 0
-    if floor_active:
-        # Combine the per-request estimate (calibration-corrected) with the last
-        # measured session context size; the larger drives the decision.
-        corrected = round(est_tokens * session_estimate_ratio)
-        predicted = max(corrected, session_context_tokens)
-        if predicted >= threshold:
-            payload['model'] = long_target
-            _ensure_long_context_beta(payload)  # harmless for non-opus: Anthropic
-            # mapper's _supports_long_context gate strips context-1m for non-opus
-            logger.info(
-                '%s Model router: size floor forcing %s (requested=%s '
-                'predicted=%d threshold=%d est=%d ratio=%.2f session_floor=%d ctx=%s)',
-                log_tag, long_target, requested,
-                predicted, threshold, est_tokens, session_estimate_ratio,
-                session_context_tokens,
-                ctx_key.split('\x00', 1)[-1] if ctx_key else '--------',
-            )
-            return ModelRoutingDecision(
-                requested_model=requested,
-                routed_model=long_target,
-                classification=None,
-                applied=(long_target != requested),
-                reason_code='size_forced_long_context',
-                estimated_input_tokens=est_tokens,
-                predicted_input_tokens=predicted,
-                session_context_tokens=session_context_tokens,
-                session_estimate_ratio=session_estimate_ratio,
-            )
+    est_tokens, floor = size_floor(
+        payload, config, requested, session_context_tokens, session_estimate_ratio,
+        log_tag=log_tag, ctx_key=ctx_key,
+    )
+    if floor is not None:
+        return floor
 
     # --- Build routing summary
     summary = build_routing_summary(payload)
@@ -1849,9 +1882,10 @@ def route_model(
         config, 'auto_model_routing_prior_response_summary_limit', 1000
     )
     _messages_list = payload.get('messages') or []
-    prior_response_summary = _extract_prior_response_summary(
-        _messages_list, _prior_response_limit
-    )
+    if not prior_response_summary:
+        prior_response_summary = _extract_prior_response_summary(
+            _messages_list, _prior_response_limit
+        )
 
     # --- Short-affirmation continuation: a bare "yes"/"proceed"/"go ahead" as
     # THIS turn's own text carries no complexity signal — it greenlights work the

@@ -41,10 +41,28 @@ const STATUS_TONE: Record<string, string> = {
   success: 'bg-emerald-100 dark:bg-emerald-900 text-emerald-800 dark:text-emerald-200',
   error: 'bg-red-100 dark:bg-red-900 text-red-800 dark:text-red-200',
   rate_limited: 'bg-amber-100 dark:bg-amber-900 text-amber-800 dark:text-amber-200',
+  reclassified: 'bg-sky-100 dark:bg-sky-900 text-sky-800 dark:text-sky-200',
+}
+
+/** Badge text where it differs from the stored status: a local model-mismatch 400 is not an error (ADR-0033). */
+const STATUS_TEXT: Record<string, string> = {
+  reclassified: 'reclassification',
 }
 
 export function StatusBadge({ value }: { value: string }) {
-  return <Badge text={value} tone={STATUS_TONE[value] ?? 'bg-slate-700 text-slate-200'} />
+  return <Badge text={STATUS_TEXT[value] ?? value} tone={STATUS_TONE[value] ?? 'bg-slate-700 text-slate-200'} />
+}
+
+/** Request-list labels for the ADR-0033 replay reason codes; other codes get none. */
+const REASON_LABEL: Record<string, string> = {
+  thread_replay_pinned: 'replay pinned',
+  thread_reclassified_replay: 'reclassified replay',
+}
+
+export function ReasonLabel({ value }: { value: string | null }) {
+  const text = value ? REASON_LABEL[value] : undefined
+  if (!text) return null
+  return <Badge text={text} tone="bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300" />
 }
 
 export function Table({ headers, children }: { headers: string[]; children: ReactNode }) {

@@ -1,6 +1,6 @@
 """SQLite persistence for the anthrouter observability UI.
 
-Schema version: 8 (migrations 0-7, tracked via ``PRAGMA user_version``; this
+Schema version: 9 (migrations 0-8, tracked via ``PRAGMA user_version``; this
 schema is not ported from anthproxy's 13-migration history).  Three tables:
 
 ``requests``
@@ -22,6 +22,7 @@ connections over WAL.
 from __future__ import annotations
 
 import logging
+import re
 import sqlite3
 import threading
 import time
@@ -31,7 +32,7 @@ from .model_tier import classify_model_tier
 
 logger = logging.getLogger(__name__)
 
-_SCHEMA_VERSION = 8
+_SCHEMA_VERSION = 9
 
 _RETENTION_INTERVAL_SECS = 24 * 3600
 _RETENTION_CHUNK = 1000
@@ -286,6 +287,58 @@ def _apply_migration_7(conn: sqlite3.Connection) -> None:
     END""")
 
 
+_V8_STATUS_CHECK = "CHECK(status IN ('success','error','rate_limited'))"
+_V9_STATUS_CHECK = "CHECK(status IN ('success','error','rate_limited','reclassified'))"
+
+
+def _apply_migration_8(conn: sqlite3.Connection) -> None:
+    """Allow ``status='reclassified'`` and add ``thread_model`` (v8 → v9, ADR-0033).
+
+    SQLite cannot alter a CHECK, so ``requests`` is rebuilt from its own stored
+    ``CREATE`` text with only the status CHECK replaced: column order, every
+    column added by an earlier ``ALTER`` and the ``id`` values (the FTS rowids
+    and the ``sanitizer_events`` foreign keys) carry over unchanged.  Its
+    indexes and triggers go with the dropped table and are recreated from
+    their stored text.  Migration 0 keeps the v8 CHECK, so a fresh database
+    reaches v9 through this rebuild of its empty table.
+
+    The explicit ``BEGIN`` is load-bearing: the default sqlite3 isolation
+    autocommits DDL outside a transaction (see ``_apply_migration_3``), and
+    this one must be all-or-nothing so a failure leaves the v8 table intact.
+    ``ensure_schema`` turns foreign keys off first, or ``DROP TABLE`` would
+    cascade-delete every ``sanitizer_events`` row.
+
+    ``thread_model`` is the Thread's own model on a ``reclassified`` row, where
+    ``routed_model`` holds the new model; the drawer text needs both.
+    """
+    if not conn.in_transaction:
+        conn.execute('BEGIN')
+    table_sql = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'requests'"
+    ).fetchone()[0]
+    if _V9_STATUS_CHECK not in table_sql:
+        if _V8_STATUS_CHECK not in table_sql:
+            raise RuntimeError('requests.status CHECK has an unexpected form; cannot migrate to v9')
+        dependents = [
+            row[0] for row in conn.execute(
+                "SELECT sql FROM sqlite_master WHERE tbl_name = 'requests' "
+                "AND type IN ('index', 'trigger') AND sql IS NOT NULL"
+            )
+        ]
+        new_sql = re.sub(
+            r'^CREATE TABLE\s+"?requests"?', 'CREATE TABLE requests_v9', table_sql, count=1,
+        ).replace(_V8_STATUS_CHECK, _V9_STATUS_CHECK)
+        conn.execute(new_sql)
+        conn.execute('INSERT INTO requests_v9 SELECT * FROM requests')
+        conn.execute('DROP TABLE requests')
+        conn.execute('ALTER TABLE requests_v9 RENAME TO requests')
+        for sql in dependents:
+            conn.execute(sql)
+    columns = {row[1] for row in conn.execute('PRAGMA table_info(requests)')}
+    if 'thread_model' not in columns:
+        conn.execute('ALTER TABLE requests ADD COLUMN thread_model TEXT')
+
+
 _MIGRATIONS = {
     0: _apply_migration_0,
     1: _apply_migration_1,
@@ -295,16 +348,30 @@ _MIGRATIONS = {
     5: _apply_migration_5,
     6: _apply_migration_6,
     7: _apply_migration_7,
+    8: _apply_migration_8,
 }
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
-    """Apply pending schema migrations using PRAGMA user_version."""
+    """Apply pending schema migrations using PRAGMA user_version.
+
+    Foreign keys are off while migrations run, as SQLite's table-rebuild
+    procedure requires (``_apply_migration_8``); the pragma is a no-op inside
+    a transaction, so it is set here, before any migration opens one.
+    """
     current = conn.execute('PRAGMA user_version;').fetchone()[0]
-    for v in range(current, _SCHEMA_VERSION):
-        with conn:
-            _MIGRATIONS[v](conn)
-            conn.execute(f'PRAGMA user_version = {v + 1};')
+    if current >= _SCHEMA_VERSION:
+        return
+    foreign_keys = conn.execute('PRAGMA foreign_keys;').fetchone()[0]
+    conn.execute('PRAGMA foreign_keys=OFF;')
+    try:
+        for v in range(current, _SCHEMA_VERSION):
+            with conn:
+                _MIGRATIONS[v](conn)
+                conn.execute(f'PRAGMA user_version = {v + 1};')
+    finally:
+        if foreign_keys:
+            conn.execute('PRAGMA foreign_keys=ON;')
 
 
 # ---------------------------------------------------------------------------
@@ -403,6 +470,7 @@ class RequestDB:
         ratelimit: dict | None = None,
         net_savings_usd: float | None = None,
         classifier_overhead_usd: float | None = None,
+        thread_model: str | None = None,
     ) -> int:
         """Insert one request row; return its rowid, or -1 without a decision.
 
@@ -414,6 +482,12 @@ class RequestDB:
         and is written before the request row so the ref-count trigger sees the
         rows it must increment.  ``sanitizer_events`` holds dicts with
         ``block_type``, ``is_allowlisted`` and optional ``payload_preview``.
+
+        A ``status='reclassified'`` row is a local 400 with no upstream call
+        (ADR-0033 Decision 7): its ``cost_estimate`` is a known 0, never NULL,
+        and it saves nothing, so ``net_savings_usd`` and ``cache_savings_usd``
+        are NULL whatever the caller passed, and so is ``error``.  ``thread_model``
+        is the Thread's own model on that row.
         """
         if routing_decision is None:
             return -1
@@ -424,6 +498,12 @@ class RequestDB:
         applied = bool(routing_decision.applied)
         if not applied:
             net_savings_usd = None
+        cache_savings_usd = compute_cache_savings(routed_model, cache_read_tokens)
+        if status == 'reclassified':
+            cost_estimate = 0.0
+            net_savings_usd = None
+            cache_savings_usd = None
+            error = None
         rl = ratelimit or {}
 
         with self._lock, self._conn:
@@ -452,11 +532,11 @@ class RequestDB:
                     classifier_stop_reason, system_prompt_caveman_sha256,
                     user_prompt_dispatched_text, upstream_request_id,
                     opening_system_sha256, opening_system_dispatched_sha256,
-                    attribution_reminders_stripped
+                    attribution_reminders_stripped, thread_model
                 ) VALUES (
                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?
+                    ?, ?, ?, ?
                 )
                 """,
                 (
@@ -477,7 +557,7 @@ class RequestDB:
                     cost_estimate,
                     net_savings_usd,
                     classifier_overhead_usd,
-                    compute_cache_savings(routed_model, cache_read_tokens),
+                    cache_savings_usd,
                     _tier_from_model(routed_model),
                     attempt,
                     routing_decision.classifier_model,
@@ -504,6 +584,7 @@ class RequestDB:
                     opening_system_sha256,
                     opening_system_dispatched_sha256,
                     attribution_reminders_stripped,
+                    thread_model,
                 ),
             )
             request_id: int = cur.lastrowid
@@ -637,7 +718,13 @@ class RequestDB:
         return [dict(r) for r in rows]
 
     def get_routing_summary(self) -> dict:
-        """Counts and savings totals across every routed request."""
+        """Counts and savings totals across every routed request.
+
+        A ``reclassified`` row is excluded: the client replays that turn as a
+        new Thread, and the replay's own row counts it, so counting both would count one turn twice.
+        Its classifier overhead is therefore left out of the total too (ADR-0033
+        Decision 7).
+        """
         row = self._read_conn().execute(
             """SELECT COUNT(*)                                    AS total,
                       SUM(CASE WHEN applied = 1 THEN 1 ELSE 0 END) AS applied,
@@ -646,7 +733,8 @@ class RequestDB:
                       SUM(CASE WHEN classification = 'deep'     THEN 1 ELSE 0 END) AS deep,
                       SUM(net_savings_usd)         AS net_savings_usd,
                       SUM(classifier_overhead_usd) AS classifier_overhead_usd
-                 FROM requests"""
+                 FROM requests
+                WHERE status != 'reclassified'"""
         ).fetchone()
         return dict(row)
 

@@ -40,6 +40,7 @@ from .mapper import (
     anthropic_error_payload,
     sse_event,
 )
+from .model_config import resolve_model
 from .model_router import (
     _LONG_CONTEXT_BETA_PREFIX,
     _TRAILING_SCAN_LIMIT,
@@ -49,7 +50,9 @@ from .model_router import (
     _ensure_long_context_beta,
     _extract_user_text,
     calibrated_ratio,
+    is_model_auto_routable,
     route_model,
+    size_floor,
 )
 from .model_tier import classify_model_tier
 from .request_text import (
@@ -235,6 +238,88 @@ def _is_thread_continuation(payload: dict) -> bool:
         isinstance(thread, dict)
         and thread.get('type') != 'create'
         and isinstance(thread.get('previous_message_id'), str)
+    )
+
+
+THREAD_MODEL_MISMATCH_MESSAGE = (
+    'thread: the request does not match the stored Thread for the requested '
+    '`previous_message_id`; differing field(s): model. These fields must stay '
+    "the same across a Thread's turns; to change them, start a new Thread with "
+    '`thread: {"type": "create"}` and replay the conversation.'
+)
+"""Upstream's model-mismatch 400 text, sent verbatim by the local 400 (ADR-0033 Decision 4)."""
+
+
+def _final_message_content(payload: dict):
+    """``content`` of the last message when that message is a user turn, else ``None``."""
+    messages = payload.get('messages')
+    if not isinstance(messages, list) or not messages:
+        return None
+    last = messages[-1]
+    if not isinstance(last, dict) or last.get('role') != 'user':
+        return None
+    return last.get('content')
+
+
+def final_user_text(payload: dict) -> str | None:
+    """The final user message's ``text`` blocks joined with ``\\n``; ``None`` with no text block.
+
+    A string ``content`` is one block; non-text blocks are ignored.  Read it
+    from the payload as received: the sanitizer, the attribution-reminder
+    strip and the caveman rewrite all change the text the client will resend
+    (ADR-0033 Decision 5).
+    """
+    content = _final_message_content(payload)
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return None
+    texts = [b['text'] for b in content
+             if isinstance(b, dict) and b.get('type') == 'text' and isinstance(b.get('text'), str)]
+    return '\n'.join(texts) if texts else None
+
+
+def _handoff_key(sess_key: str | None, payload: dict) -> tuple[str, str] | None:
+    """Handoff store key ``(session key, SHA-256 hex of the final user text)`` (ADR-0033).
+
+    ``None`` when the request has no session key or no final user text: such a
+    request neither reads nor stores a handoff.
+    """
+    if sess_key is None:
+        return None
+    text = final_user_text(payload)
+    if text is None:
+        return None
+    return sess_key, hashlib.sha256(text.encode('utf-8')).hexdigest()
+
+
+def _same_model(a: str, b: str, config) -> bool:
+    """True when two model names resolve to the same upstream model id."""
+    if a == b:
+        return True
+    if not isinstance(a, str) or not isinstance(b, str) or not a or not b:
+        return False
+    aliases = getattr(config, 'model_aliases', None)
+    return resolve_model(a, aliases=aliases) == resolve_model(b, aliases=aliases)
+
+
+def _is_tool_result_only(payload: dict) -> bool:
+    """True when the final user message is a non-empty list of ``tool_result`` blocks only."""
+    content = _final_message_content(payload)
+    return (
+        isinstance(content, list) and bool(content)
+        and all(isinstance(b, dict) and b.get('type') == 'tool_result' for b in content)
+    )
+
+
+def _is_thread_replay(payload: dict) -> bool:
+    """True for a ``thread=create`` carrying one or more prior assistant messages (ADR-0033)."""
+    thread = payload.get('thread')
+    messages = payload.get('messages')
+    return (
+        isinstance(thread, dict) and thread.get('type') == 'create'
+        and isinstance(messages, list)
+        and any(isinstance(m, dict) and m.get('role') == 'assistant' for m in messages)
     )
 
 
@@ -1031,6 +1116,8 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         self._ctx_key = None
         self._route_est = 0
         self._routing = None
+        self._final_text_key = None
+        self._reclassified_from = None
         self._prompt_capture = {}
         self._sanitizer_events = []
         self._caveman_state = None
@@ -1078,6 +1165,9 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
                 if token and self.oauth_cache:
                     self.oauth_cache.get(token)
             self._prepare(payload, sess_key, credentials)
+            if self._reclassified_from is not None:
+                self._send_reclassified(sess_key)
+                return
             dispatched = True
             self._dispatch(payload, credentials, sess_key)
 
@@ -1107,7 +1197,12 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         from recording one.  The system prompt is also forwarded unsanitized: the
         client's ``x-anthropic-billing-header`` block is what marks the request as
         Claude Code's, and upstream rejects the request without it (ADR-0017).
+
+        ``_final_text_key`` (``_handoff_key()``) is taken first, from the payload as received (ADR-0033
+        Decision 5).  A re-classified continuation stops after the prompt
+        capture: it is answered locally, so nothing else is prepared.
         """
+        self._final_text_key = _handoff_key(sess_key, payload)
         monitor = _has_happy_new_year_system_prompt(payload)
         if monitor:
             self._routing = _security_monitor_passthrough(payload)
@@ -1118,6 +1213,8 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
             self._route(payload, sess_key, credentials)
 
         self._prompt_capture = self._extract_prompt_capture(payload)
+        if self._reclassified_from is not None:
+            return
         sanitized = SanitizeResult() if monitor else sanitize_system_prompt(
             payload, getattr(self.config, 'sanitize_system_prompt', 'off'), sess_key,
             log_tag=self._log_tag(),
@@ -1158,48 +1255,113 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
             )
             _capture_dispatched_user_text(self, payload, self._prompt_capture)
 
-    def _pin_thread(self, payload: dict) -> ModelRoutingDecision:
-        """Routing decision for a Thread continuation: no ``route_model()``, no tier cache.
+    def _route_continuation(
+        self, payload: dict, sess_key: str | None, credentials: dict,
+    ) -> ModelRoutingDecision:
+        """Routing decision for a Thread continuation: the ordered check of ADR-0033.
 
-        Upstream rejects any model change inside a Thread, so the recorded model
-        outranks the lock and the auto-routing flag.  ``thread_pinned`` is a
-        deliberate exception to ADR-0016: it can exceed the lock or baseline.
-        An id the map does not hold falls closed to the routing baseline
-        (ADR-0027).  A Thread whose recorded request carried a ``context-1m*``
-        beta gets it again: the pin skips the size floor, which is otherwise
-        the only place that adds it.
+        1. Pin not found: routing baseline, ``thread_pin_unknown`` (ADR-0027).
+        2. Final message holds only tool results, or 3. the Thread map entry has
+           the long-context flag: pinned, ``thread_pinned``, no classifier.
+           Both pin, so the code checks 3 before 2 with the same outcome.
+        4. A live handoff for ``_final_text_key``: the local 400 again, no classifier.
+        5. ``route_model()`` with no tier cache and no session context, and the
+           Thread's stored response text as ``prior_response_summary``.  A
+           decision with no classification fails closed to the Thread's model,
+           not the baseline: upstream rejects any other model on a
+           continuation.  That covers classifier failure and routing switched
+           off.  The size floor is the exception: it fires on the delta alone,
+           is a deterministic choice, not a failure, and is compared like a
+           classification.  The same model is pinned; another model sets
+           ``_reclassified_from`` (the local 400) and stores the handoff.
+
+        ``thread_pinned`` is a deliberate exception to ADR-0016: it can exceed
+        the lock or baseline.  A long-context Thread gets its ``context-1m*``
+        beta again: the pin skips the size floor, which otherwise adds it.
         """
         raw_model = payload.get('model')
         requested = str(raw_model) if isinstance(raw_model, str) else repr(raw_model)
-        lock = self.config.lock_requested_model
+        config = self.config
+        lock = config.lock_requested_model
         baseline = lock if lock != 'off' else requested
         pin = self.sessions.thread_pin(payload['thread']['previous_message_id'])
-        pinned = pin[0] if pin is not None else None
-        routed = pinned if pinned is not None else baseline
-        if pin is not None and pin[1]:
+        if pin is None:
+            # An unlocked turn keeps its own ``model`` untouched, so a missing or
+            # non-string one still fails upstream rather than becoming "None".
+            if lock != 'off':
+                payload['model'] = baseline
+            return ModelRoutingDecision(
+                requested_model=requested, routed_model=baseline, classification=None,
+                applied=(baseline != requested), reason_code='thread_pin_unknown',
+            )
+
+        pinned = pin.model
+
+        def _pin(decision: ModelRoutingDecision | None = None) -> ModelRoutingDecision:
+            payload['model'] = pinned
+            if decision is None:
+                decision = ModelRoutingDecision(
+                    requested_model=requested, routed_model=pinned,
+                    classification=None, applied=False, reason_code='thread_pinned',
+                )
+            return replace(decision, requested_model=requested, routed_model=pinned,
+                           applied=(pinned != requested), reason_code='thread_pinned')
+
+        if pin.long_context:
             _ensure_long_context_beta(payload)
-        # An unpinned, unlocked turn keeps its own ``model`` untouched, so a
-        # missing or non-string one still fails upstream rather than becoming
-        # the string "None".
-        if pinned is not None or lock != 'off':
-            payload['model'] = routed
-        return ModelRoutingDecision(
-            requested_model=requested,
-            routed_model=routed,
-            classification=None,
-            applied=(routed != requested),
-            reason_code='thread_pinned' if pinned is not None else 'thread_pin_unknown',
+            return _pin()
+        if _is_tool_result_only(payload):
+            return _pin()
+
+        key = self._final_text_key
+        handoff = self.sessions.peek_handoff(key) if key is not None else None
+        if handoff is not None:
+            self._reclassified_from = pinned
+            return replace(handoff.decision, requested_model=requested,
+                           routed_model=handoff.model,
+                           applied=(handoff.model != requested),
+                           reason_code='thread_reclassified',
+                           classifier_model=None, classifier_input_tokens=0,
+                           classifier_output_tokens=0)
+
+        routing_on = sess_key is not None and self.sessions.model_routing_enabled(sess_key)
+        if bool(config.auto_model_routing) != routing_on:
+            config = replace(config, auto_model_routing=routing_on)
+        decision = route_model(
+            payload, RoutingTarget(config=config, backend=self.transport), credentials,
+            cached_session_tier=None, session_context_tokens=0,
+            session_estimate_ratio=1.0, log_tag=self._log_tag(),
+            baseline_model=lock if lock != 'off' else None,
+            prior_response_summary=pin.response_text or None,
         )
+        if (decision.classification is None
+                and decision.reason_code != 'size_forced_long_context'):
+            return _pin(decision)
+        if _same_model(decision.routed_model, pinned, config):
+            return _pin(decision)
+        self._reclassified_from = pinned
+        if key is not None:
+            self.sessions.store_handoff(key, decision.routed_model, decision)
+        return replace(decision, reason_code='thread_reclassified')
 
     def _route(self, payload: dict, sess_key: str | None, credentials: dict) -> None:
-        """Pin a Thread continuation, else apply the model lock and run ``route_model()`` and the tier cache."""
+        """Route a Thread continuation by ``_route_continuation``, a replay by ``_route_replay``, else apply the model lock and run ``route_model()`` and the tier cache."""
         if _is_thread_continuation(payload):
-            routing = self._pin_thread(payload)
+            routing = self._route_continuation(payload, sess_key, credentials)
             self._routing = routing
+            if self._reclassified_from is not None:
+                logger.info(
+                    '%s Thread re-classified: %s -> %s (tier=%s); sent model-mismatch '
+                    '400 so the client opens a new Thread',
+                    self._log_tag(), self._reclassified_from, routing.routed_model,
+                    routing.classification,
+                )
+                return
             logger.info(
-                '%s Model routing: requested=%s routed=%s applied=%s reason=%s',
+                '%s Model routing: requested=%s routed=%s classification=%s '
+                'applied=%s reason=%s',
                 self._log_tag(), routing.requested_model, routing.routed_model,
-                routing.applied, routing.reason_code,
+                routing.classification, routing.applied, routing.reason_code,
             )
             return
 
@@ -1233,12 +1395,17 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         )
 
         target = RoutingTarget(config=config, backend=self.transport)
-        routing = route_model(
-            payload, target, credentials, cached_tier, session_floor, session_ratio,
-            log_tag=self._log_tag(), ctx_key=ctx_key, baseline_model=baseline_model,
-        )
-
-        routing = self._apply_tier_cache(routing, payload, tier_key, config)
+        if _is_thread_replay(payload):
+            routing = self._route_replay(
+                payload, sess_key, credentials, target, session_floor, session_ratio,
+                ctx_key, baseline_model,
+            )
+        else:
+            routing = route_model(
+                payload, target, credentials, cached_tier, session_floor, session_ratio,
+                log_tag=self._log_tag(), ctx_key=ctx_key, baseline_model=baseline_model,
+            )
+            routing = self._apply_tier_cache(routing, payload, tier_key, config)
 
         self._routing = routing
         self._ctx_key = ctx_key if floor_active else None
@@ -1255,6 +1422,73 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
                 routing.predicted_input_tokens, routing.session_context_tokens,
                 routing.session_estimate_ratio, routing.classifier_mode,
             )
+
+    def _route_replay(
+        self, payload: dict, sess_key: str | None, credentials: dict,
+        target: RoutingTarget, session_floor: int, session_ratio: float,
+        ctx_key: str | None, baseline_model: str | None,
+    ) -> ModelRoutingDecision:
+        """Routing decision for a Thread replay (ADR-0033 Decisions 5 and 6, Create Routing).
+
+        A replay neither reads nor writes the tier cache: its key comes from the
+        opening turn, which could send the replay back to the old tier.
+
+        1. The size floor (``size_floor()``, no classifier call) wins over a live
+           handoff.  A live handoff is still taken (deleted), and then the code
+           is ``thread_reclassified_replay``.
+        2. A live handoff for ``_final_text_key`` is taken: its model, with no
+           classifier and no affirmation handling.
+        3. Final message with only tool results: the session's last Thread
+           model, else the routing baseline; ``thread_replay_pinned``.
+        4. Otherwise ``route_model()`` with no cached tier, which classifies the
+           final prompt with the last prior assistant message and fails closed
+           to the routing baseline, not a Thread model: a replay creates a new
+           Thread, so no Thread model binds it.
+        """
+        config = target.config
+        raw_model = payload.get('model')
+        requested = str(raw_model) if isinstance(raw_model, str) else repr(raw_model)
+        floor = None
+        est = 0
+        if config.auto_model_routing and is_model_auto_routable(raw_model):
+            est, floor = size_floor(payload, config, requested, session_floor, session_ratio,
+                                  log_tag=self._log_tag(), ctx_key=ctx_key)
+        key = self._final_text_key
+        handoff = self.sessions.take_handoff(key) if key is not None else None
+        if floor is not None:
+            return (replace(floor, reason_code='thread_reclassified_replay')
+                    if handoff is not None else floor)
+        if handoff is not None:
+            payload['model'] = handoff.model
+            logger.info('%s Thread re-classification handoff: model=%s',
+                        self._log_tag(), handoff.model)
+            # The handoff decision carries the continuation's delta-sized
+            # estimate; the calibration ratio must use this replay's own.
+            return replace(handoff.decision, requested_model=requested,
+                           routed_model=handoff.model,
+                           applied=(handoff.model != requested),
+                           reason_code='thread_reclassified_replay',
+                           estimated_input_tokens=est,
+                           predicted_input_tokens=max(round(est * session_ratio),
+                                                      session_floor),
+                           session_context_tokens=session_floor,
+                           session_estimate_ratio=session_ratio,
+                           classifier_model=None, classifier_input_tokens=0,
+                           classifier_output_tokens=0)
+        if _is_tool_result_only(payload):
+            model = self.sessions.last_thread_model(sess_key) or baseline_model or requested
+            # An unlocked turn with no known Thread model keeps its own ``model``
+            # untouched, so a missing or non-string one still fails upstream.
+            if model != requested:
+                payload['model'] = model
+            return ModelRoutingDecision(
+                requested_model=requested, routed_model=model, classification=None,
+                applied=(model != requested), reason_code='thread_replay_pinned',
+            )
+        return route_model(
+            payload, target, credentials, None, session_floor, session_ratio,
+            log_tag=self._log_tag(), ctx_key=ctx_key, baseline_model=baseline_model,
+        )
 
     def _apply_tier_cache(
         self, routing, payload: dict, tier_key: tuple[str, str] | None, config,
@@ -1324,9 +1558,10 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
             )
             wrapped = self._usage_sse_wrapper(
                 sse_gen, start_time, model, sid, thread_model=thread_model,
-                long_context=long_context,
+                long_context=long_context, thread_session_key=sess_key,
             )
-            self._send_sse(self._rewrite_response_model_sse(wrapped))
+            self._send_sse(self._rewrite_response_model_sse(wrapped),
+                           hold='thread' in payload)
             return
 
         result = self.transport.send_message(
@@ -1335,8 +1570,13 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         )
         self.sessions.record_ratelimit(self._ratelimit)
         message_id = result.get('id')
+        response_text = _extract_response_text(result)
         if thread_model is not None and isinstance(message_id, str):
-            self.sessions.record_thread(message_id, thread_model, long_context)
+            self.sessions.record_thread(
+                message_id, thread_model, long_context, session_key=sess_key,
+                response_text=response_text,
+                response_text_limit=self.config.auto_model_routing_prior_response_summary_limit,
+            )
         usage = result.get('usage', {}) or {}
         stats = {
             'input_tokens': usage.get('input_tokens', 0),
@@ -1345,7 +1585,6 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
             'cache_read_tokens': usage.get('cache_read_input_tokens', 0),
         }
         self._record_session_context(stats)
-        response_text = _extract_response_text(result)
         self._record_caveman_prose(response_text)
         self._record_db(
             sid, stats, int((time.monotonic() - start_time) * 1000), 'success',
@@ -1370,7 +1609,8 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         return _wrapped()
 
     def _usage_sse_wrapper(self, sse_gen, start_time: float, model: str, sid: str,
-                           thread_model: str | None = None, long_context: bool = False):
+                           thread_model: str | None = None, long_context: bool = False,
+                           thread_session_key: str | None = None):
         """Yield SSE chunks, parsing usage, text, and errors in a single pass.
 
         ``thread_model`` is set only for a request that carried a ``thread``: the
@@ -1378,6 +1618,8 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         with no ``error`` event (ADR-0027), with ``long_context`` alongside.  The
         record lands before the ``message_stop`` chunk is yielded, so a client
         that continues the Thread the moment it sees the stop finds the pin.
+        The record carries the text accumulated so far and ``thread_session_key``
+        (ADR-0033); text is captured whenever a Thread is in play, DB or not.
         """
         stats = {
             'input_tokens': 0,
@@ -1385,7 +1627,8 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
             'cache_creation_tokens': 0,
             'cache_read_tokens': 0,
         }
-        capture_text = self.request_db is not None or bool(getattr(self, '_caveman_state', None))
+        capture_text = (thread_model is not None or self.request_db is not None
+                        or bool(getattr(self, '_caveman_state', None)))
         text_parts: list[str] = []
         errored = False
         thread_marks: dict = {'id': None, 'stopped': False, 'error': False}
@@ -1401,15 +1644,21 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         try:
             for chunk in sse_gen:
                 _extract_sse_stats(chunk, stats)
+                # Text first: a chunk can carry the last delta and message_stop together.
+                if capture_text:
+                    _extract_sse_text(chunk, text_parts)
                 if thread_model is not None and not thread_recorded:
                     _extract_sse_thread_marks(chunk, thread_marks)
                     if (thread_marks['stopped'] and not thread_marks['error']
                             and thread_marks['id'] is not None):
                         self.sessions.record_thread(
-                            thread_marks['id'], thread_model, long_context)
+                            thread_marks['id'], thread_model, long_context,
+                            session_key=thread_session_key,
+                            response_text=''.join(text_parts) or None,
+                            response_text_limit=(
+                                self.config.auto_model_routing_prior_response_summary_limit),
+                        )
                         thread_recorded = True
-                if capture_text:
-                    _extract_sse_text(chunk, text_parts)
                 if 'event: error' in line_tail + chunk:
                     errored = True
                 line_tail = chunk[-20:]
@@ -1525,8 +1774,23 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
 
         return requested_cost - routed_cost - classifier_overhead_usd, classifier_overhead_usd
 
+    def _send_reclassified(self, sess_key: str | None) -> None:
+        """Answer a re-classified continuation with upstream's model-mismatch 400 (ADR-0033).
+
+        No upstream call is made, so the response does not depend on the
+        streaming hold.  The row is ``status='reclassified'`` at cost 0.
+        """
+        self._record_db(
+            sess_key or UNTRACKED_SESSION_ID, {},
+            int((time.monotonic() - self._req_start) * 1000), 'reclassified',
+            thread_model=self._reclassified_from,
+        )
+        self._send_json(400, anthropic_error_payload(
+            'invalid_request_error', THREAD_MODEL_MISMATCH_MESSAGE))
+
     def _record_db(self, sid: str, stats: dict, duration_ms: int, status: str,
-                   error: str | None = None, response_text: str | None = None) -> None:
+                   error: str | None = None, response_text: str | None = None,
+                   thread_model: str | None = None) -> None:
         if self.request_db is None or self._routing is None:
             return
         try:
@@ -1545,6 +1809,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
                 upstream_request_id=self._attempt.get('upstream_request_id'),
                 net_savings_usd=net_savings_usd,
                 classifier_overhead_usd=classifier_overhead_usd,
+                thread_model=thread_model,
                 **self._prompt_capture,
             )
         except Exception:
@@ -1850,13 +2115,16 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         except _CLIENT_DISCONNECT:
             logger.info('%s client disconnected before response', self._log_tag())
 
-    def _prime_sse_with_keepalive(self, generator, req_start):
+    def _prime_sse_with_keepalive(self, generator, req_start, commit=None):
         """Prime the first chunk, sending keepalive comments while waiting.
 
-        Headers are already committed, so a slow upstream would otherwise leave
-        the socket idle for the whole TTFB.  Returns ``(first_chunk, error)``;
-        an ``AnthropicRequestError`` raised while priming is returned rather than
-        propagated, because it must be delivered in-band as SSE.
+        A slow upstream would otherwise leave the socket idle for the whole
+        TTFB.  Returns ``(first_chunk, error, disconnected)``: any exception
+        raised while priming is returned rather than propagated, because the
+        caller alone knows whether the status line is already committed.
+        *commit*, when given, writes the held status line and runs once,
+        just before the first keepalive (ADR-0032).  ``disconnected`` means
+        the client went away during the wait; the caller writes nothing more.
 
         The background thread only reads from *generator*; the main thread only
         writes keepalives.  After ``primed.set()`` the thread has exited and the
@@ -1865,11 +2133,11 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         interval = getattr(self.config, 'sse_keepalive_interval', 0)
         if not isinstance(interval, (int, float)) or interval <= 0:
             try:
-                return next(generator), None
+                return next(generator), None, False
             except StopIteration:
-                return None, None
-            except AnthropicRequestError as exc:
-                return None, exc
+                return None, None, False
+            except Exception as exc:
+                return None, exc, False
 
         first_chunk = [None]
         priming_error = [None]
@@ -1880,7 +2148,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
                 first_chunk[0] = next(generator)
             except StopIteration:
                 pass
-            except AnthropicRequestError as exc:
+            except Exception as exc:
                 priming_error[0] = exc
             finally:
                 primed.set()
@@ -1888,8 +2156,12 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         threading.Thread(target=_prime, daemon=True, name='sse-prime').start()
 
         keepalive_count = 0
+        disconnected = False
         while not primed.wait(timeout=interval):
             try:
+                if commit is not None:
+                    pending_commit, commit = commit, None
+                    pending_commit()
                 self.wfile.write(b': keepalive\n\n')
                 self.wfile.flush()
                 keepalive_count += 1
@@ -1897,10 +2169,12 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
                 logger.info('%s client disconnected during SSE keepalive '
                             '(keepalives_sent=%d)', self._log_tag(), keepalive_count)
                 primed.wait()  # never abandon the priming thread
+                disconnected = True
                 break
             except Exception as exc:
                 logger.warning('%s SSE keepalive write error: %s', self._log_tag(), exc)
                 primed.wait()
+                disconnected = True
                 break
 
         if keepalive_count:
@@ -1908,7 +2182,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
             logger.info('%s SSE keepalive complete (keepalives_sent=%d ttfb=%.2fs)',
                         self._log_tag(), keepalive_count, elapsed)
 
-        return first_chunk[0], priming_error[0]
+        return first_chunk[0], priming_error[0], disconnected
 
     def _send_sse_error(self, exc: AnthropicRequestError) -> None:
         frame = sse_event('error', anthropic_error_payload(exc.error_type, exc.message))
@@ -1920,31 +2194,61 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         except Exception:
             logger.debug('%s error sending SSE error event', self._log_tag(), exc_info=True)
 
-    def _send_sse(self, generator):
-        """Stream an SSE response, committing HTTP 200 before priming upstream.
+    def _send_sse_headers(self) -> None:
+        self.send_response(200)
+        self.send_header('Content-Type', 'text/event-stream')
+        self.send_header('Cache-Control', 'no-cache')
+        self.send_header('X-Accel-Buffering', 'no')
+        self.end_headers()
 
-        Because the status line is already sent, a pre-stream upstream failure is
-        delivered as an in-band SSE error event rather than an HTTP status.
+    def _send_sse(self, generator, hold: bool = False):
+        """Stream an SSE response, with one of two commit modes.
+
+        Commit first (``hold`` false, ADR-0026): HTTP 200 goes out before the
+        upstream is primed, so a pre-stream upstream failure can only be an
+        in-band SSE error event.
+
+        Hold (``hold`` true, ADR-0032; the body has a ``thread`` field): the
+        status line waits for the first upstream chunk, the first keepalive,
+        or an empty end of stream.  A failure before that goes out through
+        the non-streaming error responses (``_send_error``, or 502
+        ``api_error``), so an expired-Thread 400 reaches the client as an HTTP
+        400.  The ``requests`` row is recorded by the stream wrapper either way.
         """
         req_start = getattr(self, '_req_start', None)
         chunks_sent = 0
+        committed = False
+
+        def commit():
+            nonlocal committed
+            # Set first: a commit that fails on a broken pipe must not be retried.
+            committed = True
+            self._send_sse_headers()
+
         try:
             # The header commit is inside the try: on a cancelled request
             # end_headers is where the broken pipe first surfaces.
-            self.send_response(200)
-            self.send_header('Content-Type', 'text/event-stream')
-            self.send_header('Cache-Control', 'no-cache')
-            self.send_header('X-Accel-Buffering', 'no')
-            self.end_headers()
+            if not hold:
+                commit()
 
-            first_chunk, priming_error = self._prime_sse_with_keepalive(
-                generator, req_start)
+            first_chunk, priming_error, disconnected = self._prime_sse_with_keepalive(
+                generator, req_start, commit=None if committed else commit)
+            if disconnected:
+                return
             if priming_error is not None:
-                logger.warning('%s SSE priming error (post-header): %s',
-                               self._log_tag(), priming_error)
-                self._send_sse_error(priming_error)
+                if not committed:
+                    self._send_held_error(priming_error)
+                elif isinstance(priming_error, AnthropicRequestError):
+                    logger.warning('%s SSE priming error (post-header): %s',
+                                   self._log_tag(), priming_error)
+                    self._send_sse_error(priming_error)
+                else:
+                    logger.error('%s SSE priming failure after headers committed: %s',
+                                 self._log_tag(), priming_error)
                 return
 
+            if not committed:
+                commit()
             if first_chunk is not None:
                 self._write_chunk(first_chunk)
                 chunks_sent += 1
@@ -1971,6 +2275,22 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
                 except Exception:
                     logger.debug('%s error closing SSE generator',
                                  self._log_tag(), exc_info=True)
+
+    def _send_held_error(self, exc: Exception) -> None:
+        """Send a failure raised before a held SSE status line as a real HTTP status.
+
+        Same responses as the non-streaming error path in ``do_POST``; no
+        ``requests`` row is written here, because the stream wrapper already
+        recorded it.
+        """
+        if isinstance(exc, AnthropicRequestError):
+            logger.warning('%s SSE priming error before headers committed '
+                           '(sent as HTTP %d): %s', self._log_tag(), exc.status_code, exc)
+            self._send_error(exc)
+            return
+        logger.error('%s SSE priming failure before headers committed '
+                     '(sent as HTTP 502): %s', self._log_tag(), exc)
+        self._send_json(502, anthropic_error_payload('api_error', 'Upstream request failed'))
 
     def _write_chunk(self, chunk: str) -> None:
         self.wfile.write(chunk.encode('utf-8'))

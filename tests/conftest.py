@@ -2,6 +2,7 @@
 
 import json
 import threading
+import time
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -56,6 +57,14 @@ class _FakeUpstream(BaseHTTPRequestHandler):
     stream_error = False
     # Text of the stream's single ``text_delta``, JSON-escaped into SSE_BODY.
     stream_text = 'hello'
+    # Seconds to wait before the status line, so the first chunk (or the error
+    # status) comes late.
+    response_delay = 0.0
+    # Stream: answer 200 with an empty SSE body.
+    stream_zero_chunks = False
+    # Stream: answer 200 with a malformed chunked body, so reading the first
+    # chunk fails with an error that is not an upstream HTTP status.
+    stream_malformed = False
 
     def _next_id(self):
         ids = type(self).message_ids
@@ -69,6 +78,8 @@ class _FakeUpstream(BaseHTTPRequestHandler):
             'payload': payload,
             'headers': {k.lower(): v for k, v in self.headers.items()},
         })
+        if type(self).response_delay:
+            time.sleep(type(self).response_delay)
 
         if type(self).status != 200:
             cls = type(self)
@@ -99,7 +110,15 @@ class _FakeUpstream(BaseHTTPRequestHandler):
                 text = text.replace('"text":"hello"', f'"text":{json.dumps(cls.stream_text)}', 1)
             if cls.stream_error:
                 text = text.split('event: content_block_delta', 1)[0] + STREAM_ERROR_BODY
-            data = text.encode()
+            if cls.stream_malformed:
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/event-stream')
+                self.send_header('Transfer-Encoding', 'chunked')
+                self.end_headers()
+                self.wfile.write(b'not-a-chunk-size\r\n')
+                self.close_connection = True
+                return
+            data = b'' if cls.stream_zero_chunks else text.encode()
             self.send_response(200)
             self.send_header('Content-Type', 'text/event-stream')
             self.send_header('Content-Length', str(len(data)))
@@ -144,6 +163,9 @@ def upstream():
     _FakeUpstream.message_ids = []
     _FakeUpstream.stream_error = False
     _FakeUpstream.stream_text = 'hello'
+    _FakeUpstream.response_delay = 0.0
+    _FakeUpstream.stream_zero_chunks = False
+    _FakeUpstream.stream_malformed = False
     _FakeUpstream.json_body = {
         'id': 'msg_up', 'type': 'message', 'role': 'assistant',
         'content': [{'type': 'text', 'text': 'hi there'}],
@@ -196,3 +218,13 @@ def post(server, path, payload, headers=None, raw=False):
 
 def db_rows(server):
     return server.RequestHandlerClass.request_db.get_requests(limit=10)
+
+
+def session_state(server):
+    """The live proxy's ``SessionState``, for state the HTTP seam cannot see."""
+    return server.RequestHandlerClass.sessions
+
+
+def set_session_clock(server, clock):
+    """Swap the clock that times handoff expiry on the live proxy (ADR-0033)."""
+    session_state(server).clock = clock

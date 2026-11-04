@@ -8,7 +8,13 @@ import pytest
 
 from anthrouter.model_config import resolve_model
 from anthrouter.session_state import MAX_ENTRIES, SessionState
-from tests.conftest import SESSION, _FakeUpstream, db_rows, post
+from tests.conftest import (
+    SESSION,
+    _FakeUpstream,
+    db_rows,
+    post,
+    session_state,
+)
 
 HAIKU = resolve_model('haiku')
 OPUS = resolve_model('opus')
@@ -81,7 +87,7 @@ def test_thread_map_evicts_oldest_first_and_is_keyed_by_id():
     for i in range(MAX_ENTRIES + 5):
         state.record_thread(f'msg_{i}', 'haiku')
     assert state.thread_pin('msg_0') is None
-    assert state.thread_pin(f'msg_{MAX_ENTRIES + 4}') == ('haiku', False)
+    assert state.thread_pin(f'msg_{MAX_ENTRIES + 4}') == ('haiku', False, None)
     assert state.thread_pin('absent') is None
 
 
@@ -348,3 +354,54 @@ def test_unknown_unlocked_continuation_without_a_model_fails_locally(proxy):
         post(server, '/v1/messages', payload)
     assert caught.value.code == 400
     assert _FakeUpstream.received == []
+
+
+LONG_REPLY = 'head ' * 40 + 'middle ' * 40 + 'tail ' * 40
+
+
+@pytest.mark.parametrize('stream', [False, True])
+def test_thread_turn_records_truncated_text_and_last_thread_model(proxy, stream):
+    server = proxy(**ROUTED, auto_model_routing_prior_response_summary_limit=100)
+    _FakeUpstream.message_ids = ['msg_R']
+    _FakeUpstream.stream_text = LONG_REPLY
+    _FakeUpstream.json_body['content'] = [{'type': 'text', 'text': LONG_REPLY}]
+    post(server, '/v1/messages', _create(stream=stream), raw=stream)
+
+    state = session_state(server)
+    pin = state.thread_pin('msg_R')
+    assert pin.model == 'haiku'
+    text = pin.response_text
+    assert len(text) <= 100
+    assert text.startswith('head ') and text.rstrip().endswith('tail')
+    assert '[truncated]' in text and 'middle' not in text
+    assert state.last_thread_model(SESSION) == 'haiku'
+
+
+@pytest.mark.parametrize('stream', [False, True])
+def test_thread_turn_records_text_without_a_db(proxy, stream):
+    server = proxy(**ROUTED, db_path=None)
+    _FakeUpstream.message_ids = ['msg_R']
+    post(server, '/v1/messages', _create(stream=stream), raw=stream)
+    expected = 'hello' if stream else 'hi there'
+    assert session_state(server).thread_pin('msg_R').response_text == expected
+
+
+def test_pinned_continuation_updates_the_last_thread_model(proxy):
+    server = proxy(**ROUTED)
+    _FakeUpstream.message_ids = ['msg_A', 'msg_B']
+    post(server, '/v1/messages', _create())
+    post(server, '/v1/messages', _continue('msg_A', model='opus'))
+    state = session_state(server)
+    assert state.thread_pin('msg_B').model == 'haiku'
+    assert state.last_thread_model(SESSION) == 'haiku'
+
+
+def test_thread_turn_without_a_session_key_records_no_last_thread_model(proxy):
+    server = proxy(**ROUTED)
+    _FakeUpstream.message_ids = ['msg_N']
+    payload = _create()
+    del payload['metadata']
+    post(server, '/v1/messages', payload)
+    state = session_state(server)
+    assert state.thread_pin('msg_N').model == 'haiku'
+    assert state.last_thread_model(None) is None
