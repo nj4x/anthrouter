@@ -196,3 +196,13 @@ def post(server, path, payload, headers=None, raw=False):
 
 def db_rows(server):
     return server.RequestHandlerClass.request_db.get_requests(limit=10)
+
+
+def session_state(server):
+    """The live proxy's ``SessionState``, for state the HTTP seam cannot see."""
+    return server.RequestHandlerClass.sessions
+
+
+def set_session_clock(server, clock):
+    """Swap the clock that times handoff expiry on the live proxy (ADR-0033)."""
+    session_state(server).clock = clock

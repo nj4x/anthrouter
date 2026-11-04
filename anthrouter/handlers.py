@@ -1174,9 +1174,9 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         lock = self.config.lock_requested_model
         baseline = lock if lock != 'off' else requested
         pin = self.sessions.thread_pin(payload['thread']['previous_message_id'])
-        pinned = pin[0] if pin is not None else None
+        pinned = pin.model if pin is not None else None
         routed = pinned if pinned is not None else baseline
-        if pin is not None and pin[1]:
+        if pin is not None and pin.long_context:
             _ensure_long_context_beta(payload)
         # An unpinned, unlocked turn keeps its own ``model`` untouched, so a
         # missing or non-string one still fails upstream rather than becoming
@@ -1324,7 +1324,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
             )
             wrapped = self._usage_sse_wrapper(
                 sse_gen, start_time, model, sid, thread_model=thread_model,
-                long_context=long_context,
+                long_context=long_context, thread_session_key=sess_key,
             )
             self._send_sse(self._rewrite_response_model_sse(wrapped))
             return
@@ -1335,8 +1335,13 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         )
         self.sessions.record_ratelimit(self._ratelimit)
         message_id = result.get('id')
+        response_text = _extract_response_text(result)
         if thread_model is not None and isinstance(message_id, str):
-            self.sessions.record_thread(message_id, thread_model, long_context)
+            self.sessions.record_thread(
+                message_id, thread_model, long_context, session_key=sess_key,
+                response_text=response_text,
+                response_text_limit=self.config.auto_model_routing_prior_response_summary_limit,
+            )
         usage = result.get('usage', {}) or {}
         stats = {
             'input_tokens': usage.get('input_tokens', 0),
@@ -1345,7 +1350,6 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
             'cache_read_tokens': usage.get('cache_read_input_tokens', 0),
         }
         self._record_session_context(stats)
-        response_text = _extract_response_text(result)
         self._record_caveman_prose(response_text)
         self._record_db(
             sid, stats, int((time.monotonic() - start_time) * 1000), 'success',
@@ -1370,7 +1374,8 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         return _wrapped()
 
     def _usage_sse_wrapper(self, sse_gen, start_time: float, model: str, sid: str,
-                           thread_model: str | None = None, long_context: bool = False):
+                           thread_model: str | None = None, long_context: bool = False,
+                           thread_session_key: str | None = None):
         """Yield SSE chunks, parsing usage, text, and errors in a single pass.
 
         ``thread_model`` is set only for a request that carried a ``thread``: the
@@ -1378,6 +1383,8 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         with no ``error`` event (ADR-0027), with ``long_context`` alongside.  The
         record lands before the ``message_stop`` chunk is yielded, so a client
         that continues the Thread the moment it sees the stop finds the pin.
+        The record carries the text accumulated so far and ``thread_session_key``
+        (ADR-0033); text is captured whenever a Thread is in play, DB or not.
         """
         stats = {
             'input_tokens': 0,
@@ -1385,7 +1392,8 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
             'cache_creation_tokens': 0,
             'cache_read_tokens': 0,
         }
-        capture_text = self.request_db is not None or bool(getattr(self, '_caveman_state', None))
+        capture_text = (thread_model is not None or self.request_db is not None
+                        or bool(getattr(self, '_caveman_state', None)))
         text_parts: list[str] = []
         errored = False
         thread_marks: dict = {'id': None, 'stopped': False, 'error': False}
@@ -1401,15 +1409,21 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         try:
             for chunk in sse_gen:
                 _extract_sse_stats(chunk, stats)
+                # Text first: a chunk can carry the last delta and message_stop together.
+                if capture_text:
+                    _extract_sse_text(chunk, text_parts)
                 if thread_model is not None and not thread_recorded:
                     _extract_sse_thread_marks(chunk, thread_marks)
                     if (thread_marks['stopped'] and not thread_marks['error']
                             and thread_marks['id'] is not None):
                         self.sessions.record_thread(
-                            thread_marks['id'], thread_model, long_context)
+                            thread_marks['id'], thread_model, long_context,
+                            session_key=thread_session_key,
+                            response_text=''.join(text_parts) or None,
+                            response_text_limit=(
+                                self.config.auto_model_routing_prior_response_summary_limit),
+                        )
                         thread_recorded = True
-                if capture_text:
-                    _extract_sse_text(chunk, text_parts)
                 if 'event: error' in line_tail + chunk:
                     errored = True
                 line_tail = chunk[-20:]
