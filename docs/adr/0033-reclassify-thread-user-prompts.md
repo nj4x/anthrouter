@@ -75,6 +75,8 @@ Facts that shape the decision:
    - `status='reclassified'`, a new value. Schema migration v8 to v9 rebuilds `requests` to add it to the `status` CHECK.
    - `reason_code='thread_reclassified'`, a new `ReasonCode`.
    - `routed_model` = the new model, `classification` = the new tier, `error` = NULL, cost = 0.
+   - `thread_model` = the Thread's own model, in a new nullable column added by the same migration. The drawer text (Decision 8) names both models, and `routed_model` holds only the new one.
+   - The row keeps its classifier overhead, but `get_routing_summary` excludes `reclassified` rows, so that overhead is not in the summary total. This is accepted: the replay row counts the turn once, and the overhead is about $0.002 per re-classification.
 
    A local 400 sent from a live handoff to a retry of the same continuation (Decision 5) is recorded the same way: `status='reclassified'`, `reason_code='thread_reclassified'`.
 

@@ -371,6 +371,19 @@ def test_size_floor_wins_over_a_live_handoff(proxy, classifier):
     assert state.thread_pin('msg_R').long_context is True
 
 
+def test_handoff_replay_records_its_own_size_estimate_not_the_continuations(proxy, classifier):
+    server = proxy(**ROUTED, auto_model_routing_long='opus[1m]',
+                   auto_model_routing_long_context_threshold=1_000_000)
+    session_state(server).store_handoff(_key('hi'), 'sonnet', ModelRoutingDecision(
+        requested_model='sonnet', routed_model='sonnet', classification='standard',
+        applied=False, reason_code='classifier_rules_standard',
+        estimated_input_tokens=2500))
+    post(server, '/v1/messages', _replay('hi', opening='word ' * 20000))
+    row = db_rows(server)[0]
+    assert row['reason_code'] == 'thread_reclassified_replay'
+    assert row['estimated_input_tokens'] > 2500 * 2
+
+
 def test_create_without_prior_assistant_keeps_the_tier_cache_and_the_handoff(proxy, classifier):
     server = proxy(**ROUTED)
     _store(server, 'hi')

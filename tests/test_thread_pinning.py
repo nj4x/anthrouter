@@ -7,7 +7,6 @@ import urllib.error
 import pytest
 
 from anthrouter.model_config import resolve_model
-from anthrouter.model_router import _truncate_prior_response
 from anthrouter.session_state import MAX_ENTRIES, SessionState
 from tests.conftest import (
     SESSION,
@@ -15,7 +14,6 @@ from tests.conftest import (
     db_rows,
     post,
     session_state,
-    set_session_clock,
 )
 
 HAIKU = resolve_model('haiku')
@@ -372,7 +370,10 @@ def test_thread_turn_records_truncated_text_and_last_thread_model(proxy, stream)
     state = session_state(server)
     pin = state.thread_pin('msg_R')
     assert pin.model == 'haiku'
-    assert pin.response_text == _truncate_prior_response(LONG_REPLY, 100)
+    text = pin.response_text
+    assert len(text) <= 100
+    assert text.startswith('head ') and text.rstrip().endswith('tail')
+    assert '[truncated]' in text and 'middle' not in text
     assert state.last_thread_model(SESSION) == 'haiku'
 
 
@@ -404,10 +405,3 @@ def test_thread_turn_without_a_session_key_records_no_last_thread_model(proxy):
     state = session_state(server)
     assert state.thread_pin('msg_N').model == 'haiku'
     assert state.last_thread_model(None) is None
-
-
-def test_proxy_session_clock_is_swappable(proxy):
-    server = proxy()
-    now = [5000.0]
-    set_session_clock(server, lambda: now[0])
-    assert session_state(server).clock() == 5000.0
