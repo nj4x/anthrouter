@@ -3,7 +3,7 @@ import useSWR from 'swr'
 
 import type { RequestRow, RequestsResponse } from '../api'
 import { fetchJson } from '../api'
-import { Empty, LoadState, Pager, Panel, StatusBadge, Table } from '../components'
+import { Empty, LoadState, Pager, Panel, ReasonLabel, StatusBadge, Table } from '../components'
 import { RequestDetailDrawer } from '../components/RequestDetailDrawer'
 import { count, duration, modelLabel, sessionLabel, timestamp, usd } from '../format'
 
@@ -70,7 +70,12 @@ function Row({ row, onSelect }: { row: RequestRow; onSelect: () => void }) {
           <span className="ml-1 text-emerald-400">as {modelLabel(row.routed_model)}</span>
         )}
       </td>
-      <td className="px-3 py-2"><StatusBadge value={row.status} /></td>
+      <td className="px-3 py-2">
+        <span className="inline-flex flex-wrap gap-1">
+          <StatusBadge value={row.status} />
+          <ReasonLabel value={row.reason_code} />
+        </span>
+      </td>
       <td className="px-3 py-2 text-slate-700 dark:text-slate-300">
         {count(row.input_tokens)} in / {count(row.output_tokens)} out
       </td>

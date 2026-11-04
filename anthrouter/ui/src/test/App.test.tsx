@@ -1,8 +1,10 @@
 import { render, screen, waitFor } from '@testing-library/react'
+import { SWRConfig } from 'swr'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { App } from '../App'
 import { modelLabel, sessionLabel, usd } from '../format'
+import { Requests } from '../views/Requests'
 
 const REQUEST = {
   id: 1,
@@ -173,5 +175,30 @@ describe('App', () => {
     expect(screen.queryByText(REQUEST.system_prompt_content)).not.toBeInTheDocument()
     expect(screen.getByText(/"role": "system"/)).toBeInTheDocument()
     expect(screen.getByText(/"cc_prompt_id": "0d1f2e3a"/)).toBeInTheDocument()
+  })
+})
+
+describe('Request list Thread re-classification (ADR-0033)', () => {
+  it('shows the reclassification badge and the two replay labels', async () => {
+    const original = ROUTES['/admin/requests']
+    ROUTES['/admin/requests'] = {
+      requests: [
+        { ...REQUEST, id: 1, status: 'reclassified', reason_code: 'thread_reclassified', user_prompt_text: 'p1' },
+        { ...REQUEST, id: 2, reason_code: 'thread_replay_pinned', user_prompt_text: 'p2' },
+        { ...REQUEST, id: 3, reason_code: 'thread_reclassified_replay', user_prompt_text: 'p3' },
+      ],
+      limit: 50, offset: 0, q: null,
+    }
+    try {
+      render(<SWRConfig value={{ provider: () => new Map() }}><Requests /></SWRConfig>)
+      expect(await screen.findByText('reclassification')).toBeInTheDocument()
+      expect(screen.queryByText('reclassified')).not.toBeInTheDocument()
+      expect(screen.queryByText('error')).not.toBeInTheDocument()
+      expect(screen.getByText('replay pinned')).toBeInTheDocument()
+      expect(screen.getByText('reclassified replay')).toBeInTheDocument()
+      expect(screen.getAllByText('success')).toHaveLength(2)
+    } finally {
+      ROUTES['/admin/requests'] = original
+    }
   })
 })
