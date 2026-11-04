@@ -1250,13 +1250,17 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         1. Pin not found: routing baseline, ``thread_pin_unknown`` (ADR-0027).
         2. Final message holds only tool results, or 3. the Thread map entry has
            the long-context flag: pinned, ``thread_pinned``, no classifier.
+           Both pin, so the code checks 3 before 2 with the same outcome.
         4. A live handoff for ``_final_text_key``: the local 400 again, no classifier.
         5. ``route_model()`` with no tier cache and no session context, and the
            Thread's stored response text as ``prior_response_summary``.  A
-           routing failure (no classification, no size floor) fails closed to
-           the Thread's model, not the baseline: upstream rejects any other
-           model on a continuation.  The same model is pinned; another model
-           sets ``_reclassified_from`` (the local 400) and stores the handoff.
+           decision with no classification fails closed to the Thread's model,
+           not the baseline: upstream rejects any other model on a
+           continuation.  That covers classifier failure and routing switched
+           off.  The size floor is the exception: it fires on the delta alone,
+           is a deterministic choice, not a failure, and is compared like a
+           classification.  The same model is pinned; another model sets
+           ``_reclassified_from`` (the local 400) and stores the handoff.
 
         ``thread_pinned`` is a deliberate exception to ADR-0016: it can exceed
         the lock or baseline.  A long-context Thread gets its ``context-1m*``
