@@ -3,7 +3,7 @@ artifact-type: adr
 lineage-rules: root
 ---
 
-**Status**: Accepted
+**Status**: Approved
 
 # Record tool calls and skill usage in a `tool_calls` table
 
